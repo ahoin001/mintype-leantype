@@ -66,6 +66,28 @@ public enum TextBoundary {
         return max(count, 1)
     }
 
+    /// How many characters to lift so the word touching the cursor comes off the page.
+    /// `prefix` is taken from the end of the text before the cursor, `suffix` from the start
+    /// of the text after it. In the space between words, that is the word just finished,
+    /// including the space the cursor is sitting in.
+    public static func pickupRange(before: String?, after: String?) -> (prefix: Int, suffix: Int) {
+        let before = before ?? ""
+        let after = after ?? ""
+        if before.last.map({ characterClass(of: $0) == .word }) == true {
+            let prefix = currentWord(before: before).count
+            let suffix = after.prefix { characterClass(of: $0) == .word }.count
+            return (prefix, suffix)
+        }
+        let gap = before.reversed().prefix { $0.isWhitespace }.count
+        let earlier = String(before.dropLast(gap))
+        let previous = currentWord(before: earlier)
+        if !previous.isEmpty {
+            return (previous.count + gap, 0)
+        }
+        let suffix = after.prefix { characterClass(of: $0) == .word }.count
+        return (0, suffix)
+    }
+
     /// The word being typed: the run of letters (and apostrophes) right before the cursor.
     public static func currentWord(before: String?) -> Substring {
         guard let before else { return "" }

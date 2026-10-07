@@ -142,7 +142,9 @@ final class SwipeSession: InteractionSession {
     /// stroke. One that is still on its key is a single letter in the same word.
     func joinCurrentGesture() {
         guard case let .tapping(tap) = phase, tap.canRelinquish else { return }
-        if hasBecomeStroke(latest) {
+        // A slide along the shortcut row is choosing an accent, not drawing a stroke.
+        // The other thumb's word still gets the letter that was pressed.
+        if !tap.isShowingAlternates, hasBecomeStroke(latest) {
             beginStroke(from: tap, track: latest)
             return
         }
@@ -157,7 +159,7 @@ final class SwipeSession: InteractionSession {
     /// A short downward dip on the starting key stays a flick. Anything sideways, off the key,
     /// or long enough to be a word becomes a stroke immediately.
     private func shouldUpgrade(_ tap: CharacterTapSession, track: TouchTrack) -> Bool {
-        guard tap.canRelinquish, Self.canStroke(on: origin, context: context) else { return false }
+        guard tap.canRelinquish, !tap.isShowingAlternates, Self.canStroke(on: origin, context: context) else { return false }
         return hasBecomeStroke(track)
     }
 

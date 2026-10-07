@@ -20,6 +20,73 @@ struct QualityOfLifeTests {
         #expect(harness.text == marks[selected])
     }
 
+    @Test func periodAfterAWordHopsAndTheNextLetterIsCapital() {
+        let harness = EngineHarness()
+        harness.type("hi")
+        harness.tap(.character("."))
+        #expect(harness.text == "Hi. ")
+        harness.tap(.character("a"))
+        #expect(harness.text == "Hi. A")
+    }
+
+    @Test func slidingThePeriodKeyInsertsAComma() throws {
+        let harness = EngineHarness(traits: Self.plain)
+        harness.type("hi")
+        let origin = harness.point(for: ".")
+        let id = harness.down(at: origin)
+        harness.move(id, by: CGVector(dx: -(CharacterTapSession.markSlideDistance + 2), dy: 0), over: 0.06, steps: 2)
+        guard case let .alternates(marks, _) = harness.state.interaction.callout?.content else {
+            Issue.record("Sliding the period key should open marks")
+            return
+        }
+        #expect(marks == [".", ",", "?", "!"])
+        let comma = try #require(marks.firstIndex(of: ","))
+        let frame = try #require(harness.state.interaction.callout?.layout.optionFrames[comma])
+        harness.move(id, to: CGPoint(x: frame.midX, y: origin.y), over: 0.05)
+        harness.up(id)
+        #expect(harness.text == "hi, ")
+    }
+
+    @Test func apostropheStaysInsideTheWord() {
+        let harness = EngineHarness(traits: Self.plain)
+        harness.type("don")
+        harness.tap(.character("'"))
+        harness.tap(.character("t"))
+        #expect(harness.text == "don't")
+        harness.tap(.backspace)
+        #expect(harness.text.isEmpty)
+    }
+
+    @Test func flickUpLiftsTheWordAndDeletePutsItBack() {
+        let harness = EngineHarness(text: "hello", traits: Self.plain)
+        flickUp(on: harness)
+        #expect(harness.text.isEmpty)
+        #expect(harness.state.candidates.candidates.first == Candidate("hello", role: .picked))
+        #expect(harness.state.candidates.highlightedIndex == nil)
+        harness.tap(.backspace)
+        #expect(harness.text == "hello")
+    }
+
+    @Test func typingReplacesAPickedUpWord() {
+        let harness = EngineHarness(text: "hello", traits: Self.plain)
+        flickUp(on: harness)
+        harness.tap(.character("a"))
+        #expect(harness.text == "a")
+        harness.tap(.backspace)
+        #expect(harness.text.isEmpty)
+    }
+
+    @Test func flickingUpAgainRestoresTheWord() {
+        let harness = EngineHarness(text: "hello world", traits: Self.plain)
+        for _ in 0..<("world".count) {
+            harness.engine.perform(.moveCursor(-1))
+        }
+        flickUp(on: harness)
+        #expect(harness.text == "world")
+        flickUp(on: harness)
+        #expect(harness.text == "hello world")
+    }
+
     @Test func aTapOnSpaceStillInsertsASpace() {
         let harness = EngineHarness(traits: Self.plain)
         harness.tap(.space)
@@ -128,6 +195,12 @@ struct QualityOfLifeTests {
     }
 
     // MARK: - Helpers
+
+    private func flickUp(on harness: EngineHarness) {
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: 0, dy: -(CharacterTapSession.flickDistance + 6)), over: 0.08)
+        harness.up(id)
+    }
 
     /// Presses 123, slides to `symbol`, and lifts.
     private func slide(_ harness: EngineHarness, toSymbol symbol: String) {

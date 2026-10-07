@@ -118,16 +118,14 @@ struct StrokeBuffer {
         return total
     }
 
-    /// Drops the part of the stroke the finger has backed away from, and forgets letters that
-    /// were only on that tail.
+    /// Drops the part of the stroke the finger has backed away from, so the shape match sees
+    /// the shorter path. The letters already entered stay: a return through them is read later
+    /// as the keys the thumb aimed at, not erased.
     private mutating func rewind(to finger: StrokePoint) {
         while points.count > 1 {
             let last = points[points.count - 1].location
             if hypot(last.x - finger.location.x, last.y - finger.location.y) <= Self.retreatStep { break }
             points.removeLast()
-        }
-        if let endTime = points.last?.time {
-            arrivals.removeAll { $0.time > endTime }
         }
         push(finger)
     }
@@ -148,22 +146,26 @@ struct StrokeBuffer {
 public struct SwipeGesture: Hashable, Sendable {
     public let path: [CGPoint]
     public let strokeCount: Int
-    /// Distinct letters the fingers actually entered, in arrival order. Used when decoding
-    /// finds nothing, so the gesture still types.
+    /// Letters the thumbs aimed at, in arrival order, with a return trip already removed.
+    /// Used when decoding finds nothing, so the gesture still types what was meant.
     public let tracedLetters: String
-    /// Each letter a thumb entered, with the time and the direction of travel into it.
+    /// Each letter a thumb aimed at, with the time and the direction of travel into it.
     public let observations: [StrokeObservation]
+    /// A stroke ended on the apostrophe, so the contraction spelling should lead.
+    public let prefersContraction: Bool
 
     public init(
         path: [CGPoint],
         strokeCount: Int,
         tracedLetters: String = "",
-        observations: [StrokeObservation] = []
+        observations: [StrokeObservation] = [],
+        prefersContraction: Bool = false
     ) {
         self.path = path
         self.strokeCount = strokeCount
         self.tracedLetters = tracedLetters
         self.observations = observations
+        self.prefersContraction = prefersContraction
     }
 
     public var isMultiStroke: Bool { strokeCount > 1 }

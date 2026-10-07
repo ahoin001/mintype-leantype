@@ -15,6 +15,8 @@ final class WordAssistant {
         case swap(String)
         /// Put back the word autocorrect replaced.
         case revert
+        /// Type a word that was lifted off the page.
+        case insert(String)
     }
 
     var language: LanguageModel?
@@ -33,7 +35,13 @@ final class WordAssistant {
     private var swipeReadings: [String] = []
     /// Set while a finger is still drawing; cleared when the swipe commits or is cancelled.
     private var preview: DecodeResult?
+    /// The word that just ended. Stays on the strip, unhighlighted, until the next letter.
+    private var settledWord: String?
+    /// A word lifted off the page, shown until it is replaced or put back.
+    private var pickedUpWord: String?
     private var cached: (key: CacheKey, state: CandidateState)?
+
+    var hasPickedUpWord: Bool { pickedUpWord != nil }
 
     private struct CacheKey: Equatable {
         let word: Substring
@@ -41,6 +49,7 @@ final class WordAssistant {
         let commit: TextEditor.RecentCommit?
         let readings: [String]
         let autocorrects: Bool
+        let settled: String?
     }
 
     init(editor: TextEditor) {
@@ -56,6 +65,7 @@ final class WordAssistant {
     // MARK: - Tracking the current word
 
     func noteLetter(at point: CGPoint?, time: Double) {
+        clearSettled()
         releaseLiteralIfStale()
         if editor.currentWord.count <= 1 {
             touches = []
@@ -81,6 +91,7 @@ final class WordAssistant {
     }
 
     func noteContextChanged() {
+        clearSettled()
         releaseLiteralIfStale()
         if editor.currentWord.isEmpty {
             touches = []
@@ -144,14 +155,18 @@ final class WordAssistant {
         if keptWord == word {
             keptWord = nil
             language.learn(word)
+            settle(word)
             return false
         }
         keptWord = nil
         let analysis = language.analyze(word, touches: touches, layout: letterLayout, completionLimit: 0)
         if autocorrects, let correction = analysis.correction, correction != word {
-            return editor.replaceCurrentWord(with: correction, kind: .corrected, trailing: trailing)
+            let replaced = editor.replaceCurrentWord(with: correction, kind: .corrected, trailing: trailing)
+            if replaced { settle(correction) }
+            return replaced
         }
         language.learn(word)
+        settle(word)
         return false
     }
 
@@ -172,6 +187,25 @@ final class WordAssistant {
         preview = nil
         touches = []
         touchTimes = []
+        settledWord = nil
+        cached = nil
+    }
+
+    /// The word that just finished stays on the strip until the next letter.
+    func noteSettled(_ word: String) {
+        settle(word)
+    }
+
+    /// `word` was lifted off the page and should fill the strip until it is replaced or restored.
+    func notePickedUp(_ word: String) {
+        pickedUpWord = word
+        settledWord = nil
+        cached = nil
+    }
+
+    func clearPickedUp() {
+        guard pickedUpWord != nil else { return }
+        pickedUpWord = nil
         cached = nil
     }
 
@@ -197,6 +231,9 @@ final class WordAssistant {
             // Close calls get no pill, so the preview never looks like the word a space will lock in.
             return CandidateState(shown, highlightedIndex: preview.isUnsure ? nil : 0, isTentative: true)
         }
+        if pickedUpWord != nil {
+            return pickedUpCandidates()
+        }
         // Search and URL fields hide suggestions, but a finished swipe still offers its other readings.
         if !suggests, let commit = editor.recentCommit, commit.kind == .swiped,
            !TextBoundary.continuesWord(after: editor.contextAfter) {
@@ -214,7 +251,8 @@ final class WordAssistant {
             touchCount: touches?.count,
             commit: editor.recentCommit,
             readings: swipeReadings,
-            autocorrects: autocorrects
+            autocorrects: autocorrects,
+            settled: settledWord
         )
         if let cached, cached.key == key { return cached.state }
         let state = makeCandidates(key, language: language)
@@ -242,6 +280,10 @@ final class WordAssistant {
             return .swap(candidate.text)
         case .revert:
             return .revert
+        case .settled:
+            return nil
+        case .picked:
+            return .insert(candidate.text)
         }
     }
 
@@ -262,12 +304,12 @@ final class WordAssistant {
             case .corrected:
                 return CandidateState([Candidate(commit.original, role: .revert)])
             case .completed:
-                return .empty
+                return settledCandidate()
             }
         }
 
         let word = String(key.word)
-        guard !word.isEmpty, word.count <= 24 else { return .empty }
+        guard !word.isEmpty, word.count <= 24 else { return settledCandidate() }
         let analysis = language.analyze(word, touches: touches, layout: letterLayout)
         var candidates = [Candidate(word, role: .typed)]
         var highlighted: Int?
@@ -277,5 +319,37 @@ final class WordAssistant {
         }
         candidates += analysis.completions.map { Candidate($0, role: .completion) }
         return CandidateState(candidates, highlightedIndex: highlighted)
+    }
+
+    private func settle(_ word: String) {
+        guard !word.isEmpty else { return }
+        settledWord = word
+        cached = nil
+    }
+
+    private func clearSettled() {
+        guard settledWord != nil else { return }
+        settledWord = nil
+        cached = nil
+    }
+
+    private func settledCandidate() -> CandidateState {
+        guard let settledWord else { return .empty }
+        return CandidateState([Candidate(settledWord, role: .settled)])
+    }
+
+    /// The lifted word, and a correction when one exists. Nothing is highlighted, so a space
+    /// does not type it; a tap does.
+    private func pickedUpCandidates() -> CandidateState {
+        guard let pickedUpWord else { return .empty }
+        var candidates = [Candidate(pickedUpWord, role: .picked)]
+        if let language {
+            let analysis = language.analyze(pickedUpWord, touches: nil, layout: letterLayout, completionLimit: 0)
+            if let correction = analysis.correction,
+               correction.compare(pickedUpWord, options: .caseInsensitive) != .orderedSame {
+                candidates.append(Candidate(correction, role: .picked))
+            }
+        }
+        return CandidateState(candidates)
     }
 }

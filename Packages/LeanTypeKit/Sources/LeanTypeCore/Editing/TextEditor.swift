@@ -266,6 +266,28 @@ public final class TextEditor {
         return true
     }
 
+    /// Removes the word touching the cursor and returns the exact text that came off, plus the
+    /// word itself with surrounding spaces trimmed. `nil` when there is no word there.
+    public func pickUpWordTouchingCursor() -> (removed: String, word: String)? {
+        let before = document.contextBefore ?? ""
+        let after = document.contextAfter ?? ""
+        let range = TextBoundary.pickupRange(before: before, after: after)
+        guard range.prefix > 0 || range.suffix > 0 else { return nil }
+        let prefix = String(before.suffix(range.prefix))
+        let suffix = String(after.prefix(range.suffix))
+        let removed = prefix + suffix
+        let word = removed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty else { return nil }
+        forgetEverything()
+        if !suffix.isEmpty {
+            document.adjustCursor(byUTF16Offset: suffix.utf16.count)
+        }
+        for _ in removed {
+            document.deleteBackward()
+        }
+        return (removed, word)
+    }
+
     // MARK: - Memory bookkeeping
 
     private var hasSelection: Bool {

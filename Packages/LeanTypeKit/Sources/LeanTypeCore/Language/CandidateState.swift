@@ -11,6 +11,10 @@ public struct Candidate: Hashable, Sendable {
         case alternative
         /// The word as typed before autocorrect changed it.
         case revert
+        /// A word that already ended. Shown so it can be trained; tapping it does not type it again.
+        case settled
+        /// A word lifted off the page. Tapping it, or another reading, types that word.
+        case picked
     }
 
     public let text: String

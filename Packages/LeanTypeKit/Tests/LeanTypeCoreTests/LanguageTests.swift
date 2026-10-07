@@ -176,6 +176,9 @@ struct PersonalLexiconTests {
         let pinned = personal.remember("zorbly", at: Date())
         #expect(pinned)
         #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeSuggesting)
+        let again = personal.remember("zorbly", at: Date())
+        #expect(again)
+        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeSuggesting + 1)
         #expect(personal.entries(logCountRange: 0...10).map(\.display) == ["zorbly"])
         let forgotten = personal.forget("Zorbly")
         #expect(forgotten)
@@ -256,6 +259,22 @@ struct EngineLanguageTests {
         harness.engine.acceptCandidate(index)
         #expect(harness.text == "keyboard ")
         #expect(harness.recorder.events.contains(.wordCommitted(.suggestion)))
+        #expect(harness.state.candidates.candidates.first == Candidate("keyboard", role: .settled))
+        #expect(harness.state.candidates.highlightedIndex == nil)
+        harness.engine.acceptCandidate(0)
+        #expect(harness.text == "keyboard ")
+    }
+
+    @Test func aFinishedWordStaysOnTheStripUntilTheNextLetter() {
+        let (harness, _) = makeHarness()
+        harness.type("hello ")
+        #expect(harness.state.candidates.candidates == [Candidate("hello", role: .settled)])
+        #expect(harness.state.candidates.highlightedIndex == nil)
+        harness.engine.acceptCandidate(0)
+        #expect(harness.text == "hello ")
+        harness.tap(.character("a"))
+        #expect(!harness.state.candidates.candidates.contains { $0.role == .settled })
+        #expect(harness.text == "hello a")
     }
 
     @Test func keepingTheTypedWordSkipsCorrection() {

@@ -19,6 +19,23 @@ struct LayoutTests {
         }
     }
 
+    @Test func letterRowFlanksSpaceWithApostropheAndPeriod() throws {
+        let layout = LayoutProvider.layout(for: .letters, context: LayoutContext())
+        let keys = layout.rows[3].keys
+        let space = try #require(keys.firstIndex { $0.kind == .space })
+        #expect(keys[space - 1].kind == .character("'"))
+        #expect(keys[space + 1].kind == .character("."))
+        #expect(keys[space - 1].widthUnits == 0.85)
+        #expect(keys[space + 1].widthUnits == 0.85)
+
+        let email = LayoutProvider.layout(for: .letters, context: LayoutContext(variant: .email))
+        #expect(email.rows[3].keys.compactMap(\.kind.character) == ["@", "."])
+        let url = LayoutProvider.layout(for: .letters, context: LayoutContext(variant: .url))
+        let urlMarks = url.rows[3].keys.compactMap(\.kind.character)
+        #expect(urlMarks == ["/", "."])
+        #expect(urlMarks.filter { $0 == "." }.count == 1)
+    }
+
     @Test func emailLayoutAddsAtAndDot() {
         let layout = LayoutProvider.layout(for: .letters, context: LayoutContext(variant: .email))
         let bottom = layout.rows[3].keys.compactMap(\.kind.character)

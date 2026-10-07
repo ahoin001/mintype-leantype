@@ -88,12 +88,25 @@ public enum LayoutProvider {
         case (.letters, .url): [characterKey("/", layer), characterKey(".", layer)]
         default: []
         }
+        // Apostrophe and period flank the space bar on the plain letter keyboard. Email and
+        // web layouts already add their own extra keys, including a period.
+        let flank: (left: [KeySpec], right: [KeySpec]) = if layer == .letters, context.variant == .standard {
+            (
+                [characterKey("'", layer, width: sideMarkWidth)],
+                [characterKey(".", layer, width: sideMarkWidth)]
+            )
+        } else {
+            ([], [])
+        }
 
         let returnKey = KeySpec.function(.returnKey, name: "return", on: layer, width: 2.25)
-        let usedUnits = (leading + extras + [returnKey]).reduce(0) { $0 + $1.widthUnits }
+        let usedUnits = (leading + flank.left + flank.right + extras + [returnKey]).reduce(0) { $0 + $1.widthUnits }
         let space = KeySpec.function(.space, name: "space", on: layer, width: rowUnits - usedUnits)
-        return KeyRow(keys: leading + [space] + extras + [returnKey])
+        return KeyRow(keys: leading + flank.left + [space] + flank.right + extras + [returnKey])
     }
+
+    /// Narrow enough that the space bar can still be a trackpad.
+    private static let sideMarkWidth: CGFloat = 0.85
 
     private static func characterKey(_ value: String, _ layer: KeyboardLayer, width: CGFloat = 1) -> KeySpec {
         .character(

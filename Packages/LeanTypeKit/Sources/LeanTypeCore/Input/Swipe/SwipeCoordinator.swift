@@ -202,7 +202,8 @@ final class SwipeCoordinator {
         }
     }
 
-    /// The decoded word, or the letters the fingers actually crossed when nothing matched.
+    /// The decoded word, or the letters the thumbs aimed at when nothing matched.
+    /// A return trip is already gone from those letters, so it cannot be typed.
     private func commit(_ result: DecodeResult, gesture: SwipeGesture, ticket: InputComposer.Ticket) {
         if !result.isEmpty {
             composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount, observations: gesture.observations)])

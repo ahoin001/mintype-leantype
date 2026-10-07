@@ -28,6 +28,7 @@ final class SpaceSession: InteractionSession {
         case pressed
         case trackpad
         case punctuation(layout: CalloutLayout, selected: Int)
+        case pickUp
         case finished
     }
 
@@ -65,6 +66,7 @@ final class SpaceSession: InteractionSession {
                     content: .alternates(Self.punctuationMarks, selectedIndex: selected)
                 )
             )
+        case .pickUp: SessionPresentation(pressedKey: key.id)
         case .finished: .none
         }
     }
@@ -79,21 +81,26 @@ final class SpaceSession: InteractionSession {
         switch phase {
         case .pressed:
             let move = track.translation
-            if abs(move.dx) >= Self.activationDistance {
-                enterTrackpad()
-                lastX = track.current.location.x
-                return
-            }
             if move.dy >= CharacterTapSession.flickDistance,
                move.dy >= abs(move.dx) * CharacterTapSession.flickVerticality {
                 enterPunctuation(at: track)
+                return
+            }
+            if move.dy <= -CharacterTapSession.flickDistance,
+               -move.dy >= abs(move.dx) * CharacterTapSession.flickVerticality {
+                enterPickUp()
+                return
+            }
+            if abs(move.dx) >= Self.activationDistance {
+                enterTrackpad()
+                lastX = track.current.location.x
             }
         case .trackpad:
             moveCursor(with: track)
             updateEdgeGlide(at: track.current.location.x)
         case let .punctuation(layout, _):
             phase = .punctuation(layout: layout, selected: layout.optionIndex(atX: track.current.location.x))
-        case .finished:
+        case .pickUp, .finished:
             break
         }
     }
@@ -104,6 +111,8 @@ final class SpaceSession: InteractionSession {
             context.composer.commit(ticket, [.space])
         case let .punctuation(_, selected):
             context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
+        case .pickUp:
+            context.perform(.pickUpWord)
         case .trackpad, .finished:
             break
         }
@@ -123,6 +132,8 @@ final class SpaceSession: InteractionSession {
             context.composer.commit(ticket, [.space])
         case let .punctuation(_, selected):
             context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
+        case .pickUp:
+            context.perform(.pickUpWord)
         case .trackpad, .finished:
             return
         }
@@ -136,7 +147,7 @@ final class SpaceSession: InteractionSession {
         case .pressed:
             guard key.hitFrame.contains(track.start.location) else { return false }
             enterTrackpad()
-        case .punctuation, .finished:
+        case .punctuation, .pickUp, .finished:
             return false
         }
         extraFingers.insert(track.id)
@@ -171,6 +182,15 @@ final class SpaceSession: InteractionSession {
         )
         phase = .punctuation(layout: layout, selected: layout.optionIndex(atX: track.current.location.x))
         context.emit(.alternatesPresented)
+    }
+
+    /// An upward flick lifts the word at the cursor. A second flick puts it back.
+    private func enterPickUp() {
+        guard case .pressed = phase else { return }
+        longPress?.cancel()
+        longPress = nil
+        context.composer.cancel(ticket)
+        phase = .pickUp
     }
 
     private func enterTrackpad() {

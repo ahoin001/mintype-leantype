@@ -819,6 +819,61 @@ struct SwipeTypingTests {
         #expect(typed.count < 5)
     }
 
+    @Test func backspaceStepsAJoinedSwipeBackToTheTypedLetters() async {
+        let harness = makeHarness()
+        harness.tap(.character("r"))
+        swipe("ough", on: harness)
+        await harness.settle()
+        #expect(harness.text == "rough ")
+        harness.tap(.backspace)
+        #expect(harness.text == "r ")
+        harness.tap(.backspace)
+        #expect(harness.text.isEmpty)
+    }
+
+    @Test func backspaceRemovesOnlyTheFollowingWord() async {
+        let harness = makeHarness()
+        swipe("pill", on: harness)
+        await harness.settle()
+        swipe("the", on: harness)
+        await harness.settle()
+        #expect(harness.text == "pill the ")
+        harness.tap(.backspace)
+        #expect(harness.text == "pill ")
+    }
+
+    @Test func aQuickTapJoinsTheFollowingSwipe() async {
+        let harness = makeHarness()
+        harness.tap(.character("r"))
+        swipe("ough", on: harness)
+        await harness.settle()
+        #expect(harness.text == "rough ")
+    }
+
+    @Test func aSlowTapDoesNotJoinTheFollowingSwipe() async {
+        let harness = makeHarness()
+        harness.tap(.character("r"))
+        harness.wait(KeyboardEngine.wordLeash + 0.1)
+        swipe("ough", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix("r "))
+        #expect(harness.text != "rough ")
+    }
+
+    @Test func aHeldLetterJoinsAfterTheShortcutRowOpens() async {
+        var settings = KeyboardSettings()
+        settings.keyShortcuts = ["r": ["ŕ"]]
+        let harness = makeHarness(settings: settings)
+        let held = harness.down(at: harness.point(for: "r"))
+        harness.wait(CharacterTapSession.longPressDelay + 0.05)
+        #expect(harness.state.interaction.callout != nil)
+        swipe("ough", on: harness)
+        harness.up(held)
+        await harness.settle()
+        #expect(harness.text == "rough ")
+        #expect(!harness.text.contains("ŕ"))
+    }
+
     @Test func aRejectedTapCorrectionIsNotApplied() {
         let model = LanguageModel(lexicon: TestLexicon.shared)
         let before = model.analyze("teh", touches: nil, layout: nil)
@@ -826,6 +881,75 @@ struct SwipeTypingTests {
         model.noteRejection(preferred: "teh", rejected: "the")
         let after = model.analyze("teh", touches: nil, layout: nil)
         #expect(after.correction?.lowercased() != "the")
+    }
+
+    @Test func aReturnTripKeepsTheTurnaround() {
+        let cleaned = StrokeLetters.droppingReturnTrip(line("tyghgyt"))
+        #expect(cleaned.map(\.letter).joined() == "tht")
+    }
+
+    @Test func aWordThatDoesNotWalkBackKeepsEveryLetter() {
+        let arrivals = [
+            arrival("t", x: 0),
+            arrival("r", x: 40),
+            arrival("a", x: 80),
+            arrival("g", x: 40),
+            arrival("e", x: 80, y: 40),
+            arrival("d", x: 120, y: 40),
+        ]
+        let cleaned = StrokeLetters.droppingReturnTrip(arrivals)
+        #expect(cleaned.map(\.letter).joined() == "traged")
+    }
+
+    @Test func twoThumbsSpellThatsWithoutTheKeysBetween() async {
+        let harness = makeHarness()
+        let right = harness.down(at: harness.point(for: "t"))
+        for letter in ["y", "g", "h"] {
+            harness.move(right, to: harness.point(for: letter), over: 0.04)
+        }
+        let left = harness.down(at: harness.point(for: "a"))
+        for letter in ["g", "y", "t"] {
+            harness.move(right, to: harness.point(for: letter), over: 0.04)
+        }
+        harness.move(left, to: harness.point(for: "s"), over: 0.04)
+        harness.up(right)
+        harness.up(left)
+        await harness.settle()
+        #expect(!harness.text.contains("tyghagyts"))
+        #expect(harness.text == "that's ")
+    }
+
+    @Test func anApostropheIsNotALetterAndPrefersTheContraction() {
+        var stroke = StrokeBuffer(start: StrokePoint(location: .zero, time: 0))
+        stroke.append(StrokePoint(location: CGPoint(x: 80, y: 0), time: 0.1))
+        stroke.arrive("t", at: .zero, time: 0)
+        stroke.arrive("s", at: CGPoint(x: 40, y: 0), time: 0.05)
+        stroke.arrive("'", at: CGPoint(x: 80, y: 0), time: 0.1)
+        let gesture = GestureComposer.compose([stroke])
+        #expect(gesture?.tracedLetters == "ts")
+        #expect(gesture?.observations.contains { $0.letter == "'" } == false)
+        #expect(gesture?.prefersContraction == true)
+
+        let ranked = DecodeResult(readings: [
+            .init(word: "thats", score: -0.1),
+            .init(word: "that's", score: -0.4),
+        ])
+        #expect(ContractionPreference.apply(ranked, prefersContraction: false).words == ["thats", "that's"])
+        #expect(ContractionPreference.apply(ranked, prefersContraction: true).words == ["that's", "thats"])
+    }
+}
+
+private func arrival(_ letter: String, x: CGFloat, y: CGFloat = 0) -> KeyArrival {
+    KeyArrival(letter: letter, center: CGPoint(x: x, y: y), time: Double(x))
+}
+
+/// Letters spaced along a line that goes out and then back through the same points.
+private func line(_ letters: String) -> [KeyArrival] {
+    let characters = Array(letters)
+    let turn = characters.count / 2
+    return characters.enumerated().map { index, character in
+        let distance = index <= turn ? index : (2 * turn - index)
+        return arrival(String(character), x: CGFloat(distance) * 40)
     }
 }
 

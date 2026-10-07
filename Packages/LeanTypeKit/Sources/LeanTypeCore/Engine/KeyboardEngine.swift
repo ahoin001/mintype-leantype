@@ -55,6 +55,8 @@ public final class KeyboardEngine {
     private var openDeadline: TimeInterval?
     /// Fingers currently on the glass.
     private var liveTouches: Set<TouchID> = []
+    /// Exact text lifted by an upward flick on space, so delete or another flick can put it back.
+    private var pickedUpText: String?
 
     lazy var composer = InputComposer { [weak self] intents in
         self?.performBatch(intents)
@@ -178,6 +180,7 @@ public final class KeyboardEngine {
             refreshTextState()
             return
         }
+        _ = restorePickedUpWord()
         closeOpenWord()
         shift.noteContextChanged()
         words.noteContextChanged()
@@ -222,6 +225,8 @@ public final class KeyboardEngine {
         lastSpaceTime = nil
         openWord = nil
         openDeadline = nil
+        pickedUpText = nil
+        words.clearPickedUp()
         liveTouches = []
         let initial = Self.initialLayer(for: traits)
         if initial != layer {
@@ -339,13 +344,18 @@ public final class KeyboardEngine {
             changed = insertCharacter(character, at: point, time: time)
         case .space:
             closeOpenWord()
+            consumePickedUpWord()
             changed = insertSpace()
+        case .pickUpWord:
+            closeOpenWord()
+            changed = togglePickUp()
         case .autoSpace:
             closeOpenWord()
             changed = !(editor.contextBefore?.last?.isWhitespace ?? true)
             if changed { editor.insertSpace() }
         case .returnKey:
             closeOpenWord()
+            consumePickedUpWord()
             _ = finishWord(trailing: "")
             editor.insert("\n")
             changed = true
@@ -368,10 +378,12 @@ public final class KeyboardEngine {
             changed = undoRecentCommit()
         case let .moveCursor(direction):
             closeOpenWord()
-            changed = editor.moveCursor(by: direction)
+            let restored = restorePickedUpWord()
+            changed = editor.moveCursor(by: direction) || restored
         case let .moveCursorByWord(direction):
             closeOpenWord()
-            changed = editor.moveCursorByWord(direction)
+            let restored = restorePickedUpWord()
+            changed = editor.moveCursorByWord(direction) || restored
         case let .commitSwipe(readings, unsure, strokes, observations):
             changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations)
         case let .acceptCandidate(index):
@@ -412,14 +424,21 @@ public final class KeyboardEngine {
     // MARK: - Typing
 
     private func insertCharacter(_ character: String, at point: CGPoint?, time: Double) -> Bool {
+        consumePickedUpWord()
         let text = displayText(for: character)
         if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
             closeOpenWord()
             let hadWord = !editor.currentWord.isEmpty
+            let smart = settings.smartPunctuationEnabled && traits.variant == .standard
             if !finishWord(trailing: "") {
-                editor.insertPunctuation(text, hoppingSpace: settings.smartPunctuationEnabled && traits.variant == .standard)
+                editor.insertPunctuation(text, hoppingSpace: smart)
             } else {
                 editor.insert(text)
+            }
+            // After a word, the mark takes a space of its own so the next letter can capitalize.
+            // A mark that already hopped over a keyboard space ends in that space.
+            if smart, hadWord, editor.contextBefore?.last?.isWhitespace != true {
+                editor.insertSpace()
             }
             if hadWord { completeWord(.tap) }
         } else if text.count == 1, text.first?.isLetter == true, reviseOpenWord(with: text, at: point, time: time) {
@@ -483,6 +502,7 @@ public final class KeyboardEngine {
         strokes: Int,
         observations: [StrokeObservation]
     ) -> Bool {
+        consumePickedUpWord()
         guard !readings.isEmpty || !observations.isEmpty else { return false }
         let choice = resolvedBeat(readings, unsure: unsure, strokes: strokes, observations: observations)
         let readings = choice.readings
@@ -495,9 +515,23 @@ public final class KeyboardEngine {
         let committed: Bool
         if !typed.isEmpty {
             let merged = (typed + observations).inReadingOrder()
-            if let joined = joinedReading(existing: typed, adding: observations, merged: merged), acceptsJoin(joined) {
+            let started = observations.map(\.time).min() ?? scheduler.now
+            let lastTap = typed.map(\.time).max() ?? started
+            // A lifted letter stays in the word only for a short beat. Past that, the swipe is
+            // its own word even when the two would spell something together.
+            if started - lastTap <= Self.wordLeash,
+               let joined = joinedReading(existing: typed, adding: observations, merged: merged),
+               acceptsJoin(joined) {
+                let shown = String(editor.currentWord)
+                let prior = OpenChunk(events: typed, readings: [shown], score: WordJoiner.provisionalScore)
                 erasePlacedLetters(typed.count)
-                committed = publishSwipe(joined, events: merged, strokes: strokes, countsAsNewWord: true)
+                committed = publishSwipe(
+                    joined,
+                    events: observations,
+                    strokes: strokes,
+                    countsAsNewWord: true,
+                    priorChunks: shown.isEmpty ? [] : [prior]
+                )
             } else {
                 closeOpenWord()
                 _ = finishWord(trailing: " ")
@@ -648,7 +682,14 @@ public final class KeyboardEngine {
         }
         rejoin = nil
         let result = DecodeResult(readings: [.init(word: best.word, score: best.score)])
-        return publishSwipe(result, events: merged, strokes: 0, countsAsNewWord: false)
+        let priorChunk = OpenChunk(events: prior.events, readings: [prior.word], score: WordJoiner.provisionalScore)
+        return publishSwipe(
+            result,
+            events: batch,
+            strokes: 0,
+            countsAsNewWord: false,
+            priorChunks: [priorChunk] + open.chunks
+        )
     }
 
     private func joinedReading(
@@ -703,7 +744,8 @@ public final class KeyboardEngine {
         events: [StrokeObservation],
         strokes: Int,
         countsAsNewWord: Bool,
-        unsure: Bool? = nil
+        unsure: Bool? = nil,
+        priorChunks: [OpenChunk] = []
     ) -> Bool {
         guard let word = result.readings.first?.word, !word.isEmpty else { return false }
         let cased = result.words.map(applyShift(to:))
@@ -711,7 +753,9 @@ public final class KeyboardEngine {
         let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
         editor.commitWord(cased[0])
         words.swipeCommitted(cased, unsure: tentative)
-        openWord = OpenWord(chunks: [OpenChunk(events: events, readings: cased, score: score)])
+        var chunks = priorChunks
+        chunks.append(OpenChunk(events: events, readings: cased, score: score))
+        openWord = OpenWord(chunks: chunks)
         noteWordOpened()
         insertionCount += 1
         shift.consumeAfterInsertion()
@@ -805,8 +849,13 @@ public final class KeyboardEngine {
             return insertSpace()
         case let .replace(word):
             guard editor.replaceCurrentWord(with: word, kind: .completed) else { return false }
+            words.noteSettled(word)
             lastSpaceTime = nil
             completeWord(.suggestion)
+            return true
+        case let .insert(word):
+            consumePickedUpWord()
+            editor.insert(word)
             return true
         case let .swap(word):
             if let current = editor.recentCommit?.word {
@@ -846,6 +895,7 @@ public final class KeyboardEngine {
     /// Backspace right after a unit commit undoes it: corrections go back to what was typed,
     /// a swiped word disappears in one go.
     private func undoRecentCommit() -> Bool {
+        if restorePickedUpWord() { return true }
         if peelOpenWord() { return true }
         guard let commit = editor.undoRecentCommit() else { return false }
         switch commit.kind {
@@ -860,6 +910,32 @@ public final class KeyboardEngine {
         }
         flow.noteDeletion()
         return true
+    }
+
+    /// Lifts the word at the cursor, or puts a lifted word back when one is already held.
+    private func togglePickUp() -> Bool {
+        if pickedUpText != nil { return restorePickedUpWord() }
+        guard let pickup = editor.pickUpWordTouchingCursor() else { return false }
+        pickedUpText = pickup.removed
+        words.notePickedUp(pickup.word)
+        return true
+    }
+
+    /// Puts the lifted word back where the cursor is and forgets it.
+    @discardableResult
+    private func restorePickedUpWord() -> Bool {
+        guard let text = pickedUpText else { return false }
+        pickedUpText = nil
+        words.clearPickedUp()
+        editor.insert(text)
+        return true
+    }
+
+    /// The next typing stands in for the lifted word, so delete no longer brings it back.
+    private func consumePickedUpWord() {
+        guard pickedUpText != nil else { return }
+        pickedUpText = nil
+        words.clearPickedUp()
     }
 
     /// Drops the last tap or swipe of an open word and restores the reading from before it.
@@ -894,12 +970,13 @@ public final class KeyboardEngine {
         guard let language = words.language, let layout = words.letterLayout else { return .empty }
         let path = await language.decode(gesture, layout: layout)
         let sequence = language.sequenceDecode(gesture.observations, layout: layout)
-        return BeatChooser.reading(
+        let chosen = BeatChooser.reading(
             path: path,
             sequence: sequence,
             strokes: gesture.strokeCount,
             observations: gesture.observations
         )
+        return ContractionPreference.apply(chosen, prefersContraction: gesture.prefersContraction)
     }
 
     // MARK: - Derived state

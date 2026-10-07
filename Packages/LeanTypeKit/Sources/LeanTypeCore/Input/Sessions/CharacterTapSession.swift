@@ -16,10 +16,15 @@ final class CharacterTapSession: InteractionSession {
     static let flickDistance: CGFloat = 14
     static let flickMaxDuration: TimeInterval = 0.3
     static let flickVerticality: CGFloat = 1.3
+    /// Travel on the period key that opens the mark row, without waiting for a long press.
+    static let markSlideDistance: CGFloat = 10
+    /// Period sits under the finger. Sliding chooses the rest.
+    static let periodMarks = [".", ",", "?", "!"]
 
     private enum Phase {
         case tracking
         case alternates(layout: CalloutLayout, options: [String], selected: Int)
+        case marks(layout: CalloutLayout, options: [String], selected: Int)
         case finished
     }
 
@@ -62,13 +67,31 @@ final class CharacterTapSession: InteractionSession {
                 content: .alternates(options.map(context.displayText(for:)), selectedIndex: selected)
             )
             return SessionPresentation(pressedKey: target.id, callout: callout)
+        case let .marks(layout, options, selected):
+            let callout = CalloutState(
+                keyID: origin.id,
+                layout: layout,
+                content: .alternates(options, selectedIndex: selected)
+            )
+            return SessionPresentation(pressedKey: origin.id, callout: callout)
         }
     }
 
-    /// Whether a swipe can still take this touch over (nothing decided yet).
+    /// Whether the other thumb can still take this letter into its word. The shortcut row is
+    /// only a preview: until this finger lifts, the letter that was pressed can still join.
     var canRelinquish: Bool {
-        if case .tracking = phase { return true }
-        return false
+        switch phase {
+        case .tracking, .alternates: true
+        case .marks, .finished: false
+        }
+    }
+
+    /// The shortcut row is up. Sliding along it chooses an accent; it is not the start of a swipe.
+    var isShowingAlternates: Bool {
+        switch phase {
+        case .alternates, .marks: true
+        case .tracking, .finished: false
+        }
     }
 
     /// Ends this session without committing and hands its composer slot to the caller, which
@@ -82,9 +105,15 @@ final class CharacterTapSession: InteractionSession {
         latest = track
         switch phase {
         case .tracking:
-            retarget(to: track.current.location)
+            if shouldOpenPeriodMarks(track) {
+                enterPeriodMarks(at: track)
+            } else {
+                retarget(to: track.current.location)
+            }
         case let .alternates(layout, options, _):
             phase = .alternates(layout: layout, options: options, selected: layout.optionIndex(atX: track.current.location.x))
+        case let .marks(layout, options, _):
+            phase = .marks(layout: layout, options: options, selected: layout.optionIndex(atX: track.current.location.x))
         case .finished:
             break
         }
@@ -97,6 +126,8 @@ final class CharacterTapSession: InteractionSession {
             commitTracking(track)
         case let .alternates(_, options, selected):
             context.composer.commit(ticket, [.insert(options[selected])])
+        case let .marks(_, options, selected):
+            commitMark(options[selected])
         case .finished:
             return
         }
@@ -113,6 +144,8 @@ final class CharacterTapSession: InteractionSession {
         switch phase {
         case .tracking:
             commitTracking(latest)
+        case let .marks(_, options, selected):
+            commitMark(options[selected])
         case .alternates, .finished:
             return
         }
@@ -154,6 +187,34 @@ final class CharacterTapSession: InteractionSession {
         } else {
             commitTarget(time: track.current.timestamp)
         }
+    }
+
+    private func shouldOpenPeriodMarks(_ track: TouchTrack) -> Bool {
+        guard origin.key.kind.character == "." else { return false }
+        return hypot(track.translation.dx, track.translation.dy) >= Self.markSlideDistance
+    }
+
+    /// The period key grows a row of marks as soon as the finger slides. No long-press wait.
+    private func enterPeriodMarks(at track: TouchTrack) {
+        guard case .tracking = phase else { return }
+        longPress?.cancel()
+        longPress = nil
+        let layout = CalloutGeometry.layout(
+            anchor: origin.visualFrame,
+            optionCount: Self.periodMarks.count,
+            metrics: context.geometry.metrics,
+            bounds: context.calloutBounds
+        )
+        phase = .marks(
+            layout: layout,
+            options: Self.periodMarks,
+            selected: layout.optionIndex(atX: track.current.location.x)
+        )
+        context.emit(.alternatesPresented)
+    }
+
+    private func commitMark(_ mark: String) {
+        context.composer.commit(ticket, [.insert(mark)])
     }
 
     private func commitTarget(time: Double) {

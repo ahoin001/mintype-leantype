@@ -189,11 +189,25 @@ struct GestureTip: Identifiable {
         GestureTip(
             id: "period",
             title: "End a sentence",
-            detail: "Tap space twice to add a period, and the next word starts with a capital.",
+            detail: "Tap the period key, and the next word starts with a capital. Slide it for a comma, question mark, or exclamation. Space twice still works too.",
+            keyLabel: ".",
+            keySymbol: nil,
+            keyWidth: 52,
+            poses: poses([(0, false, 0.45), (0, true, 0.12), (-36, true, 0.35), (-36, false, 0.35)])
+        ),
+        GestureTip(
+            id: "pickUp",
+            title: "Pick up a word",
+            detail: "Flick up on the space bar to lift the word at the cursor. Type to replace it, or tap delete to put it back.",
             keyLabel: "space",
             keySymbol: nil,
             keyWidth: 180,
-            poses: poses([(0, false, 0.5), (0, true, 0.1), (0, false, 0.12), (0, true, 0.1), (0, false, 0.6)])
+            poses: poses(fingers: [
+                ([.init(x: 0, y: 6, isDown: false)], 0.4),
+                ([.init(x: 0, y: 6, isDown: true)], 0.12),
+                ([.init(x: 0, y: -28, isDown: true)], 0.22),
+                ([.init(x: 0, y: -28, isDown: false)], 0.4),
+            ])
         ),
     ]
 }

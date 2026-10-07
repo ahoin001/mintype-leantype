@@ -9,6 +9,8 @@ public enum KeyboardIntent: Hashable, Sendable {
     /// to judge what was meant.
     case tapCharacter(String, at: CGPoint, time: Double)
     case space
+    /// Lifts the word touching the cursor so the next typing replaces it.
+    case pickUpWord
     /// A space the keyboard adds on the user's behalf (after a slid punctuation mark).
     case autoSpace
     case returnKey

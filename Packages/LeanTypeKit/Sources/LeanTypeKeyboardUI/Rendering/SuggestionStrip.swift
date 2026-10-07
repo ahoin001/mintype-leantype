@@ -134,18 +134,21 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         case .unavailable:
             return nil
         case .fresh, .learning:
-            var actions = [rememberAction(word)]
+            var actions = [rememberAction(word, strengthens: false)]
             if memoryOf?(word) == .learning {
                 actions.append(forgetAction(word))
             }
             return UIMenu(children: actions)
         case .remembered:
-            return UIMenu(children: [forgetAction(word)])
+            return UIMenu(children: [rememberAction(word, strengthens: true), forgetAction(word)])
         }
     }
 
-    private func rememberAction(_ word: String) -> UIAction {
-        UIAction(title: "Remember", subtitle: "Keep this spelling, and suggest it", image: UIImage(systemName: "brain")) { [weak self] _ in
+    private func rememberAction(_ word: String, strengthens: Bool) -> UIAction {
+        let subtitle = strengthens
+            ? "Count it again, so it ranks higher"
+            : "Keep this spelling, and suggest it"
+        return UIAction(title: "Remember", subtitle: subtitle, image: UIImage(systemName: "brain")) { [weak self] _ in
             self?.onRemember?(word)
         }
     }
@@ -177,10 +180,16 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
                 },
             ]
         case .remembered:
-            return [UIAccessibilityCustomAction(name: "Forget \(word)") { [weak self] _ in
-                self?.onForget?(word)
-                return true
-            }]
+            return [
+                UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
+                    self?.onRemember?(word)
+                    return true
+                },
+                UIAccessibilityCustomAction(name: "Forget \(word)") { [weak self] _ in
+                    self?.onForget?(word)
+                    return true
+                },
+            ]
         }
     }
 

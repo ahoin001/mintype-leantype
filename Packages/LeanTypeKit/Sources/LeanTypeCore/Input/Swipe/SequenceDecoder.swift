@@ -88,9 +88,10 @@ enum WordJoiner {
     }
 
     /// `word` is `traced` in order, where any traced letter may also cover one extra copy of
-    /// itself ("pill" from "pil", "hello" from "helo").
+    /// itself ("pill" from "pil", "hello" from "helo"). An apostrophe in the spelling is not
+    /// a letter the thumb had to visit, so "that's" lines up with "thats".
     static func aligns(_ word: String, traced: String) -> Bool {
-        let target = Array(word.lowercased())
+        let target = Array(word.lowercased().filter(\.isLetter))
         let source = Array(traced.lowercased())
         guard !source.isEmpty, !target.isEmpty else { return false }
         var reachable = Array(repeating: false, count: target.count + 1)

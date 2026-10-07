@@ -153,11 +153,13 @@ enum GestureComposer {
         let observations = observations(from: marks.sorted { $0.time < $1.time })
         let traced = BeatChooser.collapse(observations.map(\.letter).joined())
         guard path.count >= 2 || !traced.isEmpty else { return nil }
+        let prefersContraction = strokes.contains { StrokeLetters.endsOnApostrophe($0.arrivals) }
         return SwipeGesture(
             path: path,
             strokeCount: max(strokes.count, path.count >= 2 ? 1 : 0),
             tracedLetters: traced,
-            observations: observations
+            observations: observations,
+            prefersContraction: prefersContraction
         )
     }
 
@@ -170,11 +172,11 @@ enum GestureComposer {
         var isTap: Bool
     }
 
-    /// Start, sharp turns, dwells, and the lift. A key the finger only slid across is not a
-    /// letter, even when the slide is slow. Every corner is kept, so a zigzag is not reduced
-    /// to its sharpest bend.
+    /// Start, sharp turns, dwells, and the lift, after a return trip has been removed.
+    /// A key the finger only slid across is not a letter, even when the slide is slow.
+    /// Every remaining corner is kept, so a zigzag is not reduced to its sharpest bend.
     private static func aimedMarks(in stroke: StrokeBuffer) -> [Mark] {
-        let arrivals = stroke.arrivals
+        let arrivals = StrokeLetters.aimedArrivals(stroke.arrivals)
         guard let first = arrivals.first else { return [] }
         var chosen = [first]
         if arrivals.count > 2 {
