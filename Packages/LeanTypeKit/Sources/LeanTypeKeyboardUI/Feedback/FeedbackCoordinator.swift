@@ -1,0 +1,54 @@
+import LeanTypeCore
+import UIKit
+
+/// Turns engine feedback events into key clicks and haptics, fired on the same frame as the
+/// visual change. Haptics in a keyboard extension require Full Access; the host decides
+/// whether they're enabled.
+@MainActor
+public final class FeedbackCoordinator {
+    public var hapticsEnabled: Bool {
+        didSet { if hapticsEnabled { prepare() } }
+    }
+
+    public var clicksEnabled: Bool
+
+    private lazy var keyImpact = UIImpactFeedbackGenerator(style: .light)
+    private lazy var modeImpact = UIImpactFeedbackGenerator(style: .medium)
+    private lazy var selection = UISelectionFeedbackGenerator()
+
+    public init(hapticsEnabled: Bool, clicksEnabled: Bool) {
+        self.hapticsEnabled = hapticsEnabled
+        self.clicksEnabled = clicksEnabled
+    }
+
+    /// Warms up the Taptic Engine so the first key press has no latency.
+    public func prepare() {
+        guard hapticsEnabled else { return }
+        keyImpact.prepare()
+        selection.prepare()
+    }
+
+    public func handle(_ event: FeedbackEvent) {
+        switch event {
+        case .keyDown:
+            if clicksEnabled {
+                UIDevice.current.playInputClick()
+            }
+            impact(keyImpact, intensity: 0.5)
+        case .cursorStep, .deleteStep:
+            guard hapticsEnabled else { return }
+            selection.selectionChanged()
+            selection.prepare()
+        case .trackpadEngaged, .capsLockEngaged:
+            impact(modeImpact, intensity: 0.7)
+        case .alternatesPresented:
+            impact(keyImpact, intensity: 0.8)
+        }
+    }
+
+    private func impact(_ generator: UIImpactFeedbackGenerator, intensity: CGFloat) {
+        guard hapticsEnabled else { return }
+        generator.impactOccurred(intensity: intensity)
+        generator.prepare()
+    }
+}

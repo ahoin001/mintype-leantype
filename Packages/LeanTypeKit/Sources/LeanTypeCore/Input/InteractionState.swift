@@ -1,0 +1,30 @@
+/// A callout drawn above a key: either a preview of the pressed letter or a row of long-press
+/// alternates with one selected.
+public struct CalloutState: Hashable, Sendable {
+    public enum Content: Hashable, Sendable {
+        case preview(String)
+        case alternates([String], selectedIndex: Int)
+    }
+
+    public let keyID: KeyID
+    public let layout: CalloutLayout
+    public let content: Content
+}
+
+/// What one finger's session wants drawn right now.
+struct SessionPresentation {
+    var pressedKey: KeyID?
+    var callout: CalloutState?
+    var isTrackpadActive = false
+
+    static let none = SessionPresentation()
+}
+
+/// Everything about in-flight touches the renderer needs, aggregated across fingers.
+public struct InteractionState: Hashable, Sendable {
+    public var pressedKeys: Set<KeyID>
+    public var callout: CalloutState?
+    public var isTrackpadActive: Bool
+
+    public static let idle = InteractionState(pressedKeys: [], callout: nil, isTrackpadActive: false)
+}
