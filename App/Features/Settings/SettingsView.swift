@@ -6,8 +6,6 @@ struct SettingsView: View {
     @Environment(SettingsModel.self) private var model
     @Environment(SetupStatusModel.self) private var setup
     @Environment(KeyboardDataModel.self) private var data
-    @State private var isConfirmingClear = false
-
     private static let wordListURL = URL(string: "https://github.com/hermitdave/FrequencyWords")!
 
     var body: some View {
@@ -99,6 +97,13 @@ struct SettingsView: View {
                     )
                     PebbleDivider()
                     PebbleToggleRow(
+                        systemImage: "text.append",
+                        title: "Finish a word you just typed",
+                        detail: "A quick tap can still turn the into then. A full swipe is always the next word.",
+                        isOn: $model.settings.extendFinishedWords
+                    )
+                    PebbleDivider()
+                    PebbleToggleRow(
                         systemImage: "wand.and.sparkles",
                         title: "Autocorrect",
                         detail: "Fixes obvious slips when you press space. Tap delete once to undo.",
@@ -109,13 +114,24 @@ struct SettingsView: View {
                         systemImage: "brain",
                         title: "Learn my words",
                         detail: setup.hasSeenFullAccess
-                            ? "Names and words you use are remembered on this phone, never shared."
+                            ? "Names you keep are remembered on this phone. Hold a suggestion to remember or forget one."
                             : "Needs Full Access to remember words.",
                         isOn: $model.settings.learnWordsEnabled
                     )
                     if data.learnedWordCount > 0 {
                         PebbleDivider()
-                        clearLearnedWordsRow
+                        NavigationLink {
+                            LearnedWordsView()
+                        } label: {
+                            PebbleLinkRow(
+                                systemImage: "text.book.closed",
+                                title: "Learned words",
+                                detail: data.learnedWordCount == 1
+                                    ? "1 word. Swipe it to forget just that one."
+                                    : "\(data.learnedWordCount) words. Swipe one to forget just that word."
+                            )
+                        }
+                        .buttonStyle(PebblePressStyle())
                     }
                 }
 
@@ -199,29 +215,6 @@ struct SettingsView: View {
         case .subtle: "Subtle. Smaller ripples, trails, and bursts."
         case .lively: "Lively. Ripples, trails, and bursts at the usual size."
         case .party: "Party. Larger bursts and brighter trails."
-        }
-    }
-
-    private var clearLearnedWordsRow: some View {
-        Button(role: .destructive) {
-            isConfirmingClear = true
-        } label: {
-            HStack(spacing: 14) {
-                PebbleIcon(systemName: "trash", size: 34)
-                PebbleRowText(
-                    title: "Clear learned words",
-                    detail: data.learnedWordCount == 1 ? "1 word remembered." : "\(data.learnedWordCount) words remembered."
-                )
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PebblePressStyle())
-        .confirmationDialog("Forget every word LeanType has learned?", isPresented: $isConfirmingClear, titleVisibility: .visible) {
-            Button("Clear learned words", role: .destructive) { data.clearLearnedWords() }
-        } message: {
-            Text("Autocorrect may start fixing words you use often until it learns them again.")
         }
     }
 

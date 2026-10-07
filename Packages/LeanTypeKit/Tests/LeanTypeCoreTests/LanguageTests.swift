@@ -169,6 +169,19 @@ struct PersonalLexiconTests {
         #expect(!personal.contains("word1"), "The stalest word makes room")
         #expect(personal.contains("fresh"))
     }
+
+    @Test func rememberSuggestsOnTheFirstPinAndForgetDropsOnlyThatWord() {
+        var personal = PersonalLexicon()
+        personal.learn("kept", at: Date())
+        let pinned = personal.remember("zorbly", at: Date())
+        #expect(pinned)
+        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeSuggesting)
+        #expect(personal.entries(logCountRange: 0...10).map(\.display) == ["zorbly"])
+        let forgotten = personal.forget("Zorbly")
+        #expect(forgotten)
+        #expect(!personal.contains("zorbly"))
+        #expect(personal.contains("kept"))
+    }
 }
 
 @MainActor
@@ -267,6 +280,31 @@ struct EngineLanguageTests {
         #expect(harness.engine.language?.isKnown("zorbly") == true)
         harness.type("zorbl")
         #expect(harness.state.candidates.candidates.contains { $0.text == "zorbly" })
+    }
+
+    @Test func rememberingTheTypedWordStopsTheCorrection() {
+        let (harness, store) = makeHarness()
+        harness.type("teh")
+        harness.engine.rememberWord("teh")
+        #expect(store.load().first?.uses == PersonalLexicon.usesBeforeSuggesting)
+        harness.tap(.space)
+        #expect(harness.text == "teh ")
+    }
+
+    @Test func rememberingAWordSuggestsItImmediately() {
+        let (harness, _) = makeHarness()
+        harness.engine.rememberWord("zorbly")
+        harness.type("zorbl")
+        #expect(harness.state.candidates.candidates.contains { $0.text == "zorbly" })
+    }
+
+    @Test func forgettingAWordRemovesItFromSuggestions() {
+        let (harness, store) = makeHarness()
+        harness.type("zorbly zorbly ")
+        harness.engine.forgetWord("zorbly")
+        #expect(store.load().isEmpty)
+        harness.type("zorbl")
+        #expect(!harness.state.candidates.candidates.contains { $0.text == "zorbly" })
     }
 
     @Test func learnedWordsPersistThroughTheStore() {

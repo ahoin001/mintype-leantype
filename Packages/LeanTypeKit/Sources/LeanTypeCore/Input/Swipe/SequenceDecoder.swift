@@ -57,25 +57,24 @@ enum WordJoiner {
     /// new letter to keep the old word.
     static func choose(
         extended: SequenceOutcome,
-        alone: SequenceOutcome,
+        alone _: SequenceOutcome,
         fragmentContinues: Bool
     ) -> DecodeResult? {
         if fragmentContinues {
             // The keys actually hit are still the start of a longer word ("qui", "priva").
-            // That beats letting the latest swipe become its own word.
+            // That beats letting the latest swipe become its own word. The raw trace is never
+            // a reading: if no dictionary word covers those keys, the caller starts a new word.
             if let best = extended.result.readings.first,
                LexiconKey.make(best.word).count >= extended.traced.count {
                 return extended.result
             }
+            // The keys are a real prefix ("priva" toward "private") but no dictionary word
+            // covers them yet. Keep those letters so the rest of the word can still arrive.
+            guard !extended.traced.isEmpty else { return nil }
             return DecodeResult(readings: [.init(word: extended.traced, score: provisionalScore)])
         }
         if let aligned = alignedReading(in: extended) {
             return DecodeResult(readings: [aligned])
-        }
-        // Neither side is a word yet ("es" then "traged"). Keep the letters together so a
-        // letter that lands in the middle can still finish the word.
-        if extended.result.isEmpty, alone.result.isEmpty, !extended.traced.isEmpty {
-            return DecodeResult(readings: [.init(word: extended.traced, score: provisionalScore)])
         }
         return nil
     }

@@ -5,8 +5,12 @@ import UIKit
 /// Three suggestion slots in the dock. The word a space will accept is shown on a soft accent
 /// pill; the typed word appears in quotes when autocorrect is about to replace it; an undone
 /// correction offers its original back with a return arrow.
-final class SuggestionStrip: UIView {
+final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     var onSelect: ((Int) -> Void)?
+    /// Where a suggestion sits in the user's word list. Drives the long-press menu.
+    var memoryOf: ((String) -> WordMemory)?
+    var onRemember: ((String) -> Void)?
+    var onForget: ((String) -> Void)?
 
     private var slots: [SuggestionSlot] = []
     private var separators: [UIView] = []
@@ -22,6 +26,7 @@ final class SuggestionStrip: UIView {
         pill.layer.cornerCurve = .continuous
         pill.alpha = 0
         addSubview(pill)
+        addInteraction(UIContextMenuInteraction(delegate: self))
         for index in 0..<CandidateState.capacity {
             let slot = SuggestionSlot()
             slot.addAction(UIAction { [weak self] _ in self?.onSelect?(index) }, for: .touchUpInside)
@@ -103,6 +108,79 @@ final class SuggestionStrip: UIView {
                 apply()
             }
             slot.accessibilityLabel = candidate.role == .revert ? "Undo correction, \(candidate.text)" : candidate.text
+            slot.accessibilityCustomActions = accessibilityActions(for: candidate.text)
+        }
+    }
+
+    func contextMenuInteraction(
+        _: UIContextMenuInteraction,
+        configurationForMenuAtLocation location: CGPoint
+    ) -> UIContextMenuConfiguration? {
+        guard let word = word(at: location), memoryOf?(word) != .unavailable else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            self?.menu(for: word)
+        }
+    }
+
+    private func word(at location: CGPoint) -> String? {
+        guard let index = slots.firstIndex(where: { !$0.isHidden && $0.frame.contains(location) }),
+              index < state.candidates.count
+        else { return nil }
+        return state.candidates[index].text
+    }
+
+    private func menu(for word: String) -> UIMenu? {
+        switch memoryOf?(word) ?? .unavailable {
+        case .unavailable:
+            return nil
+        case .fresh, .learning:
+            var actions = [rememberAction(word)]
+            if memoryOf?(word) == .learning {
+                actions.append(forgetAction(word))
+            }
+            return UIMenu(children: actions)
+        case .remembered:
+            return UIMenu(children: [forgetAction(word)])
+        }
+    }
+
+    private func rememberAction(_ word: String) -> UIAction {
+        UIAction(title: "Remember", subtitle: "Keep this spelling, and suggest it", image: UIImage(systemName: "brain")) { [weak self] _ in
+            self?.onRemember?(word)
+        }
+    }
+
+    private func forgetAction(_ word: String) -> UIAction {
+        UIAction(title: "Forget", subtitle: "Stop suggesting this word", image: UIImage(systemName: "brain"), attributes: .destructive) { [weak self] _ in
+            self?.onForget?(word)
+        }
+    }
+
+    private func accessibilityActions(for word: String) -> [UIAccessibilityCustomAction]? {
+        switch memoryOf?(word) ?? .unavailable {
+        case .unavailable:
+            return nil
+        case .fresh:
+            return [UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
+                self?.onRemember?(word)
+                return true
+            }]
+        case .learning:
+            return [
+                UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
+                    self?.onRemember?(word)
+                    return true
+                },
+                UIAccessibilityCustomAction(name: "Forget \(word)") { [weak self] _ in
+                    self?.onForget?(word)
+                    return true
+                },
+            ]
+        case .remembered:
+            return [UIAccessibilityCustomAction(name: "Forget \(word)") { [weak self] _ in
+                self?.onForget?(word)
+                return true
+            }]
         }
     }
 

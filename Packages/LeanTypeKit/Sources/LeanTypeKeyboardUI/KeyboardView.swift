@@ -105,6 +105,15 @@ public final class KeyboardView: UIView {
         dock.onSelectCandidate = { [weak self] index in
             self?.engine.acceptCandidate(index)
         }
+        dock.wordMemory = { [weak self] word in
+            self?.engine.language?.memory(of: word) ?? .unavailable
+        }
+        dock.onRememberWord = { [weak self] word in
+            self?.engine.rememberWord(word)
+        }
+        dock.onForgetWord = { [weak self] word in
+            self?.engine.forgetWord(word)
+        }
         dock.onWordmarkTap = { [weak self] in
             self?.dock.toggleDeleteMenu()
         }

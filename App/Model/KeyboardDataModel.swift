@@ -7,26 +7,44 @@ import Observation
 @MainActor
 @Observable
 final class KeyboardDataModel {
-    private(set) var learnedWordCount = 0
+    private(set) var learnedWords: [LearnedWord] = []
     private(set) var stats = FlowStats()
 
-    @ObservationIgnored private let learnedWords: any LearnedWordsStore
+    var learnedWordCount: Int { learnedWords.count }
+
+    @ObservationIgnored private let learnedWordsStore: any LearnedWordsStore
     @ObservationIgnored private let statsStore: AppGroupFlowStatsStore
 
     init(learnedWords: any LearnedWordsStore = AppGroupLearnedWordsStore(), statsStore: AppGroupFlowStatsStore = AppGroupFlowStatsStore()) {
-        self.learnedWords = learnedWords
+        self.learnedWordsStore = learnedWords
         self.statsStore = statsStore
         refresh()
     }
 
     func refresh() {
-        learnedWordCount = learnedWords.load().count
+        learnedWords = learnedWordsStore.load().sorted { $0.lastUsed > $1.lastUsed }
         stats = statsStore.load()
     }
 
     func clearLearnedWords() {
-        learnedWords.clear()
-        learnedWordCount = 0
+        learnedWordsStore.clear()
+        learnedWords = []
+        DarwinNotifications.post(SharedContainer.learnedWordsDidChangeNotification)
+    }
+
+    /// Drops one word, and the note that said to keep that spelling.
+    func forgetLearnedWord(_ word: String) {
+        let key = word.lowercased()
+        var words = learnedWordsStore.load()
+        words.removeAll { $0.word.lowercased() == key }
+        learnedWordsStore.save(words)
+        var rejections = AppGroupRejectionStore().load()
+        let before = rejections.count
+        rejections.removeAll { $0.preferred == key }
+        if rejections.count != before {
+            AppGroupRejectionStore().save(rejections)
+        }
+        refresh()
         DarwinNotifications.post(SharedContainer.learnedWordsDidChangeNotification)
     }
 }

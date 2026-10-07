@@ -67,7 +67,7 @@ final class KeyboardViewController: UIInputViewController {
                 self?.reloadSettings()
             },
             DarwinNotificationObserver(name: SharedContainer.learnedWordsDidChangeNotification) { [weak self] in
-                self?.language?.reloadLearnedWords()
+                self?.engine.reloadLearnedWords()
             },
         ]
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _: UITraitCollection) in

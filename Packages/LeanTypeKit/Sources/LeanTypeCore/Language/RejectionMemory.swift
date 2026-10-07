@@ -60,6 +60,16 @@ final class RejectionMemory {
         return entries.contains { $0.preferred == preferred && $0.rejected == rejected }
     }
 
+    /// Drops every "keep this spelling" note for `preferred`.
+    func forget(preferred: String) {
+        let preferred = preferred.lowercased()
+        let before = entries.count
+        entries.removeAll { $0.preferred == preferred }
+        if entries.count != before {
+            store?.save(entries)
+        }
+    }
+
     func note(preferred: String, rejected: String, at date: Date = .now) {
         let preferred = preferred.lowercased()
         let rejected = rejected.lowercased()

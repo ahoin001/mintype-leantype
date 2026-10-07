@@ -160,6 +160,13 @@ final class WordAssistant {
         keptWord = word
     }
 
+    /// The user forgot `word`, so the next space may correct it again.
+    func dropKept(_ word: String) {
+        guard keptWord?.lowercased() == word.lowercased() else { return }
+        keptWord = nil
+        cached = nil
+    }
+
     func swipeCommitted(_ readings: [String], unsure _: Bool) {
         swipeReadings = readings
         preview = nil

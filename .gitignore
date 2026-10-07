@@ -6,6 +6,9 @@
 # Local tooling (installed by scripts/bootstrap.sh)
 .tools/
 
+# Graphify knowledge graph (rebuild with `graphify update .`)
+graphify-out/
+
 # Build output
 build/
 DerivedData/

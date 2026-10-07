@@ -21,7 +21,7 @@ public struct LearnedWord: Codable, Hashable, Sendable {
 public struct PersonalLexicon: Sendable {
     public static let capacity = 1000
     /// Uses before a learned word starts appearing as a suggestion.
-    static let usesBeforeSuggesting = 2
+    public static let usesBeforeSuggesting = 2
 
     /// A personal word ready for matching: its display form, key, and an estimated log count
     /// comparable with the dictionary's.
@@ -44,6 +44,30 @@ public struct PersonalLexicon: Sendable {
 
     public func contains(_ word: some StringProtocol) -> Bool {
         learned[Self.storageKey(word)] != nil
+    }
+
+    public func uses(of word: some StringProtocol) -> Int? {
+        learned[Self.storageKey(word)]?.uses
+    }
+
+    /// Pins `word` so it can be suggested immediately, and counts this as a use.
+    @discardableResult
+    public mutating func remember(_ word: String, at date: Date) -> Bool {
+        guard !Self.storageKey(word).isEmpty else { return false }
+        learn(word, at: date)
+        let key = Self.storageKey(word)
+        guard var existing = learned[key] else { return false }
+        if existing.uses < Self.usesBeforeSuggesting {
+            existing.uses = Self.usesBeforeSuggesting
+            learned[key] = existing
+        }
+        return true
+    }
+
+    /// Drops one learned word. Other words stay.
+    @discardableResult
+    public mutating func forget(_ word: some StringProtocol) -> Bool {
+        learned.removeValue(forKey: Self.storageKey(word)) != nil
     }
 
     /// Records a use of `word`. Returns `true` if the list changed shape (a new word).

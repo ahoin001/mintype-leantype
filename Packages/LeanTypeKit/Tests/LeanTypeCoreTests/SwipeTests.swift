@@ -178,9 +178,10 @@ struct PathDecoderTests {
 @MainActor
 @Suite("Swipe typing in the engine")
 struct SwipeTypingTests {
-    private func makeHarness(text: String = "") -> EngineHarness {
+    private func makeHarness(text: String = "", settings: KeyboardSettings = .default) -> EngineHarness {
         EngineHarness(
             text: text,
+            settings: settings,
             traits: InputTraits(autocapitalization: .none),
             language: LanguageModel(lexicon: TestLexicon.shared)
         )
@@ -671,6 +672,151 @@ struct SwipeTypingTests {
         harness.engine.documentDidChange()
         harness.tap(.character("e"))
         #expect(harness.text == "elsewheree")
+    }
+
+    @Test func twoConfidentSwipesStayTwoWords() async {
+        let harness = makeHarness()
+        swipe("hello", on: harness)
+        await harness.settle()
+        swipe("correct", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix("hello "))
+        #expect(!harness.text.contains("helloc"))
+        let words = harness.text.split(separator: " ")
+        #expect(words.count >= 2)
+        #expect(words[0] == "hello")
+    }
+
+    @Test func twoShortWordsStayApartEvenWhenTheySpellALongerOne() async {
+        let harness = makeHarness()
+        swipe("in", on: harness)
+        await harness.settle()
+        let first = harness.text
+        swipe("to", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix(first))
+        #expect(!harness.text.hasPrefix("into"))
+    }
+
+    @Test func aOneLetterWordIsNotPulledIntoTheNextSwipe() async {
+        let harness = makeHarness()
+        let origin = harness.point(for: "a")
+        let id = harness.down(at: origin)
+        harness.move(id, to: CGPoint(x: origin.x + 40, y: origin.y), over: 0.06)
+        harness.move(id, to: origin, over: 0.06)
+        harness.up(id)
+        await harness.settle()
+        let first = harness.text
+        #expect(first.split(separator: " ").count == 1)
+        swipe("the", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix(first))
+    }
+
+    @Test func aQuickTapCanStillLengthenTheWord() async {
+        let harness = makeHarness()
+        swipe("the", on: harness)
+        await harness.settle()
+        harness.tap(.character("n"))
+        #expect(harness.text == "then ")
+    }
+
+    @Test func aTapAfterTheLeashStartsTheNextWord() async {
+        let harness = makeHarness()
+        swipe("the", on: harness)
+        await harness.settle()
+        harness.wait(0.5)
+        harness.tap(.character("n"))
+        #expect(harness.text == "the n")
+    }
+
+    @Test func aFingerHeldDownKeepsTheWordOpen() async {
+        let harness = makeHarness()
+        swipe("the", on: harness)
+        await harness.settle()
+        let held = harness.down(at: harness.point(for: "n"))
+        harness.wait(0.38)
+        harness.up(held)
+        #expect(harness.text == "then ")
+    }
+
+    @Test func turningOffTheExtensionLeavesTheFinishedWordAlone() async {
+        let harness = makeHarness(settings: KeyboardSettings(extendFinishedWords: false))
+        swipe("the", on: harness)
+        await harness.settle()
+        harness.tap(.character("n"))
+        #expect(harness.text == "the n")
+        swipe("hello", on: harness)
+        await harness.settle()
+        swipe("correct", on: harness)
+        await harness.settle()
+        let words = harness.text.split(separator: " ")
+        #expect(words.count >= 3)
+        #expect(words[0] == "the")
+        #expect(words[1] == "n")
+    }
+
+    @Test func aFragmentAfterTheLeashIsLeftAsTyped() async {
+        let harness = makeHarness()
+        swipe("es", on: harness)
+        await harness.settle()
+        let first = harness.text
+        harness.wait(0.5)
+        swipe("the", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix(first))
+        #expect(harness.text.split(separator: " ").count >= 2)
+    }
+
+    @Test func anAlternateReplacesOnlyItsOwnWord() async throws {
+        let harness = makeHarness()
+        swipe("hello", on: harness)
+        await harness.settle()
+        swipe("in", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix("hello "))
+        let alternatives = harness.state.candidates.candidates
+        try #require(!alternatives.isEmpty)
+        harness.engine.acceptCandidate(0)
+        #expect(harness.text.hasPrefix("hello "))
+        #expect(harness.text.hasSuffix(alternatives[0].text + " "))
+        #expect(!harness.text.hasPrefix(alternatives[0].text))
+    }
+
+    @Test func aSlowStraightRunDoesNotTypeEveryKey() async {
+        var committed: [KeyboardIntent] = []
+        let composer = InputComposer { committed.append(contentsOf: $0) }
+        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let letters = Array("qwertyuiop")
+        let id = TouchID(rawValue: 1)
+        let start = TouchSample(id: id, location: .zero, timestamp: 0, phase: .began)
+        var track = TouchTrack(start: start)
+        coordinator.begin(track, ticket: composer.reserve())
+        for (index, letter) in letters.enumerated() {
+            let x = CGFloat(index) * 38
+            let time = Double(index) * 0.45
+            coordinator.arrive(id, letter: String(letter), at: CGPoint(x: x, y: 0), time: time)
+            track.append(TouchSample(id: id, location: CGPoint(x: x, y: 0), timestamp: time, phase: .moved))
+            coordinator.moved(track)
+        }
+        let endX = CGFloat(letters.count - 1) * 38
+        track.append(TouchSample(id: id, location: CGPoint(x: endX, y: 0), timestamp: 4, phase: .ended))
+        coordinator.ended(track)
+
+        var spins = 0
+        while composer.hasPendingCommits, spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        let typed = committed.reduce(into: "") { text, intent in
+            switch intent {
+            case let .commitSwipe(words, _, _, _): text += words.first ?? ""
+            case let .insert(character): text += character
+            default: break
+            }
+        }
+        #expect(!typed.contains("qwert"))
+        #expect(typed.count < 5)
     }
 
     @Test func aRejectedTapCorrectionIsNotApplied() {

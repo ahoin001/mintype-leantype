@@ -135,6 +135,13 @@ enum GestureComposer {
     /// degrees: enough to drop a straight run of keys, and shallow enough to keep a corner
     /// like R between T and A.
     static let aimTurn: CGFloat = 0.45
+    /// How long a finger must sit on one key before that key is a letter. Travel, however
+    /// slow, is not a pause.
+    static let dwellDuration: Double = 0.18
+    /// A dwell stays inside this radius of the key center, in points.
+    static let dwellRadius: CGFloat = 24
+    /// Movement beyond this, in points, is the finger leaving rather than pausing.
+    static let dwellTravel: CGFloat = 12
 
     /// `taps` are thumbs that never left their key. They do not change the moving finger's polyline.
     static func compose(_ strokes: [StrokeBuffer], taps: [StrokeObservation] = []) -> SwipeGesture? {
@@ -163,8 +170,8 @@ enum GestureComposer {
         var isTap: Bool
     }
 
-    /// Start, sharp turns, pauses, and the lift. A key the finger only slid across, without
-    /// turning or slowing, is not a letter. Every corner is kept, so a zigzag is not reduced
+    /// Start, sharp turns, dwells, and the lift. A key the finger only slid across is not a
+    /// letter, even when the slide is slow. Every corner is kept, so a zigzag is not reduced
     /// to its sharpest bend.
     private static func aimedMarks(in stroke: StrokeBuffer) -> [Mark] {
         let arrivals = stroke.arrivals
@@ -176,10 +183,7 @@ enum GestureComposer {
                 let current = arrivals[index]
                 let next = arrivals[index + 1]
                 let turned = turn(previous.center, current.center, next.center) >= aimTurn
-                let elapsed = next.time - previous.time
-                let span = hypot(next.center.x - previous.center.x, next.center.y - previous.center.y)
-                let paused = elapsed > 0 && Double(span) / elapsed < StrokeAnalyzer.pauseSpeed
-                if turned || paused {
+                if turned || dwelled(on: current, until: next.time, in: stroke) {
                     chosen.append(current)
                 }
             }
@@ -194,6 +198,33 @@ enum GestureComposer {
             marks.append(Mark(time: arrival.time, point: arrival.center, letter: arrival.letter, isTap: false))
         }
         return marks
+    }
+
+    /// The finger stayed nearly still on this key, rather than passing through it.
+    private static func dwelled(on arrival: KeyArrival, until end: Double, in stroke: StrokeBuffer) -> Bool {
+        var spanStart: Double?
+        var traveled: CGFloat = 0
+        var previous: CGPoint?
+        for point in stroke.points where point.time >= arrival.time && point.time <= end {
+            let near = hypot(point.location.x - arrival.center.x, point.location.y - arrival.center.y) <= dwellRadius
+            if near {
+                if spanStart == nil {
+                    spanStart = point.time
+                    traveled = 0
+                } else if let previous {
+                    traveled += hypot(point.location.x - previous.x, point.location.y - previous.y)
+                }
+                previous = point.location
+                if let spanStart, point.time - spanStart >= dwellDuration, traveled <= dwellTravel {
+                    return true
+                }
+            } else {
+                spanStart = nil
+                traveled = 0
+                previous = nil
+            }
+        }
+        return false
     }
 
     private static func turn(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {

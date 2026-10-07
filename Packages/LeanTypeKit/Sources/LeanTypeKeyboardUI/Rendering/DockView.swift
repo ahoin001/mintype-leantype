@@ -45,6 +45,21 @@ final class DockView: UIView {
         set { suggestions.onSelect = newValue }
     }
 
+    var wordMemory: ((String) -> WordMemory)? {
+        get { suggestions.memoryOf }
+        set { suggestions.memoryOf = newValue }
+    }
+
+    var onRememberWord: ((String) -> Void)? {
+        get { suggestions.onRemember }
+        set { suggestions.onRemember = newValue }
+    }
+
+    var onForgetWord: ((String) -> Void)? {
+        get { suggestions.onForget }
+        set { suggestions.onForget = newValue }
+    }
+
     /// A tap on the wordmark. Opens the delete-tap choice.
     var onWordmarkTap: (() -> Void)?
 

@@ -112,6 +112,9 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     public var typingMode: TypingModeSetting
     public var suggestionsEnabled: Bool
     public var autocorrectEnabled: Bool
+    /// A quick tap can still lengthen a word that just landed, when the letters spell a longer word.
+    /// A swipe that is already its own word always starts the next word.
+    public var extendFinishedWords: Bool
     /// Remember words the dictionary doesn't know. Only takes effect with Full Access.
     public var learnWordsEnabled: Bool
     public var height: KeyboardHeight
@@ -135,6 +138,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         typingMode: TypingModeSetting = .swipe,
         suggestionsEnabled: Bool = true,
         autocorrectEnabled: Bool = true,
+        extendFinishedWords: Bool = true,
         learnWordsEnabled: Bool = true,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
@@ -155,6 +159,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.typingMode = typingMode
         self.suggestionsEnabled = suggestionsEnabled
         self.autocorrectEnabled = autocorrectEnabled
+        self.extendFinishedWords = extendFinishedWords
         self.learnWordsEnabled = learnWordsEnabled
         self.height = height
         self.oneHandedMode = oneHandedMode
@@ -179,6 +184,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case typingMode
         case suggestionsEnabled
         case autocorrectEnabled
+        case extendFinishedWords
         case learnWordsEnabled
         case height
         case oneHandedMode
@@ -207,6 +213,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         typingMode = lenient.value(.typingMode, defaults.typingMode)
         suggestionsEnabled = lenient.value(.suggestionsEnabled, defaults.suggestionsEnabled)
         autocorrectEnabled = lenient.value(.autocorrectEnabled, defaults.autocorrectEnabled)
+        extendFinishedWords = lenient.value(.extendFinishedWords, defaults.extendFinishedWords)
         learnWordsEnabled = lenient.value(.learnWordsEnabled, defaults.learnWordsEnabled)
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)

@@ -153,7 +153,7 @@ struct GestureTip: Identifiable {
         GestureTip(
             id: "revert",
             title: "Keep what you typed",
-            detail: "Autocorrect only steps in when it's sure. If it guessed wrong, tap delete once to get your word back.",
+            detail: "Autocorrect only steps in when it's sure. If it guessed wrong, tap delete once to get your word back. Hold a suggestion to remember that spelling, or to forget a word it learned.",
             keyLabel: "delete",
             keySymbol: "delete.left",
             keyWidth: 72,

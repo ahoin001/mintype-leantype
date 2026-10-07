@@ -1,5 +1,17 @@
 import Foundation
 
+/// Where a word sits in the user's own list.
+public enum WordMemory: Equatable, Sendable {
+    /// Learning is off, or this isn't a word the list can hold.
+    case unavailable
+    /// Not stored yet.
+    case fresh
+    /// Stored, but not yet suggested. Another use, or an explicit remember, promotes it.
+    case learning
+    /// Stored and eligible to be suggested.
+    case remembered
+}
+
 /// Everything the keyboard knows about English words: the memory-mapped dictionary, the
 /// user's personal words, tap autocorrect, and the swipe decoder.
 ///
@@ -96,13 +108,45 @@ public final class LanguageModel {
     /// Notes that the user typed `word` on purpose. Dictionary words are ignored, except rare
     /// ones autocorrect would otherwise keep "fixing".
     public func learn(_ word: String) {
-        guard isLearningEnabled, word.count >= 2, word.count <= 24, needsLearning(word) else { return }
+        guard isLearningEnabled, Self.isLearnable(word), needsLearning(word) else { return }
         personal.learn(word, at: Date())
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
         unsavedChanges += 1
         if unsavedChanges >= Self.saveInterval {
             save()
         }
+    }
+
+    /// How `word` sits in the personal list, for the suggestion menu.
+    public func memory(of word: String) -> WordMemory {
+        guard isLearningEnabled, Self.isLearnable(word) else { return .unavailable }
+        switch personal.uses(of: word) {
+        case nil:
+            return .fresh
+        case let uses? where uses >= PersonalLexicon.usesBeforeSuggesting:
+            return .remembered
+        default:
+            return .learning
+        }
+    }
+
+    /// Pins `word` immediately, even if it is a dictionary word autocorrect likes to replace.
+    /// One explicit remember is enough for it to be suggested.
+    @discardableResult
+    public func remember(_ word: String) -> Bool {
+        let word = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isLearningEnabled, Self.isLearnable(word), personal.remember(word, at: Date()) else { return false }
+        persistPersonalChange()
+        return true
+    }
+
+    /// Removes one learned word, and any note that said to keep that spelling.
+    @discardableResult
+    public func forget(_ word: String) -> Bool {
+        guard personal.forget(word) else { return false }
+        rejections.forget(preferred: word)
+        persistPersonalChange()
+        return true
     }
 
     /// Re-reads learned words (after the app cleared them).
@@ -116,6 +160,17 @@ public final class LanguageModel {
         guard unsavedChanges > 0, let store else { return }
         store.save(personal.learnedWords)
         unsavedChanges = 0
+    }
+
+    private func persistPersonalChange() {
+        personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
+        unsavedChanges = 0
+        store?.save(personal.learnedWords)
+    }
+
+    private static func isLearnable(_ word: String) -> Bool {
+        guard word.count >= 2, word.count <= 24 else { return false }
+        return word.allSatisfy { $0.isLetter || $0 == "'" || $0 == "’" }
     }
 
     private func needsLearning(_ word: String) -> Bool {

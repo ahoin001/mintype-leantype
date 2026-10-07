@@ -220,6 +220,7 @@ struct SettingsTests {
         #expect(settings.theme == "mint")
         #expect(!settings.hapticsEnabled)
         #expect(settings.typingMode == .swipe)
+        #expect(settings.extendFinishedWords)
         #expect(settings.effects == .default)
         #expect(settings.height == .regular)
     }
