@@ -70,7 +70,8 @@ final class TrailRenderer {
         for id in strokes where trails[id] == nil {
             begin(id)
         }
-        for id in trails.keys where !strokes.contains(id) {
+        // Copy first: end() removes the entry, and enumerating trails.keys while mutating traps.
+        for id in Array(trails.keys) where !strokes.contains(id) {
             end(id, animated: level == .full)
         }
     }

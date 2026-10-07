@@ -114,7 +114,13 @@ final class SwipeCoordinator {
         let expected = generation
         decodeTask = Task { [weak self, decode] in
             let result = await decode(gesture)
-            guard let self, expected == self.generation else { return }
+            guard let self else { return }
+            // A newer gesture (or a reset) took over while this decode ran. Drop the slot or
+            // every later tap waits behind a ticket that will never resolve.
+            guard expected == generation else {
+                composer.cancel(ticket)
+                return
+            }
             decodeTask = nil
             if result.isEmpty {
                 composer.cancel(ticket)

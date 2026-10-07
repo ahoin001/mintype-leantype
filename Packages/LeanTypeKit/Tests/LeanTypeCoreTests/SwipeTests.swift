@@ -332,6 +332,40 @@ struct SwipeTypingTests {
         #expect(harness.state.interaction.strokes.isEmpty)
     }
 
+    @Test func aSupersededSwipeDoesNotBlockLaterTyping() async {
+        let hold = DecodeHold()
+        var committed: [KeyboardIntent] = []
+        let composer = InputComposer { committed.append(contentsOf: $0) }
+        let coordinator = SwipeCoordinator(composer: composer) { _ in
+            await hold.wait()
+            return DecodeResult(readings: [.init(word: "hello", score: 0)])
+        }
+
+        func lift(_ rawID: Int) {
+            let id = TouchID(rawValue: rawID)
+            let start = TouchSample(id: id, location: .zero, timestamp: 0, phase: .began)
+            var track = TouchTrack(start: start)
+            track.append(TouchSample(id: id, location: CGPoint(x: 30, y: 0), timestamp: 0.05, phase: .moved))
+            coordinator.begin(track, ticket: composer.reserve())
+            track.append(TouchSample(id: id, location: CGPoint(x: 60, y: 0), timestamp: 0.1, phase: .ended))
+            coordinator.ended(track)
+        }
+
+        lift(1)
+        #expect(await hold.waitUntil(count: 1))
+        lift(2)
+        #expect(await hold.waitUntil(count: 2))
+        hold.release()
+
+        var spins = 0
+        while composer.hasPendingCommits, spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        #expect(!composer.hasPendingCommits)
+        #expect(committed == [.commitSwipe(["hello"], unsure: false)])
+    }
+
     @Test func swipeIsOffWhenTypingModeIsTap() {
         let harness = EngineHarness(
             settings: KeyboardSettings(typingMode: .tap),
@@ -343,6 +377,31 @@ struct SwipeTypingTests {
         #expect(harness.state.interaction.strokes.isEmpty)
         harness.up(id)
         #expect(harness.text == "r")
+    }
+}
+
+/// Parks swipe decodes until the test has started a second gesture.
+@MainActor
+private final class DecodeHold {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    var waiting: Int { continuations.count }
+
+    func wait() async {
+        await withCheckedContinuation { continuations.append($0) }
+    }
+
+    func release() {
+        let pending = continuations
+        continuations.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    func waitUntil(count: Int) async -> Bool {
+        for _ in 0..<50 where waiting < count {
+            await Task.yield()
+        }
+        return waiting == count
     }
 }
 
