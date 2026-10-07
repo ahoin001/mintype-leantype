@@ -41,7 +41,7 @@ final class TapActionSession: InteractionSession {
         isFinished = true
     }
 
-    func otherTouchBegan() {
+    func otherTouchBegan(on _: KeyFrame) {
         guard !isFinished else { return }
         commitIfAllowed()
     }

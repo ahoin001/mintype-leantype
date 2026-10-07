@@ -14,6 +14,7 @@ public final class LanguageModel {
     public var isLearningEnabled = false
 
     private let store: (any LearnedWordsStore)?
+    private let rejections: RejectionMemory
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
     private var supplementaryWords: [String] = []
@@ -22,18 +23,26 @@ public final class LanguageModel {
     /// Learned words are written out after this many changes (and when the keyboard hides).
     static let saveInterval = 20
 
-    public init(lexicon: MappedLexicon, store: (any LearnedWordsStore)? = nil) {
+    public init(
+        lexicon: MappedLexicon,
+        store: (any LearnedWordsStore)? = nil,
+        rejections rejectionStore: (any RejectionStore)? = nil
+    ) {
         self.lexicon = lexicon
         self.store = store
+        rejections = RejectionMemory(store: rejectionStore)
         decoder = PathDecoder(lexicon: lexicon)
         personal = PersonalLexicon(learned: store?.load() ?? [])
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
     }
 
     /// Loads the bundled dictionary; `nil` if it's missing or unreadable.
-    public static func bundled(store: (any LearnedWordsStore)? = nil) -> LanguageModel? {
+    public static func bundled(
+        store: (any LearnedWordsStore)? = nil,
+        rejections: (any RejectionStore)? = nil
+    ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
-        return LanguageModel(lexicon: lexicon, store: store)
+        return LanguageModel(lexicon: lexicon, store: store, rejections: rejections)
     }
 
     // MARK: - Queries
@@ -43,12 +52,25 @@ public final class LanguageModel {
     }
 
     func analyze(_ word: String, touches: [CGPoint]?, layout: LetterLayout?, completionLimit: Int = 2) -> WordAnalysis {
-        let corrector = TapCorrector(lexicon: lexicon, personal: personalEntries) { [personal] in personal.contains($0) }
+        var corrector = TapCorrector(lexicon: lexicon, personal: personalEntries) { [personal] in personal.contains($0) }
+        corrector.isRejected = { [rejections] typed, chosen in
+            rejections.rejects(replacing: typed, with: chosen)
+        }
         return corrector.analyze(word, touches: touches, layout: layout, completionLimit: completionLimit)
     }
 
     func decode(_ gesture: SwipeGesture, layout: LetterLayout) async -> DecodeResult {
-        await decoder.decode(gesture, layout: layout, personal: personalEntries)
+        let result = await decoder.decode(gesture, layout: layout, personal: personalEntries)
+        return rejections.applying(to: result)
+    }
+
+    /// Remembers that the user wanted `preferred` instead of the `rejected` correction.
+    func noteRejection(preferred: String, rejected: String) {
+        rejections.note(preferred: preferred, rejected: rejected)
+    }
+
+    func applyingRejections(to result: DecodeResult) -> DecodeResult {
+        rejections.applying(to: result)
     }
 
     // MARK: - Learning

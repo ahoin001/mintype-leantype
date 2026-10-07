@@ -45,14 +45,31 @@ final class DockView: UIView {
         set { suggestions.onSelect = newValue }
     }
 
-    private let wordmark = UILabel()
+    /// A tap on the wordmark. Opens the delete-tap choice.
+    var onWordmarkTap: (() -> Void)?
+
+    /// The user picked what a tap on delete removes.
+    var onBackspaceChoice: ((BackspaceTapAction) -> Void)?
+
+    /// The delete menu opened or closed, so a waiting hint can take the row.
+    var onMenuVisibilityChange: (() -> Void)?
+
+    var isDeleteMenuOpen: Bool { menuOpen }
+
+    private let wordmark = UIButton(type: .system)
     private let suggestions = SuggestionStrip()
     private let pill = UIView()
     private let pillIcon = UIImageView()
     private let pillLabel = UILabel()
     private let dismissButton = DockView.makeButton(symbol: "keyboard.chevron.compact.down", label: "Hide keyboard")
     private let oneHandedButton = DockView.makeButton(symbol: "keyboard.onehanded.right", label: "One-handed keyboard")
+    private let deleteMenu = UIStackView()
+    private let wordChoice = UIButton(type: .system)
+    private let letterChoice = UIButton(type: .system)
     private var message: DockMessage?
+    private var menuOpen = false
+    private var backspaceAction = BackspaceTapAction.deleteWord
+    private var hintText: String?
     private var candidates = CandidateState.empty
     private var theme: Theme?
     private var palette: EffectPalette?
@@ -60,10 +77,21 @@ final class DockView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
 
-        wordmark.text = "leantype"
-        wordmark.font = Typography.rounded(size: 13, weight: .semibold)
-        wordmark.textAlignment = .center
-        wordmark.isAccessibilityElement = false
+        wordmark.setTitle("leantype", for: .normal)
+        wordmark.titleLabel?.font = Typography.rounded(size: 13, weight: .semibold)
+        wordmark.titleLabel?.adjustsFontSizeToFitWidth = true
+        wordmark.titleLabel?.minimumScaleFactor = 0.7
+        wordmark.accessibilityLabel = "LeanType, delete key options"
+        wordmark.addAction(UIAction { [weak self] _ in self?.onWordmarkTap?() }, for: .touchUpInside)
+
+        deleteMenu.axis = .horizontal
+        deleteMenu.distribution = .fillEqually
+        deleteMenu.spacing = 8
+        deleteMenu.alpha = 0
+        configureChoice(wordChoice, title: "Word", label: "A tap on delete removes a word", action: .deleteWord)
+        configureChoice(letterChoice, title: "Letter", label: "A tap on delete removes a letter", action: .deleteCharacter)
+        deleteMenu.addArrangedSubview(wordChoice)
+        deleteMenu.addArrangedSubview(letterChoice)
 
         suggestions.alpha = 0
 
@@ -84,6 +112,7 @@ final class DockView: UIView {
         oneHandedButton.addAction(UIAction { [weak self] _ in self?.onOneHanded?() }, for: .touchUpInside)
 
         addSubview(wordmark)
+        addSubview(deleteMenu)
         addSubview(suggestions)
         addSubview(pill)
         addSubview(dismissButton)
@@ -98,7 +127,8 @@ final class DockView: UIView {
     func apply(theme: Theme) {
         self.theme = theme
         palette = EffectPalette(theme: theme)
-        wordmark.textColor = theme.secondaryLabel.uiColor.withAlphaComponent(0.55)
+        wordmark.setTitleColor(theme.secondaryLabel.uiColor.withAlphaComponent(0.55), for: .normal)
+        refreshChoices()
         pill.backgroundColor = theme.statusPillFill.uiColor
         pillIcon.tintColor = theme.accentKey.fill.uiColor
         pillLabel.textColor = theme.letterKey.label.uiColor
@@ -133,8 +163,34 @@ final class DockView: UIView {
         guard let theme, let palette else { return }
         let resting = theme.secondaryLabel.uiColor.withAlphaComponent(0.55)
         let color = flow.value < 0.05 ? resting : palette.shifted(by: 0.1 * CGFloat(flow.value)).withAlphaComponent(0.55 + 0.4 * flow.value)
+        guard hintText == nil else { return }
         UIView.transition(with: wordmark, duration: 0.5, options: [.transitionCrossDissolve, .allowUserInteraction]) {
-            self.wordmark.textColor = color
+            self.wordmark.setTitleColor(color, for: .normal)
+        }
+    }
+
+    func setBackspaceAction(_ action: BackspaceTapAction) {
+        guard action != backspaceAction else { return }
+        backspaceAction = action
+        refreshChoices()
+    }
+
+    func toggleDeleteMenu() {
+        menuOpen.toggle()
+        updateVisibility()
+        onMenuVisibilityChange?()
+    }
+
+    /// One line in place of the wordmark. Pass nil to restore it.
+    func showHint(_ text: String?) {
+        hintText = text
+        wordmark.setTitle(text ?? "leantype", for: .normal)
+        wordmark.accessibilityLabel = text ?? "LeanType, delete key options"
+        if let theme {
+            let color = text == nil
+                ? theme.secondaryLabel.uiColor.withAlphaComponent(0.55)
+                : theme.letterKey.label.uiColor
+            wordmark.setTitleColor(color, for: .normal)
         }
     }
 
@@ -150,6 +206,7 @@ final class DockView: UIView {
         let trailing: CGFloat = dismissButton.isHidden ? 6 : buttonSize + 8
         let center = CGRect(x: leading, y: 0, width: max(bounds.width - leading - trailing, 0), height: bounds.height)
         wordmark.frame = center
+        deleteMenu.frame = center.insetBy(dx: 8, dy: 6)
         suggestions.frame = center
 
         let iconWidth: CGFloat = 16
@@ -169,11 +226,15 @@ final class DockView: UIView {
 
     // MARK: - Private
 
-    /// The pill wins over suggestions (it's modal), suggestions win over the wordmark.
+    /// Status wins, then suggestions, then the delete choice, then the wordmark.
     private func updateVisibility() {
         let showsPill = message != nil && (message == .trackpad || candidates.isEmpty)
-        let showsSuggestions = !showsPill && !candidates.isEmpty
+        let showsMenu = menuOpen && !showsPill
+        let showsSuggestions = !showsPill && !showsMenu && !candidates.isEmpty
+        let showsWordmark = !showsPill && !showsMenu && !showsSuggestions
         suggestions.isUserInteractionEnabled = showsSuggestions
+        wordmark.isUserInteractionEnabled = showsWordmark
+        deleteMenu.isUserInteractionEnabled = showsMenu
         UIView.animate(
             withDuration: Motion.modeChange,
             delay: 0,
@@ -181,8 +242,34 @@ final class DockView: UIView {
         ) {
             self.pill.alpha = showsPill ? 1 : 0
             self.suggestions.alpha = showsSuggestions ? 1 : 0
-            self.wordmark.alpha = showsPill || showsSuggestions ? 0 : 1
+            self.deleteMenu.alpha = showsMenu ? 1 : 0
+            self.wordmark.alpha = showsWordmark ? 1 : 0
         }
+    }
+
+    private func configureChoice(_ button: UIButton, title: String, label: String, action: BackspaceTapAction) {
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = Typography.rounded(size: 15, weight: .semibold)
+        button.accessibilityLabel = label
+        button.layer.cornerRadius = 8
+        button.layer.cornerCurve = .continuous
+        button.addAction(UIAction { [weak self] _ in self?.choose(action) }, for: .touchUpInside)
+    }
+
+    private func choose(_ action: BackspaceTapAction) {
+        backspaceAction = action
+        refreshChoices()
+        menuOpen = false
+        updateVisibility()
+        onBackspaceChoice?(action)
+        onMenuVisibilityChange?()
+    }
+
+    private func refreshChoices() {
+        let accent = theme?.accentKey.fill.uiColor ?? tintColor
+        let dim = theme?.secondaryLabel.uiColor ?? tintColor
+        wordChoice.setTitleColor(backspaceAction == .deleteWord ? accent : dim, for: .normal)
+        letterChoice.setTitleColor(backspaceAction == .deleteCharacter ? accent : dim, for: .normal)
     }
 
     private static func makeButton(symbol: String, label: String) -> UIButton {

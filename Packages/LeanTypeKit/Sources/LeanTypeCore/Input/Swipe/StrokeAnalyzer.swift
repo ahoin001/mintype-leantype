@@ -131,16 +131,38 @@ enum StrokeAnalyzer {
 
 /// Merges the strokes of one gesture into the path the decoder reads.
 enum GestureComposer {
-    static func compose(_ strokes: [[StrokePoint]]) -> SwipeGesture? {
-        let strokes = strokes.filter { !$0.isEmpty }
+    static func compose(_ strokes: [StrokeBuffer]) -> SwipeGesture? {
+        let strokes = strokes.filter { !$0.points.isEmpty }
         guard !strokes.isEmpty else { return nil }
+        let traced = tracedLetters(in: strokes)
         if strokes.count == 1 {
-            return SwipeGesture(path: strokes[0].map(\.location), strokeCount: 1)
+            return SwipeGesture(path: strokes[0].points.map(\.location), strokeCount: 1, tracedLetters: traced)
         }
-        let merged = strokes
-            .flatMap { StrokeAnalyzer.salientPoints(of: $0) }
+
+        let arrivals = strokes.flatMap(\.arrivals).sorted { $0.time < $1.time }
+        var path: [CGPoint] = []
+        var letters: [String] = []
+        for arrival in arrivals where letters.last != arrival.letter {
+            letters.append(arrival.letter)
+            path.append(arrival.center)
+        }
+        if path.count >= 2 {
+            return SwipeGesture(path: path, strokeCount: strokes.count, tracedLetters: traced)
+        }
+
+        let salient = strokes
+            .flatMap { StrokeAnalyzer.salientPoints(of: $0.points) }
             .sorted { $0.time < $1.time }
             .map(\.location)
-        return SwipeGesture(path: merged, strokeCount: strokes.count)
+        return SwipeGesture(path: salient, strokeCount: strokes.count, tracedLetters: traced)
+    }
+
+    /// Letters in the order thumbs reached them, skipping a letter repeated by the same thumb.
+    private static func tracedLetters(in strokes: [StrokeBuffer]) -> String {
+        var letters: [String] = []
+        for arrival in strokes.flatMap(\.arrivals).sorted(by: { $0.time < $1.time }) where letters.last != arrival.letter {
+            letters.append(arrival.letter)
+        }
+        return letters.joined()
     }
 }

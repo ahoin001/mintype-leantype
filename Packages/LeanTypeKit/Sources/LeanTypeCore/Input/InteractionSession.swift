@@ -45,9 +45,10 @@ protocol InteractionSession: AnyObject {
     func moved(_ track: TouchTrack)
     func ended(_ track: TouchTrack)
     func cancelled()
-    /// Another finger landed while this one is down. Tap sessions commit immediately
-    /// (rollover) so fast alternating thumbs never drop or reorder keys.
-    func otherTouchBegan()
+    /// Another finger landed on `key` while this one is down. Tap sessions commit immediately
+    /// (rollover) so fast alternating thumbs never drop or reorder keys. A swipe session may
+    /// hold instead, when the new finger could be the other thumb of the same word.
+    func otherTouchBegan(on key: KeyFrame)
 
     /// Another finger landed. Returning `true` takes that finger over: its moves and lift are
     /// routed here instead of starting a session of its own (two-finger trackpad).

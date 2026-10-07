@@ -14,6 +14,7 @@ final class KeyView: UIView {
     private var currentLabel: KeyLabel?
     private var isCompact = false
     private var isPressed = false
+    private var isSuggested = false
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
@@ -48,6 +49,7 @@ final class KeyView: UIView {
         shadow: RGBA,
         style newStyle: KeyStyle,
         isPressed pressed: Bool,
+        isSuggested suggested: Bool = false,
         isEnabled: Bool,
         isCompact compact: Bool,
         hint: String? = nil
@@ -76,7 +78,7 @@ final class KeyView: UIView {
         icon.tintColor = tint
         restingColor = colors.fill.uiColor
         pressedColor = colors.pressedFill.uiColor
-        setPressed(pressed)
+        applyFill(pressed: pressed, suggested: suggested)
     }
 
     func setContentHidden(_ hidden: Bool) {
@@ -100,14 +102,18 @@ final class KeyView: UIView {
     // MARK: - Private
 
     /// Presses apply instantly (they happen hundreds of times a day); releases ease back.
-    private func setPressed(_ pressed: Bool) {
-        let wasPressed = isPressed
+    /// A suggested key uses the pressed fill without the press scale, so the preview word
+    /// reads as lit letters rather than fingers.
+    private func applyFill(pressed: Bool, suggested: Bool) {
+        let wasLit = isPressed || isSuggested
         isPressed = pressed
-        let target = pressed ? pressedColor : restingColor
+        isSuggested = suggested
+        let lit = pressed || suggested
+        let target = lit ? pressedColor : restingColor
         let scale = pressed && !UIAccessibility.isReduceMotionEnabled ? style.pressedScale : 1
         let transform = CGAffineTransform(scaleX: scale, y: scale)
 
-        if wasPressed, !pressed {
+        if wasLit, !lit {
             UIView.animate(
                 withDuration: Motion.keyRelease,
                 delay: 0,

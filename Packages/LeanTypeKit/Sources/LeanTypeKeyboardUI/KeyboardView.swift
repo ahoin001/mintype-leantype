@@ -2,6 +2,14 @@ import LeanTypeCore
 import LeanTypeDesign
 import UIKit
 
+/// What fills the keyboard behind the keys.
+public enum KeyboardBackground: Equatable, Sendable {
+    /// The theme gradient. The companion preview has no system tray behind it.
+    case theme
+    /// Clear, so the system keyboard chrome (the globe and mic bar) shows through.
+    case system
+}
+
 /// The complete keyboard surface: soft gradient background, dock with suggestions, keys,
 /// callouts, swipe trails, and effects, driven by a `KeyboardEngine`. Used by the extension
 /// and by the companion app's live preview.
@@ -38,6 +46,11 @@ public final class KeyboardView: UIView {
 
     public var onNextKeyboard: (() -> Void)?
 
+    /// Clear in the extension so the system tray shows through. The preview keeps the gradient.
+    public var backgroundStyle: KeyboardBackground = .theme {
+        didSet { if backgroundStyle != oldValue { applyTheme() } }
+    }
+
     /// The user changed one-handed mode from the keyboard itself; the host should persist it.
     public var onOneHandedChange: ((OneHandedMode) -> Void)? {
         didSet {
@@ -54,9 +67,15 @@ public final class KeyboardView: UIView {
     private let panel = OneHandedPanel()
     private let stage: EffectsStage
     private let effects: EffectsCoordinator
+    /// The user chose what a tap on delete removes; the host should persist it.
+    public var onBackspaceTapChange: ((BackspaceTapAction) -> Void)?
+
     private var observers: [any KeyboardEventObserver] = []
     private var heightScale = 1.0
     private var oneHandedMode = OneHandedMode.off
+    private let coach = CoachHints()
+    private var pendingHint: CoachHints.Hint?
+    private var hintHide: Timer?
 
     public init(engine: KeyboardEngine, theme: Theme, feedback: FeedbackCoordinator) {
         self.engine = engine
@@ -85,6 +104,19 @@ public final class KeyboardView: UIView {
         }
         dock.onSelectCandidate = { [weak self] index in
             self?.engine.acceptCandidate(index)
+        }
+        dock.onWordmarkTap = { [weak self] in
+            self?.dock.toggleDeleteMenu()
+        }
+        dock.onBackspaceChoice = { [weak self] action in
+            guard let self else { return }
+            var settings = engine.settings
+            settings.backspaceTapAction = action
+            update(settings: settings)
+            onBackspaceTapChange?(action)
+        }
+        dock.onMenuVisibilityChange = { [weak self] in
+            self?.flushHint()
         }
         effects.onFlowChange = { [weak self] flow in
             guard let self else { return }
@@ -196,6 +228,7 @@ public final class KeyboardView: UIView {
     // MARK: - Private
 
     private func applySettings(_ settings: KeyboardSettings) {
+        dock.setBackspaceAction(settings.backspaceTapAction)
         keysView.showsHints = settings.secondaryHintsVisible && settings.flickForSecondaryEnabled
         effects.apply(settings: settings.effects)
         if settings.height.scale != heightScale || settings.oneHandedMode != oneHandedMode {
@@ -219,7 +252,17 @@ public final class KeyboardView: UIView {
     private func applyTheme() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        background.colors = [theme.backgroundTop.cgColor, theme.backgroundBottom.cgColor]
+        switch backgroundStyle {
+        case .theme:
+            background.isHidden = false
+            background.colors = [theme.backgroundTop.cgColor, theme.backgroundBottom.cgColor]
+            isOpaque = true
+        case .system:
+            background.isHidden = true
+            background.colors = nil
+            isOpaque = false
+            backgroundColor = .clear
+        }
         CATransaction.commit()
         dock.apply(theme: theme)
         keysView.apply(theme: theme)
@@ -227,17 +270,41 @@ public final class KeyboardView: UIView {
         effects.apply(theme: theme)
     }
 
-    private func updateDock() {
+    private func statusMessage() -> DockMessage? {
         let state = engine.state
-        let message: DockMessage? = if state.interaction.isTrackpadActive {
-            .trackpad
-        } else if state.shift == .locked {
-            .capsLock
-        } else {
-            persistentMessage
+        if state.interaction.isTrackpadActive { return .trackpad }
+        if state.shift == .locked { return .capsLock }
+        return persistentMessage
+    }
+
+    private func updateDock() {
+        dock.show(statusMessage())
+        dock.show(engine.state.interaction.isTrackpadActive ? .empty : engine.state.candidates)
+        flushHint()
+    }
+
+    private func noteCoach(_ event: KeyboardEvent) {
+        guard let hint = coach.consider(event) else { return }
+        pendingHint = hint
+        flushHint()
+    }
+
+    /// Shows a queued hint once status, suggestions, and the delete menu are out of the way.
+    private func flushHint() {
+        guard let hint = pendingHint, statusMessage() == nil,
+              engine.state.candidates.isEmpty, !dock.isDeleteMenuOpen
+        else { return }
+        pendingHint = nil
+        coach.markPresented(hint.id)
+        dock.showHint(hint.text)
+        hintHide?.invalidate()
+        let timer = Timer(timeInterval: 2.8, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.dock.showHint(nil)
+            }
         }
-        dock.show(message)
-        dock.show(state.interaction.isTrackpadActive ? .empty : state.candidates)
+        RunLoop.main.add(timer, forMode: .common)
+        hintHide = timer
     }
 }
 
@@ -254,6 +321,7 @@ extension KeyboardView: KeyboardEngineDelegate {
     }
 
     public func keyboardEngine(_: KeyboardEngine, didEmit event: KeyboardEvent) {
+        noteCoach(event)
         for observer in observers {
             observer.handle(event)
         }

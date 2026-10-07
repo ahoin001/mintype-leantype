@@ -21,10 +21,13 @@ final class SpaceSession: InteractionSession {
     /// Distance from the keyboard's side edges that starts gliding.
     static let edgeZone: CGFloat = 22
     static let edgeRepeat: (character: TimeInterval, word: TimeInterval) = (0.07, 0.2)
+    /// A downward flick opens these, nearest the finger first.
+    static let punctuationMarks = [".", ",", "?", "!", "'"]
 
     private enum Phase {
         case pressed
         case trackpad
+        case punctuation(layout: CalloutLayout, selected: Int)
         case finished
     }
 
@@ -53,6 +56,15 @@ final class SpaceSession: InteractionSession {
         switch phase {
         case .pressed: SessionPresentation(pressedKey: key.id)
         case .trackpad: SessionPresentation(pressedKey: key.id, isTrackpadActive: true)
+        case let .punctuation(layout, selected):
+            SessionPresentation(
+                pressedKey: key.id,
+                callout: CalloutState(
+                    keyID: key.id,
+                    layout: layout,
+                    content: .alternates(Self.punctuationMarks, selectedIndex: selected)
+                )
+            )
         case .finished: .none
         }
     }
@@ -66,20 +78,34 @@ final class SpaceSession: InteractionSession {
     func moved(_ track: TouchTrack) {
         switch phase {
         case .pressed:
-            guard abs(track.translation.dx) >= Self.activationDistance else { return }
-            enterTrackpad()
-            lastX = track.current.location.x
+            let move = track.translation
+            if abs(move.dx) >= Self.activationDistance {
+                enterTrackpad()
+                lastX = track.current.location.x
+                return
+            }
+            if move.dy >= CharacterTapSession.flickDistance,
+               move.dy >= abs(move.dx) * CharacterTapSession.flickVerticality {
+                enterPunctuation(at: track)
+            }
         case .trackpad:
             moveCursor(with: track)
             updateEdgeGlide(at: track.current.location.x)
+        case let .punctuation(layout, _):
+            phase = .punctuation(layout: layout, selected: layout.optionIndex(atX: track.current.location.x))
         case .finished:
             break
         }
     }
 
-    func ended(_: TouchTrack) {
-        if case .pressed = phase {
+    func ended(_ track: TouchTrack) {
+        switch phase {
+        case .pressed:
             context.composer.commit(ticket, [.space])
+        case let .punctuation(_, selected):
+            context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
+        case .trackpad, .finished:
+            break
         }
         finish()
     }
@@ -91,9 +117,15 @@ final class SpaceSession: InteractionSession {
         finish()
     }
 
-    func otherTouchBegan() {
-        guard case .pressed = phase else { return }
-        context.composer.commit(ticket, [.space])
+    func otherTouchBegan(on _: KeyFrame) {
+        switch phase {
+        case .pressed:
+            context.composer.commit(ticket, [.space])
+        case let .punctuation(_, selected):
+            context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
+        case .trackpad, .finished:
+            return
+        }
         finish()
     }
 
@@ -104,7 +136,7 @@ final class SpaceSession: InteractionSession {
         case .pressed:
             guard key.hitFrame.contains(track.start.location) else { return false }
             enterTrackpad()
-        case .finished:
+        case .punctuation, .finished:
             return false
         }
         extraFingers.insert(track.id)
@@ -118,6 +150,28 @@ final class SpaceSession: InteractionSession {
     // MARK: - Private
 
     private var stepsByWord: Bool { !extraFingers.isEmpty }
+
+    private func enterPunctuation(at track: TouchTrack) {
+        guard case .pressed = phase else { return }
+        longPress?.cancel()
+        longPress = nil
+        let letter = context.geometry.keys.first { $0.key.kind == .character("m") }?.visualFrame
+        let width = letter?.width ?? key.visualFrame.height
+        let anchor = CGRect(
+            x: track.current.location.x - width / 2,
+            y: key.visualFrame.minY,
+            width: width,
+            height: key.visualFrame.height
+        )
+        let layout = CalloutGeometry.layout(
+            anchor: anchor,
+            optionCount: Self.punctuationMarks.count,
+            metrics: context.geometry.metrics,
+            bounds: context.calloutBounds
+        )
+        phase = .punctuation(layout: layout, selected: layout.optionIndex(atX: track.current.location.x))
+        context.emit(.alternatesPresented)
+    }
 
     private func enterTrackpad() {
         guard case .pressed = phase else { return }

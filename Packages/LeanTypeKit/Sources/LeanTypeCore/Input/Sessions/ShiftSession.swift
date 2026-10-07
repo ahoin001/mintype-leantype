@@ -50,5 +50,5 @@ final class ShiftSession: InteractionSession {
         isFinished = true
     }
 
-    func otherTouchBegan() {}
+    func otherTouchBegan(on _: KeyFrame) {}
 }

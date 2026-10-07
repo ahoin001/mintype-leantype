@@ -1,6 +1,7 @@
 import LeanTypeCore
 import LeanTypeDesign
 import LeanTypeKeyboardUI
+import MetricKit
 import UIKit
 
 /// Thin composition root for the keyboard extension: wires the system text proxy, shared
@@ -13,8 +14,13 @@ final class KeyboardViewController: UIInputViewController {
     private var heightConstraint: NSLayoutConstraint?
     private var settings = KeyboardSettings.default
 
-    /// The memory-mapped dictionary costs almost no dirty memory, so it loads with the keyboard.
-    private let language = LanguageModel.bundled(store: AppGroupLearnedWordsStore())
+    /// Loaded on first use, after the crash log is installed, so a failure while mapping the
+    /// dictionary is recorded instead of killing the process with an empty log.
+    private lazy var language = LanguageModel.bundled(
+        store: AppGroupLearnedWordsStore(),
+        rejections: AppGroupRejectionStore()
+    )
+    private let crashMonitor = ExtensionCrashMonitor()
 
     private lazy var engine = KeyboardEngine(
         document: TextDocumentProxyAdapter(proxy: textDocumentProxy),
@@ -39,7 +45,11 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        ExtensionDiagnostics.install()
+        crashMonitor.start()
+        DiagnosticLog.shared.mark("Starting")
         installKeyboardView()
+        DiagnosticLog.shared.mark("Keyboard built")
 
         keyboardView.onGlobeEvent = { [weak self] view, event in
             guard let event else { return }
@@ -47,7 +57,9 @@ final class KeyboardViewController: UIInputViewController {
         }
         keyboardView.onNextKeyboard = { [weak self] in self?.advanceToNextInputMode() }
         keyboardView.onDismiss = { [weak self] in self?.dismissKeyboard() }
+        keyboardView.backgroundStyle = .system
         keyboardView.onOneHandedChange = { [weak self] mode in self?.persistOneHanded(mode) }
+        keyboardView.onBackspaceTapChange = { [weak self] action in self?.persistBackspace(action) }
         keyboardView.addEventObserver(stats)
 
         notificationObservers = [
@@ -61,17 +73,24 @@ final class KeyboardViewController: UIInputViewController {
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _: UITraitCollection) in
             controller.applyTheme()
         }
-        loadSupplementaryWords()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        DiagnosticLog.shared.mark(hasFullAccess ? "Opening with Full Access" : "Opening")
         reloadSettings()
+        DiagnosticLog.shared.mark("Settings loaded")
         engine.setShowsNextKeyboardKey(needsInputModeSwitchKey)
         engine.update(traits: InputTraits(proxy: textDocumentProxy))
         engine.reset()
         keyboardView.feedback.prepare()
         keyboardView.keyboardWillAppear()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        DiagnosticLog.shared.markOpened()
+        loadSupplementaryWords()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -134,10 +153,12 @@ final class KeyboardViewController: UIInputViewController {
             settings = settingsStore.load()
             statusStore.recordFullAccessSeen()
         } else {
-            // One-handed mode chosen from the dock still holds for this session.
+            // Choices made from the dock still hold for this session.
             let oneHanded = settings.oneHandedMode
+            let backspace = settings.backspaceTapAction
             settings = .default
             settings.oneHandedMode = oneHanded
+            settings.backspaceTapAction = backspace
         }
 
         keyboardView.update(settings: settings)
@@ -155,12 +176,26 @@ final class KeyboardViewController: UIInputViewController {
         settingsStore.save(settings)
     }
 
+    private func persistBackspace(_ action: BackspaceTapAction) {
+        settings.backspaceTapAction = action
+        guard hasFullAccess else { return }
+        settingsStore.save(settings)
+        DarwinNotifications.post(SharedContainer.settingsDidChangeNotification)
+    }
+
     /// Contact names and text-replacement expansions, so they're never "corrected".
+    /// Runs after the keyboard is on screen, and keeps only a capped list of single words:
+    /// the system lexicon can be large enough to get the extension killed mid-launch.
     private func loadSupplementaryWords() {
         guard language != nil else { return }
+        DiagnosticLog.shared.mark("Loading contacts")
         requestSupplementaryLexicon { [weak self] lexicon in
-            let words = lexicon.entries.map(\.documentText)
-            Task { @MainActor in self?.language?.setSupplementaryWords(words) }
+            let words = PersonalLexicon.acceptedSupplementary(from: lexicon.entries.lazy.map(\.documentText))
+            let count = words.count
+            Task { @MainActor in
+                self?.language?.setSupplementaryWords(words)
+                DiagnosticLog.shared.mark("Contacts ready (\(count))")
+            }
         }
     }
 
@@ -175,5 +210,59 @@ final class KeyboardViewController: UIInputViewController {
         default: traitCollection.userInterfaceStyle == .dark
         }
         return ThemeCatalog.theme(for: settings.theme, prefersDark: prefersDark)
+    }
+}
+
+/// Installs a last-chance writer for Objective-C exceptions. Swift fatal errors and memory
+/// kills skip this and show up through MetricKit on the next launch instead.
+@MainActor
+enum ExtensionDiagnostics {
+    private static var installed = false
+
+    static func install() {
+        guard !installed else { return }
+        installed = true
+        NSSetUncaughtExceptionHandler { exception in
+            let stack = exception.callStackSymbols.prefix(16).joined(separator: "\n")
+            DiagnosticLog.shared.recordCrash(
+                summary: exception.reason ?? exception.name.rawValue,
+                detail: stack
+            )
+        }
+    }
+}
+
+/// Forwards iOS crash and hang reports into the shared diagnostic file the app displays.
+final class ExtensionCrashMonitor: NSObject, MXMetricManagerSubscriber {
+    func start() {
+        MXMetricManager.shared.add(self)
+    }
+
+    func didReceive(_ payloads: [MXMetricPayload]) {}
+
+    func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        for payload in payloads {
+            for crash in payload.crashDiagnostics ?? [] {
+                record(crash)
+            }
+            for hang in payload.hangDiagnostics ?? [] {
+                DiagnosticLog.shared.recordCrash(summary: "Stopped responding", detail: "Hang \(hang.hangDuration)")
+            }
+        }
+    }
+
+    private func record(_ crash: MXCrashDiagnostic) {
+        var parts: [String] = []
+        if let reason = crash.terminationReason, !reason.isEmpty { parts.append(reason) }
+        if let name = crash.exceptionReason?.exceptionName, !name.isEmpty { parts.append(name) }
+        if parts.isEmpty, let signal = crash.signal { parts.append("Signal \(signal)") }
+        if parts.isEmpty { parts.append("Closed by iOS") }
+
+        var detail = crash.virtualMemoryRegionInfo ?? ""
+        if let text = String(data: crash.callStackTree.jsonRepresentation(), encoding: .utf8) {
+            if !detail.isEmpty { detail += "\n" }
+            detail += text
+        }
+        DiagnosticLog.shared.recordCrash(summary: parts.joined(separator: "\n"), detail: detail)
     }
 }

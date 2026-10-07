@@ -105,7 +105,7 @@ final class BackspaceSession: InteractionSession {
         finish()
     }
 
-    func otherTouchBegan() {}
+    func otherTouchBegan(on _: KeyFrame) {}
 
     // MARK: - Hold to repeat
 

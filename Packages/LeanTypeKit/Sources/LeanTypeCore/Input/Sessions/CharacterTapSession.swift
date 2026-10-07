@@ -109,7 +109,7 @@ final class CharacterTapSession: InteractionSession {
         finish()
     }
 
-    func otherTouchBegan() {
+    func otherTouchBegan(on _: KeyFrame) {
         switch phase {
         case .tracking:
             commitTracking(latest)

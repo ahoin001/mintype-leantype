@@ -40,6 +40,8 @@ public enum KeyboardEvent: Hashable, Sendable {
     case capsLockEngaged
     /// A word was finished (by space, punctuation, swipe, or accepting a suggestion).
     case wordCommitted(WordSource)
+    /// A swipe landed as a word. `strokes` is how many thumbs drew it.
+    case swipeGestureCommitted(strokes: Int)
     case correctionApplied
     case correctionReverted
     /// Typing rhythm changed noticeably.

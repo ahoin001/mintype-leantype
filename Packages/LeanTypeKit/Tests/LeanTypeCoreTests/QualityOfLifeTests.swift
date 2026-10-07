@@ -7,6 +7,25 @@ import Testing
 struct QualityOfLifeTests {
     private static let plain = InputTraits(autocapitalization: .none)
 
+    @Test func downwardFlickOnSpaceInsertsTheMarkUnderTheFinger() {
+        let harness = EngineHarness(traits: Self.plain)
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: 0, dy: CharacterTapSession.flickDistance + 6), over: 0.08)
+        guard case let .alternates(marks, selected) = harness.state.interaction.callout?.content else {
+            Issue.record("A downward flick on space should open punctuation")
+            return
+        }
+        #expect(marks == [".", ",", "?", "!", "'"])
+        harness.up(id)
+        #expect(harness.text == marks[selected])
+    }
+
+    @Test func aTapOnSpaceStillInsertsASpace() {
+        let harness = EngineHarness(traits: Self.plain)
+        harness.tap(.space)
+        #expect(harness.text == " ")
+    }
+
     @Test func flickDownTypesSecondary() {
         let harness = EngineHarness(traits: Self.plain)
         let id = harness.down(at: harness.point(for: "q"))

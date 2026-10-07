@@ -253,18 +253,46 @@ struct SwipeTypingTests {
         #expect(harness.state.candidates.candidates.contains { $0.text + " " == first }, "The original reading is offered back")
     }
 
-    @Test func twoThumbsSlideOneWord() async {
+    @Test func bothThumbsDownThenSlideOneWord() async {
         let harness = makeHarness()
-        // Left thumb: t → h. Right thumb lands on e while the left is still down.
         let left = harness.down(at: harness.point(for: "t"))
-        harness.move(left, to: harness.point(for: "h"), over: 0.08)
-        harness.wait(0.03)
-        let right = harness.down(at: harness.point(for: "e"))
-        harness.wait(0.05)
+        let right = harness.down(at: harness.point(for: "h"))
+        #expect(harness.text.isEmpty, "Two thumbs down together do not type yet")
+        harness.move(right, to: harness.point(for: "e"), over: 0.08)
         harness.up(left)
         harness.up(right)
         await harness.settle()
         #expect(harness.text == "the ")
+    }
+
+    @Test func aStillThumbTypesAfterTheSwipedWord() async {
+        let harness = makeHarness()
+        let left = harness.down(at: harness.point(for: "t"))
+        harness.move(left, to: harness.point(for: "h"), over: 0.08)
+        let right = harness.down(at: harness.point(for: "e"))
+        harness.up(right)
+        harness.up(left)
+        await harness.settle()
+        #expect(harness.text.hasSuffix("e"))
+        #expect(harness.text.contains(" "))
+        #expect(harness.recorder.events.contains { if case .swipeGestureCommitted(strokes: 1) = $0 { true } else { false } })
+    }
+
+    @Test func twoThumbsThatNeverTravelTypeInOrder() {
+        let harness = makeHarness()
+        let left = harness.down(at: harness.point(for: "t"))
+        let right = harness.down(at: harness.point(for: "e"))
+        #expect(harness.text.isEmpty)
+        harness.up(left)
+        harness.up(right)
+        #expect(harness.text == "te")
+    }
+
+    @Test func pullingBackShortensTheStroke() {
+        var stroke = StrokeBuffer(start: StrokePoint(location: .zero, time: 0))
+        stroke.append(StrokePoint(location: CGPoint(x: 80, y: 0), time: 0.1))
+        stroke.append(StrokePoint(location: CGPoint(x: 40, y: 0), time: 0.2))
+        #expect(stroke.points.map(\.location.x) == [0, 40])
     }
 
     @Test func downwardWordsAreSwipesNotFlicks() async {
@@ -363,7 +391,7 @@ struct SwipeTypingTests {
             await Task.yield()
         }
         #expect(!composer.hasPendingCommits)
-        #expect(committed == [.commitSwipe(["hello"], unsure: false)])
+        #expect(committed == [.commitSwipe(["hello"], unsure: false, strokes: 1)])
     }
 
     @Test func swipeIsOffWhenTypingModeIsTap() {
@@ -377,6 +405,47 @@ struct SwipeTypingTests {
         #expect(harness.state.interaction.strokes.isEmpty)
         harness.up(id)
         #expect(harness.text == "r")
+    }
+
+    @Test func anEmptyDecodeTypesTheLettersCrossed() async {
+        var committed: [KeyboardIntent] = []
+        let composer = InputComposer { committed.append(contentsOf: $0) }
+        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let id = TouchID(rawValue: 1)
+        let start = TouchSample(id: id, location: CGPoint(x: 0, y: 0), timestamp: 0, phase: .began)
+        var track = TouchTrack(start: start)
+        track.append(TouchSample(id: id, location: CGPoint(x: 40, y: 0), timestamp: 0.05, phase: .moved))
+        coordinator.begin(track, ticket: composer.reserve())
+        coordinator.arrive(id, letter: "q", at: CGPoint(x: 0, y: 0), time: 0)
+        coordinator.arrive(id, letter: "w", at: CGPoint(x: 40, y: 0), time: 0.05)
+        track.append(TouchSample(id: id, location: CGPoint(x: 40, y: 0), timestamp: 0.1, phase: .ended))
+        coordinator.ended(track)
+
+        var spins = 0
+        while composer.hasPendingCommits, spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        #expect(committed == [.commitSwipe(["qw"], unsure: true, strokes: 1)])
+    }
+
+    @Test func aRejectedSwipeReadingMovesBehindThePreferredWord() {
+        let model = LanguageModel(lexicon: TestLexicon.shared)
+        model.noteRejection(preferred: "teh", rejected: "the")
+        let ranked = model.applyingRejections(to: DecodeResult(readings: [
+            .init(word: "the", score: -0.1),
+            .init(word: "teh", score: -0.4),
+        ]))
+        #expect(ranked.words == ["teh", "the"])
+    }
+
+    @Test func aRejectedTapCorrectionIsNotApplied() {
+        let model = LanguageModel(lexicon: TestLexicon.shared)
+        let before = model.analyze("teh", touches: nil, layout: nil)
+        guard before.correction?.lowercased() == "the" else { return }
+        model.noteRejection(preferred: "teh", rejected: "the")
+        let after = model.analyze("teh", touches: nil, layout: nil)
+        #expect(after.correction?.lowercased() != "the")
     }
 }
 

@@ -12,7 +12,10 @@ struct TapTypingTests {
     }
 
     @Test func rolloverPreservesTouchDownOrder() {
-        let harness = EngineHarness(traits: InputTraits(autocapitalization: .none))
+        let harness = EngineHarness(
+            settings: KeyboardSettings(typingMode: .tap),
+            traits: InputTraits(autocapitalization: .none)
+        )
         let first = harness.down(at: harness.point(for: "o"))
         let second = harness.down(at: harness.point(for: "k"))
         #expect(harness.text == "o", "The first key commits as soon as the second finger lands")

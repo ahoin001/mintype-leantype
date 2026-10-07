@@ -28,14 +28,38 @@ final class SwipeCoordinator {
     private var previewTask: Task<Void, Never>?
     private var previewToken = 0
     private var generation = 0
+    /// Letter fingers still deciding between a tap and a stroke. Weak, so a session the touch
+    /// engine has already dropped cannot keep the coordinator alive.
+    private var undecided: [ObjectIdentifier: WeakSession] = [:]
+
+    private struct WeakSession {
+        weak var session: SwipeSession?
+    }
 
     init(composer: InputComposer, decode: @escaping Decoder) {
         self.composer = composer
         self.decode = decode
     }
 
-    /// Fingers are down drawing a gesture; new fingers on letters join it.
+    /// Fingers are down drawing a gesture; new fingers on letters may join it.
     var isCollecting: Bool { !active.isEmpty }
+
+    func registerUndecided(_ session: SwipeSession) {
+        undecided[ObjectIdentifier(session)] = WeakSession(session: session)
+    }
+
+    func unregisterUndecided(_ session: SwipeSession) {
+        undecided.removeValue(forKey: ObjectIdentifier(session))
+    }
+
+    /// Fingers that were waiting when this gesture began become strokes of it.
+    func enlistUndecidedPartners() {
+        let partners = undecided.values.compactMap(\.session)
+        undecided.removeAll()
+        for partner in partners {
+            partner.joinCurrentGesture()
+        }
+    }
 
     /// Starts a gesture with `track` as its first stroke, holding `ticket` for the word.
     func begin(_ track: TouchTrack, ticket: InputComposer.Ticket) {
@@ -55,6 +79,10 @@ final class SwipeCoordinator {
     func moved(_ track: TouchTrack) {
         active[track.id]?.append(Self.point(track.current))
         schedulePreview()
+    }
+
+    func arrive(_ id: TouchID, letter: String, at center: CGPoint, time: Double) {
+        active[id]?.arrive(letter, at: center, time: time)
     }
 
     func ended(_ track: TouchTrack) {
@@ -99,13 +127,13 @@ final class SwipeCoordinator {
     }
 
     private func finishGesture() {
-        let strokes = finished.map(\.points)
+        let strokes = finished
         finished.removeAll()
         guard let ticket else { return }
         self.ticket = nil
 
         invalidatePreview()
-        guard let gesture = GestureComposer.compose(strokes) else {
+        guard let gesture = GestureComposer.compose(strokes), gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
             composer.cancel(ticket)
             onPreview?(nil)
             return
@@ -122,13 +150,25 @@ final class SwipeCoordinator {
                 return
             }
             decodeTask = nil
-            if result.isEmpty {
-                composer.cancel(ticket)
-            } else {
-                composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure)])
-            }
+            commit(result, gesture: gesture, ticket: ticket)
             onPreview?(nil)
             onFinish?()
+        }
+    }
+
+    /// The decoded word, or the letters the fingers actually crossed when nothing matched.
+    private func commit(_ result: DecodeResult, gesture: SwipeGesture, ticket: InputComposer.Ticket) {
+        if !result.isEmpty {
+            composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount)])
+            return
+        }
+        let traced = gesture.tracedLetters
+        if traced.isEmpty {
+            composer.cancel(ticket)
+        } else if traced.count == 1 {
+            composer.commit(ticket, [.insert(traced)])
+        } else {
+            composer.commit(ticket, [.commitSwipe([traced], unsure: true, strokes: gesture.strokeCount)])
         }
     }
 
@@ -144,7 +184,7 @@ final class SwipeCoordinator {
             guard let self else { return }
             previewTask = nil
             guard token == previewToken, expected == generation, isCollecting else { return }
-            let strokes = finished.map(\.points) + active.values.map(\.points)
+            let strokes = finished + active.values
             guard let gesture = GestureComposer.compose(strokes) else { return }
             let result = await decode(gesture)
             guard token == previewToken, expected == generation, isCollecting, !result.isEmpty else { return }

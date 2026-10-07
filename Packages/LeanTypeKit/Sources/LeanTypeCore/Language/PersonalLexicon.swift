@@ -20,6 +20,9 @@ public struct LearnedWord: Codable, Hashable, Sendable {
 /// decoding. The learned list is capped; the least recently used word makes room.
 public struct PersonalLexicon: Sendable {
     public static let capacity = 1000
+    /// Contact names and text replacements kept in memory. The system list can be tens of
+    /// thousands of entries; a keyboard extension is killed if it keeps them all.
+    public static let supplementaryLimit = 400
     /// Uses before a learned word starts appearing as a suggestion.
     static let usesBeforeSuggesting = 2
 
@@ -49,9 +52,24 @@ public struct PersonalLexicon: Sendable {
         return learned[key] != nil || supplementary[key] != nil
     }
 
+    /// Single words worth keeping from a contact list or text replacements. Stops at
+    /// `supplementaryLimit` so a large address book is never copied whole.
+    public static func acceptedSupplementary(from words: some Sequence<String>) -> [String] {
+        var kept: [String] = []
+        var seen = Set<String>()
+        kept.reserveCapacity(min(supplementaryLimit, 64))
+        for word in words {
+            guard word.count <= 40, !word.contains(where: \.isWhitespace), !LexiconKey.make(word).isEmpty else { continue }
+            guard seen.insert(storageKey(word)).inserted else { continue }
+            kept.append(word)
+            if kept.count == supplementaryLimit { break }
+        }
+        return kept
+    }
+
     public mutating func setSupplementary(_ words: [String]) {
         supplementary = [:]
-        for word in words where !word.contains(" ") && !LexiconKey.make(word).isEmpty {
+        for word in Self.acceptedSupplementary(from: words) {
             supplementary[Self.storageKey(word)] = word
         }
     }

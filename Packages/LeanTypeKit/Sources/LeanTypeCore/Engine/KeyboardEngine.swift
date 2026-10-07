@@ -267,8 +267,8 @@ public final class KeyboardEngine {
             changed = editor.moveCursor(by: direction)
         case let .moveCursorByWord(direction):
             changed = editor.moveCursorByWord(direction)
-        case let .commitSwipe(readings, unsure):
-            changed = commitSwipe(readings, unsure: unsure)
+        case let .commitSwipe(readings, unsure, strokes):
+            changed = commitSwipe(readings, unsure: unsure, strokes: strokes)
         case let .acceptCandidate(index):
             changed = acceptCandidate(at: index)
         case .shiftPressBegan:
@@ -366,7 +366,7 @@ public final class KeyboardEngine {
         flow.noteWordCompleted()
     }
 
-    private func commitSwipe(_ readings: [String], unsure: Bool) -> Bool {
+    private func commitSwipe(_ readings: [String], unsure: Bool, strokes: Int) -> Bool {
         guard !readings.isEmpty else { return false }
         let cased = readings.map(applyShift(to:))
         editor.commitWord(cased[0])
@@ -374,6 +374,7 @@ public final class KeyboardEngine {
         insertionCount += 1
         shift.consumeAfterInsertion()
         completeWord(.swipe)
+        emit(.swipeGestureCommitted(strokes: strokes))
         return true
     }
 
@@ -389,10 +390,14 @@ public final class KeyboardEngine {
             completeWord(.suggestion)
             return true
         case let .swap(word):
+            if let current = editor.recentCommit?.word {
+                words.rememberRejection(preferred: word, rejected: current)
+            }
             return editor.replaceRecentCommitWord(with: word)
         case .revert:
             guard let commit = editor.undoRecentCommit() else { return false }
             emit(.correctionReverted)
+            words.rememberRejection(preferred: commit.original, rejected: commit.word)
             words.keep(commit.original)
             return insertSpace()
         }
@@ -426,6 +431,7 @@ public final class KeyboardEngine {
         switch commit.kind {
         case .corrected:
             emit(.correctionReverted)
+            words.rememberRejection(preferred: commit.original, rejected: commit.word)
             words.keep(commit.original)
         case .completed:
             words.keep(commit.original)

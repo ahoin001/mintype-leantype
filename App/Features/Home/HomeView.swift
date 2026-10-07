@@ -1,5 +1,6 @@
 import LeanTypeCore
 import SwiftUI
+import UIKit
 
 enum HomeDestination: Hashable {
     case themes
@@ -13,7 +14,9 @@ struct HomeView: View {
     @Environment(\.pebbleTheme) private var theme
     @Environment(SetupStatusModel.self) private var setup
     @Environment(KeyboardDataModel.self) private var data
+    @Environment(\.scenePhase) private var scenePhase
     @State private var preview = PreviewKeyboardModel()
+    @State private var diagnostics = KeyboardReport()
 
     private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
 
@@ -21,6 +24,13 @@ struct HomeView: View {
         ScrollView {
             VStack(spacing: 24) {
                 header
+
+                if diagnostics.hasTrouble {
+                    KeyboardTroubleCard(report: diagnostics) {
+                        DiagnosticLog.shared.acknowledge()
+                        diagnostics = DiagnosticLog.shared.load()
+                    }
+                }
 
                 if !setup.hasSeenFullAccess {
                     SetupCard()
@@ -56,6 +66,10 @@ struct HomeView: View {
         .scrollIndicators(.hidden)
         .pebbleScreen()
         .toolbar(.hidden, for: .navigationBar)
+        .onAppear { diagnostics = DiagnosticLog.shared.load() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { diagnostics = DiagnosticLog.shared.load() }
+        }
         .navigationDestination(for: HomeDestination.self) { destination in
             switch destination {
             case .themes: ThemePickerView()
@@ -102,5 +116,44 @@ struct HomeView: View {
             }
         }
         .buttonStyle(PebblePressStyle())
+    }
+}
+
+/// Shown when the keyboard extension died the last time it was opened.
+struct KeyboardTroubleCard: View {
+    @Environment(\.pebbleTheme) private var theme
+
+    let report: KeyboardReport
+    var onDismiss: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        PebbleCard(padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    PebbleIcon(systemName: "exclamationmark.triangle", size: 34)
+                    Text(report.headline)
+                        .font(.pebble(.headline, weight: .bold))
+                        .foregroundStyle(theme.ink)
+                    Spacer(minLength: 0)
+                }
+                Text(report.explanation)
+                    .font(.pebble(.subheadline))
+                    .foregroundStyle(theme.subtleInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 16) {
+                    Button(copied ? "Copied" : "Copy details") {
+                        UIPasteboard.general.string = report.copyText
+                        copied = true
+                    }
+                    .font(.pebble(.subheadline, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    Button("Dismiss", action: onDismiss)
+                        .font(.pebble(.subheadline, weight: .semibold))
+                        .foregroundStyle(theme.subtleInk)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }

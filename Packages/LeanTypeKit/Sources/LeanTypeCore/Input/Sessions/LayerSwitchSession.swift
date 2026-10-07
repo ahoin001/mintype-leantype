@@ -75,7 +75,7 @@ final class LayerSwitchSession: InteractionSession {
         isFinished = true
     }
 
-    func otherTouchBegan() {
+    func otherTouchBegan(on _: KeyFrame) {
         guard !isFinished, slideTarget == nil else { return }
         context.composer.cancel(ticket)
         isFinished = true

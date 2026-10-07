@@ -202,6 +202,7 @@ final class KeyboardTouchView: UIView {
     private func render() {
         guard let geometry, let state, let theme else { return }
         let compact = geometry.metrics.isCompact
+        let suggested = suggestedKeyIDs(in: state, geometry: geometry)
         for frame in geometry.keys {
             guard let view = viewPool[frame.id] else { continue }
             let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state, showsHints: showsHints)
@@ -211,6 +212,7 @@ final class KeyboardTouchView: UIView {
                 shadow: theme.keyShadow,
                 style: style,
                 isPressed: state.interaction.pressedKeys.contains(frame.id) || (isGlobePressed && frame.id == globeKeyID),
+                isSuggested: suggested.contains(frame.id),
                 isEnabled: presentation.isEnabled,
                 isCompact: compact,
                 hint: presentation.hint
@@ -233,6 +235,19 @@ final class KeyboardTouchView: UIView {
         guard pressed != isGlobePressed else { return }
         isGlobePressed = pressed
         render()
+    }
+
+    /// Letter keys that spell the word the swipe preview is about to commit.
+    private func suggestedKeyIDs(in state: KeyboardViewState, geometry: KeyboardGeometry) -> Set<KeyID> {
+        guard state.candidates.isTentative, state.layer == .letters else { return [] }
+        let index = state.candidates.highlightedIndex ?? 0
+        guard state.candidates.candidates.indices.contains(index) else { return [] }
+        let letters = Set(state.candidates.candidates[index].text.lowercased().filter(\.isLetter).map(String.init))
+        guard !letters.isEmpty else { return [] }
+        return Set(geometry.keys.compactMap { frame in
+            guard let character = frame.key.kind.character?.lowercased(), letters.contains(character) else { return nil }
+            return frame.id
+        })
     }
 
     private func isLetterKey(_ id: KeyID) -> Bool {

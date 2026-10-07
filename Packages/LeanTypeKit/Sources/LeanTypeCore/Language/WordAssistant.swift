@@ -143,6 +143,11 @@ final class WordAssistant {
         return state
     }
 
+    /// The user put back a word the keyboard had replaced.
+    func rememberRejection(preferred: String, rejected: String) {
+        language?.noteRejection(preferred: preferred, rejected: rejected)
+    }
+
     func accept(_ index: Int, from state: CandidateState) -> Acceptance? {
         guard !state.isTentative, state.candidates.indices.contains(index) else { return nil }
         let candidate = state.candidates[index]

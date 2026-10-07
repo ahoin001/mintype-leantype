@@ -56,7 +56,7 @@ public final class FeedbackCoordinator: KeyboardEventObserver {
             guard hapticsEnabled else { return }
             swipeSuccess.notificationOccurred(.success)
             swipeSuccess.prepare()
-        case .sentenceEnded, .trackpadEnded, .wordCommitted, .correctionApplied, .flowChanged:
+        case .sentenceEnded, .trackpadEnded, .wordCommitted, .swipeGestureCommitted, .correctionApplied, .flowChanged:
             break
         }
     }

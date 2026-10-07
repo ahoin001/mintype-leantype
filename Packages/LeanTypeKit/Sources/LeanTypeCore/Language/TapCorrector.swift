@@ -41,6 +41,8 @@ struct TapCorrector {
     let lexicon: MappedLexicon
     let personal: [PersonalLexicon.Entry]
     let isPersonal: (String) -> Bool
+    /// True when the user has already refused this exact replacement.
+    var isRejected: (_ typed: String, _ correction: String) -> Bool = { _, _ in false }
 
     func analyze(_ typed: String, touches: [CGPoint]?, layout: LetterLayout?, completionLimit: Int) -> WordAnalysis {
         guard typed.allSatisfy({ $0.isLetter || $0 == "'" || $0 == "’" }) else { return .empty }
@@ -49,7 +51,7 @@ struct TapCorrector {
 
         let personalWord = isPersonal(typed)
         let match = personalWord ? nil : exactMatch(typed, key: key)
-        let correction: String? = switch (personalWord, match) {
+        let proposed: String? = switch (personalWord, match) {
         case (true, _):
             nil
         case let (false, index?):
@@ -62,6 +64,7 @@ struct TapCorrector {
                 ?? correction(for: typed, key: key, touches: touches, layout: layout,
                               against: lexicon.logCountRange.lowerBound - Self.unknownWordPenalty, margin: Self.margin)
         }
+        let correction = proposed.flatMap { isRejected(typed, $0) ? nil : $0 }
         let known = personalWord || match != nil
         let completions = completions(for: key, excluding: [typed, correction].compactMap { $0 }, limit: completionLimit)
             .map { matchCase($0, to: typed) }

@@ -95,7 +95,8 @@ final class TrailRenderer {
 
     private func begin(_ id: TouchID) {
         guard let shape = stage.pool.shape() else { return }
-        let hueOffset: CGFloat = trails.isEmpty ? 0 : 0.38
+        let startX = histories[id].flatMap { $0.count > 0 ? $0[0].location.x : nil } ?? stage.bounds.midX
+        let hueOffset: CGFloat = startX < stage.bounds.midX ? 0 : 0.38
         shape.frame = stage.bounds
         shape.strokeColor = nil
         shape.lineWidth = 0

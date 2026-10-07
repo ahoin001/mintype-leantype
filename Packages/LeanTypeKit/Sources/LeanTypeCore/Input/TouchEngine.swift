@@ -84,7 +84,7 @@ final class TouchEngine {
                 return
             }
             for id in order where touches[id]?.isAbsorbed == false {
-                touches[id]?.session.otherTouchBegan()
+                touches[id]?.session.otherTouchBegan(on: key)
             }
             let session = arbiter.makeSession(for: key, track: track, context: context)
             touches[sample.id] = ActiveTouch(track: track, session: session, isAbsorbed: false)
