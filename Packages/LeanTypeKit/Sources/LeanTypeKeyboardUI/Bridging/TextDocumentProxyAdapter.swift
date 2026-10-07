@@ -35,8 +35,16 @@ public extension InputTraits {
             variant: KeyboardVariant(proxy.keyboardType ?? .default),
             autocapitalization: AutocapitalizationMode(proxy.autocapitalizationType ?? .sentences),
             returnKey: ReturnKeyKind(proxy.returnKeyType ?? .default),
-            enablesReturnKeyAutomatically: proxy.enablesReturnKeyAutomatically ?? false
+            enablesReturnKeyAutomatically: proxy.enablesReturnKeyAutomatically ?? false,
+            allowsAutocorrection: proxy.autocorrectionType != .no
+                && proxy.isSecureTextEntry != true
+                && proxy.textContentType.map(Self.isCredential) != true
         )
+    }
+
+    /// Usernames, passwords, and one-time codes must reach the field exactly as typed.
+    private static func isCredential(_ type: UITextContentType) -> Bool {
+        [.username, .password, .newPassword, .oneTimeCode, .emailAddress, .URL].contains(type)
     }
 }
 

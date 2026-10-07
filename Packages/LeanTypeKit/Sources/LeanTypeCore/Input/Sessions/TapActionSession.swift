@@ -13,12 +13,12 @@ final class TapActionSession: InteractionSession {
     private var isInside = true
     private var isFinished = false
 
-    init(key: KeyFrame, intent: KeyboardIntent, context: any SessionContext) {
+    init(key: KeyFrame, intent: KeyboardIntent, track: TouchTrack, context: any SessionContext) {
         self.key = key
         self.intent = intent
         self.context = context
         ticket = context.composer.reserve()
-        context.emit(.keyDown(.modifier))
+        context.emit(.keyDown(.modifier, at: track.start.location))
     }
 
     var presentation: SessionPresentation {

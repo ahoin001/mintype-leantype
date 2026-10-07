@@ -16,6 +16,8 @@ struct SessionPresentation {
     var pressedKey: KeyID?
     var callout: CalloutState?
     var isTrackpadActive = false
+    /// The finger is drawing a swipe stroke (and should leave a trail).
+    var isStroke = false
 
     static let none = SessionPresentation()
 }
@@ -25,6 +27,15 @@ public struct InteractionState: Hashable, Sendable {
     public var pressedKeys: Set<KeyID>
     public var callout: CalloutState?
     public var isTrackpadActive: Bool
+    /// Fingers currently drawing swipe strokes.
+    public var strokes: Set<TouchID>
+
+    public init(pressedKeys: Set<KeyID>, callout: CalloutState?, isTrackpadActive: Bool, strokes: Set<TouchID> = []) {
+        self.pressedKeys = pressedKeys
+        self.callout = callout
+        self.isTrackpadActive = isTrackpadActive
+        self.strokes = strokes
+    }
 
     public static let idle = InteractionState(pressedKeys: [], callout: nil, isTrackpadActive: false)
 }

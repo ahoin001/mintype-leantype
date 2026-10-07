@@ -1,11 +1,15 @@
-/// Pure text rules: word boundaries for deletion and when to auto-capitalize. All counts are in
-/// grapheme clusters (Swift `Character`s), so emoji and combined accents are never split.
+/// Pure text rules: word and sentence boundaries, auto-capitalization, and punctuation
+/// spacing. All counts are in grapheme clusters (Swift `Character`s), so emoji and combined
+/// accents are never split.
 public enum TextBoundary {
     enum CharacterClass: Equatable {
         case word
         case punctuation
         case other
     }
+
+    /// Punctuation that "hops" over a space the keyboard just added: "word ." becomes "word. ".
+    public static let hoppingPunctuation: Set<Character> = [".", ",", "!", "?"]
 
     /// How many characters a "delete word" removes from the end of `before`.
     ///
@@ -15,7 +19,26 @@ public enum TextBoundary {
     /// also clears any selection).
     public static func wordDeletionLength(before: String?) -> Int {
         guard let before, !before.isEmpty else { return 1 }
+        return max(wordRunLength(before.reversed()), 1)
+    }
 
+    /// Characters to move left to reach the start of the previous word (option-left).
+    public static func wordMovementLength(before: String?) -> Int {
+        guard let before, !before.isEmpty else { return 0 }
+        return wordRunLength(before.reversed())
+    }
+
+    /// Characters to move right to reach the end of the next word (option-right).
+    public static func wordMovementLength(after: String?) -> Int {
+        guard let after, !after.isEmpty else { return 0 }
+        return wordRunLength(after)
+    }
+
+    /// How many characters a "delete sentence" removes from the end of `before`: back to the
+    /// end of the previous sentence (keeping its terminator and the space after it) or the
+    /// start of the line.
+    public static func sentenceDeletionLength(before: String?) -> Int {
+        guard let before, !before.isEmpty else { return 1 }
         var iterator = before.reversed().makeIterator()
         var count = 0
         var next = iterator.next()
@@ -24,21 +47,36 @@ public enum TextBoundary {
             count += 1
             next = iterator.next()
         }
-
-        guard let boundary = next else { return count }
-        if boundary.isNewline {
-            return count == 0 ? 1 : count
-        }
-
-        let targetClass = characterClass(of: boundary)
-        if targetClass == .other {
-            return count + 1
-        }
-        while let character = next, !character.isWhitespace, characterClass(of: character) == targetClass {
+        // The current sentence's own closing punctuation belongs to it.
+        while let character = next, sentenceTerminators.contains(character) || closingCharacters.contains(character) {
             count += 1
             next = iterator.next()
         }
-        return count
+        while let character = next {
+            if character.isNewline { break }
+            if sentenceTerminators.contains(character) { break }
+            count += 1
+            next = iterator.next()
+        }
+        // Keep the whitespace that followed the previous sentence.
+        if next != nil {
+            let kept = before.suffix(count).prefix { $0.isInlineWhitespace }.count
+            count -= kept
+        }
+        return max(count, 1)
+    }
+
+    /// The word being typed: the run of letters (and apostrophes) right before the cursor.
+    public static func currentWord(before: String?) -> Substring {
+        guard let before else { return "" }
+        let start = before.reversed().prefix { characterClass(of: $0) == .word }.count
+        return before.suffix(start)
+    }
+
+    /// Whether the text after the cursor carries on the current word (the cursor is mid-word).
+    public static func continuesWord(after: String?) -> Bool {
+        guard let first = after?.first else { return false }
+        return characterClass(of: first) == .word
     }
 
     /// Whether the next typed letter should be capitalized automatically.
@@ -66,13 +104,24 @@ public enum TextBoundary {
         }
     }
 
-    /// Whether a double-tapped space should become ". ": the text must end in a word followed
-    /// by exactly one space.
-    public static func canApplyDoubleSpacePeriod(before: String?) -> Bool {
+    /// Whether the text ends in a word followed by exactly one space: the shape a double-space
+    /// period and hopping punctuation both rewrite.
+    public static func endsWithWordAndSingleSpace(_ before: String?) -> Bool {
         guard let before else { return false }
         var reversed = before.reversed().makeIterator()
         guard reversed.next() == " ", let previous = reversed.next() else { return false }
         return characterClass(of: previous) == .word || closingCharacters.contains(previous)
+    }
+
+    /// Whether a double-tapped space should become ". ".
+    public static func canApplyDoubleSpacePeriod(before: String?) -> Bool {
+        endsWithWordAndSingleSpace(before)
+    }
+
+    /// Whether the text ends mid-word, so a swiped word needs a space in front of it.
+    public static func needsSpaceBeforeWord(_ before: String?) -> Bool {
+        guard let last = before?.last else { return false }
+        return characterClass(of: last) == .word || sentenceTerminators.contains(last) || last == ","
     }
 
     static func characterClass(of character: Character) -> CharacterClass {
@@ -83,6 +132,34 @@ public enum TextBoundary {
             return .punctuation
         }
         return .other
+    }
+
+    // MARK: - Private
+
+    /// Length of the option-arrow run at the start of `characters`: leading inline whitespace,
+    /// then one newline, or one run of word or punctuation characters, or one emoji.
+    private static func wordRunLength(_ characters: some Sequence<Character>) -> Int {
+        var iterator = characters.makeIterator()
+        var count = 0
+        var next = iterator.next()
+
+        while let character = next, character.isInlineWhitespace {
+            count += 1
+            next = iterator.next()
+        }
+        guard let boundary = next else { return count }
+        if boundary.isNewline {
+            return count == 0 ? 1 : count
+        }
+        let targetClass = characterClass(of: boundary)
+        if targetClass == .other {
+            return count + 1
+        }
+        while let character = next, !character.isWhitespace, characterClass(of: character) == targetClass {
+            count += 1
+            next = iterator.next()
+        }
+        return count
     }
 
     private static let wordJoiners: Set<Character> = ["'", "’", "_"]

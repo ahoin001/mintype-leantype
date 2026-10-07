@@ -1,3 +1,4 @@
+import LeanTypeDesign
 import SwiftUI
 
 /// A settings row with an icon, title, optional explanation, and a toggle.
@@ -43,6 +44,59 @@ struct PebblePickerRow<Value: Hashable>: View {
             .pickerStyle(.segmented)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A choice shown as a row of icon tiles; the selected tile fills with the accent. For options
+/// that deserve more presence than a segmented control.
+struct PebbleOptionTiles<Value: Hashable>: View {
+    struct Option {
+        let label: String
+        let systemImage: String
+        let value: Value
+    }
+
+    @Environment(\.pebbleTheme) private var theme
+
+    let title: String
+    @Binding var selection: Value
+    let options: [Option]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(options, id: \.value) { option in
+                tile(option, isSelected: option.value == selection)
+            }
+        }
+        .sensoryFeedback(.selection, trigger: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+    }
+
+    private func tile(_ option: Option, isSelected: Bool) -> some View {
+        Button {
+            withAnimation(Motion.gentleSpring) { selection = option.value }
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: option.systemImage)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .symbolEffect(.bounce, value: isSelected)
+                Text(option.label)
+                    .font(.pebble(.footnote, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(isSelected ? theme.onAccent : theme.chipInk)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isSelected ? theme.accent : theme.chip)
+                    .shadow(color: isSelected ? theme.accent.opacity(0.3) : .clear, radius: 8, y: 4)
+            }
+        }
+        .buttonStyle(PebblePressStyle())
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

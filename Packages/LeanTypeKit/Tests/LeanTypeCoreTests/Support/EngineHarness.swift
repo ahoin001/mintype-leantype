@@ -45,14 +45,29 @@ final class ManualScheduler: Scheduler {
 /// Records everything the engine publishes.
 @MainActor
 final class EngineRecorder: KeyboardEngineDelegate {
-    var feedback: [FeedbackEvent] = []
+    var events: [KeyboardEvent] = []
     var geometryUpdates = 0
     var nextKeyboardRequests = 0
 
     func keyboardEngine(_: KeyboardEngine, didUpdateGeometry _: KeyboardGeometry) { geometryUpdates += 1 }
     func keyboardEngine(_: KeyboardEngine, didUpdateState _: KeyboardViewState) {}
-    func keyboardEngine(_: KeyboardEngine, didEmit feedback: FeedbackEvent) { self.feedback.append(feedback) }
+    func keyboardEngine(_: KeyboardEngine, didEmit event: KeyboardEvent) { events.append(event) }
     func keyboardEngineDidRequestNextKeyboard(_: KeyboardEngine) { nextKeyboardRequests += 1 }
+
+    func count(where predicate: (KeyboardEvent) -> Bool) -> Int {
+        events.filter(predicate).count
+    }
+}
+
+/// The bundled dictionary, loaded once for all tests.
+enum TestLexicon {
+    static let shared: MappedLexicon = {
+        do {
+            return try MappedLexicon.bundled()
+        } catch {
+            preconditionFailure("Bundled lexicon failed to load: \(error)")
+        }
+    }()
 }
 
 /// Drives a real `KeyboardEngine` with synthetic touches against an in-memory document.
@@ -70,10 +85,11 @@ final class EngineHarness {
     init(
         text: String = "",
         settings: KeyboardSettings = .default,
-        traits: InputTraits = .default
+        traits: InputTraits = .default,
+        language: LanguageModel? = nil
     ) {
         document = InMemoryTextDocument(text: text)
-        engine = KeyboardEngine(document: document, settings: settings, traits: traits, scheduler: scheduler)
+        engine = KeyboardEngine(document: document, settings: settings, traits: traits, language: language, scheduler: scheduler)
         engine.delegate = recorder
         let metrics = KeyboardMetrics.portrait
         engine.updateLayout(

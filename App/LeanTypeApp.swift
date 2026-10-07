@@ -6,12 +6,14 @@ import SwiftUI
 struct LeanTypeApp: App {
     @State private var settings = SettingsModel()
     @State private var setup = SetupStatusModel()
+    @State private var data = KeyboardDataModel()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(settings)
                 .environment(setup)
+                .environment(data)
         }
     }
 }
@@ -19,6 +21,7 @@ struct LeanTypeApp: App {
 struct RootView: View {
     @Environment(SettingsModel.self) private var settings
     @Environment(SetupStatusModel.self) private var setup
+    @Environment(KeyboardDataModel.self) private var data
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -39,7 +42,11 @@ struct RootView: View {
                 .tint(theme.accent)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { setup.refresh() }
+            if phase == .active {
+                settings.reload()
+                setup.refresh()
+                data.refresh()
+            }
         }
     }
 

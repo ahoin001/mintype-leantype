@@ -16,14 +16,14 @@ protocol SessionContext: AnyObject {
 
     @discardableResult
     func perform(_ intent: KeyboardIntent) -> Bool
-    func emit(_ feedback: FeedbackEvent)
+    func emit(_ event: KeyboardEvent)
     /// Runs `action` later and then refreshes what's on screen.
     func schedule(after delay: TimeInterval, _ action: @escaping @MainActor @Sendable () -> Void) -> any Cancellable
 }
 
 extension SessionContext {
-    func previewCallout(for key: KeyFrame) -> CalloutState? {
-        guard settings.keyPreviewsEnabled, let character = key.key.kind.character else { return nil }
+    func previewCallout(for key: KeyFrame, showing text: String? = nil) -> CalloutState? {
+        guard settings.keyPreviewsEnabled, let character = text ?? key.key.kind.character else { return nil }
         let layout = CalloutGeometry.layout(
             anchor: key.visualFrame,
             optionCount: 1,
@@ -48,11 +48,22 @@ protocol InteractionSession: AnyObject {
     /// Another finger landed while this one is down. Tap sessions commit immediately
     /// (rollover) so fast alternating thumbs never drop or reorder keys.
     func otherTouchBegan()
+
+    /// Another finger landed. Returning `true` takes that finger over: its moves and lift are
+    /// routed here instead of starting a session of its own (two-finger trackpad).
+    func absorbTouch(_ track: TouchTrack) -> Bool
+    func absorbedTouchMoved(_ track: TouchTrack)
+    func absorbedTouchEnded(_ track: TouchTrack)
 }
 
-/// Produces the session for a finger that lands on a letter key. Tap typing ships in v1; swipe
-/// modes (single-finger paths and two-thumb Nintype-style slides) plug in here, emitting into
-/// the same `InputComposer`.
+extension InteractionSession {
+    func absorbTouch(_: TouchTrack) -> Bool { false }
+    func absorbedTouchMoved(_: TouchTrack) {}
+    func absorbedTouchEnded(_: TouchTrack) {}
+}
+
+/// Produces the session for a finger that lands on a letter key: tap typing, or swipe typing
+/// (single-finger paths and two-thumb Nintype-style slides) emitting into the same composer.
 @MainActor
 protocol TypingMode {
     func makeSession(for key: KeyFrame, track: TouchTrack, context: any SessionContext) -> any InteractionSession
@@ -60,7 +71,7 @@ protocol TypingMode {
 
 struct TapTypingMode: TypingMode {
     func makeSession(for key: KeyFrame, track: TouchTrack, context: any SessionContext) -> any InteractionSession {
-        CharacterTapSession(key: key, context: context)
+        CharacterTapSession(key: key, track: track, context: context)
     }
 }
 
@@ -74,17 +85,17 @@ struct SessionArbiter {
         case .character:
             typingMode.makeSession(for: key, track: track, context: context)
         case .space:
-            SpaceSession(key: key, context: context)
+            SpaceSession(key: key, track: track, context: context)
         case .backspace:
-            BackspaceSession(key: key, context: context)
+            BackspaceSession(key: key, track: track, context: context)
         case .shift:
-            ShiftSession(key: key, context: context)
+            ShiftSession(key: key, track: track, context: context)
         case let .layerSwitch(target):
             LayerSwitchSession(key: key, target: target, track: track, context: context)
         case .returnKey:
-            TapActionSession(key: key, intent: .returnKey, context: context)
+            TapActionSession(key: key, intent: .returnKey, track: track, context: context)
         case .nextKeyboard:
-            TapActionSession(key: key, intent: .nextKeyboard, context: context)
+            TapActionSession(key: key, intent: .nextKeyboard, track: track, context: context)
         }
     }
 }

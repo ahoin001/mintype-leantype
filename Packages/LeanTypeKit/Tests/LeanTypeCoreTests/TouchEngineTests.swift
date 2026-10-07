@@ -79,7 +79,7 @@ struct SpaceTrackpadTests {
         #expect(harness.document.before == "hello ")
         #expect(harness.document.after == "world")
         #expect(!harness.state.interaction.isTrackpadActive)
-        #expect(harness.recorder.feedback.filter { $0 == .cursorStep }.count == 5)
+        #expect(harness.recorder.count { $0 == .cursorStep(direction: -1, byWord: false) } == 5)
     }
 
     @Test func longPressAlsoEngagesTrackpad() {
@@ -178,7 +178,7 @@ struct ShiftAndLayerTests {
         harness.tap(.shift, gap: 0.05)
         harness.tap(.shift)
         #expect(harness.state.shift == .locked)
-        #expect(harness.recorder.feedback.contains(.capsLockEngaged))
+        #expect(harness.recorder.events.contains(.capsLockEngaged))
         harness.type("ab")
         #expect(harness.text == "AB")
     }

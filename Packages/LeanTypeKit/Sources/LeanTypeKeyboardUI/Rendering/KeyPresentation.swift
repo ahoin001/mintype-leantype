@@ -19,16 +19,26 @@ struct KeyPresentation: Hashable {
     let family: KeyFamily
     let isEnabled: Bool
     let accessibilityLabel: String
+    /// The flick-down character, drawn small in the key's corner.
+    var hint: String?
 }
 
 /// Maps a key and the current keyboard state to its label, color family, and spoken name.
 enum KeyPresentationProvider {
-    static func presentation(for key: KeySpec, state: KeyboardViewState) -> KeyPresentation {
+    static func presentation(for key: KeySpec, state: KeyboardViewState, showsHints: Bool = false) -> KeyPresentation {
         switch key.kind {
         case let .character(character):
             let shown = state.shift == .off ? character : uppercased(character)
             let role: Typography.KeyRole = character.first?.isLetter == true ? .letter : .symbol
-            return KeyPresentation(label: .text(shown, role), family: .letter, isEnabled: true, accessibilityLabel: shown)
+            let hint = showsHints ? key.secondary : nil
+            let spoken = key.secondary.map { "\(shown), flick down for \($0)" } ?? shown
+            return KeyPresentation(
+                label: .text(shown, role),
+                family: .letter,
+                isEnabled: true,
+                accessibilityLabel: showsHints ? spoken : shown,
+                hint: hint
+            )
 
         case .shift:
             return switch state.shift {

@@ -96,8 +96,24 @@ public enum LayoutProvider {
     }
 
     private static func characterKey(_ value: String, _ layer: KeyboardLayer, width: CGFloat = 1) -> KeySpec {
-        .character(value, on: layer, width: width, alternates: alternates[value] ?? [])
+        .character(
+            value,
+            on: layer,
+            width: width,
+            alternates: alternates[value] ?? [],
+            secondary: layer == .letters ? secondaries[value] : nil
+        )
     }
+
+    // MARK: - Flick secondaries (letters layer)
+
+    /// Digits across the top row, the most common symbols below, in roughly the positions
+    /// they occupy on the numbers page so the two feel related.
+    static let secondaries: [String: String] = [
+        "q": "1", "w": "2", "e": "3", "r": "4", "t": "5", "y": "6", "u": "7", "i": "8", "o": "9", "p": "0",
+        "a": "@", "s": "#", "d": "$", "f": "&", "g": "-", "h": "(", "j": ")", "k": "'", "l": "\"",
+        "z": "%", "x": "*", "c": "+", "v": "=", "b": "/", "n": ";", "m": ":",
+    ]
 
     // MARK: - Long-press alternates (English)
 

@@ -5,6 +5,16 @@ public enum SharedContainer {
     public static let appGroupIdentifier = "group.com.leantype.shared"
     /// Darwin notification posted by the app whenever settings change.
     public static let settingsDidChangeNotification = "com.leantype.settings.didChange"
+    /// Darwin notification posted by the app after it clears learned words.
+    public static let learnedWordsDidChangeNotification = "com.leantype.learnedWords.didChange"
+
+    /// A file in the shared container; `nil` when the container is unavailable (the extension
+    /// without Full Access).
+    public static func fileURL(named name: String) -> URL? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)?
+            .appending(path: name, directoryHint: .notDirectory)
+    }
 }
 
 public protocol SettingsStore: Sendable {

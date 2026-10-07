@@ -8,6 +8,8 @@ import UIKit
 final class KeyView: UIView {
     private let label = UILabel()
     private let icon = UIImageView()
+    /// Created on first use: most keys never show a hint.
+    private var hintLabel: UILabel?
     private var style: KeyStyle
     private var currentLabel: KeyLabel?
     private var isCompact = false
@@ -47,8 +49,10 @@ final class KeyView: UIView {
         style newStyle: KeyStyle,
         isPressed pressed: Bool,
         isEnabled: Bool,
-        isCompact compact: Bool
+        isCompact compact: Bool,
+        hint: String? = nil
     ) {
+        applyHint(hint, color: colors.label)
         if newStyle != style {
             style = newStyle
             shadowBounds = .zero
@@ -79,12 +83,14 @@ final class KeyView: UIView {
         let alpha: CGFloat = hidden ? 0 : 1
         label.alpha = alpha
         icon.alpha = alpha
+        hintLabel?.alpha = alpha
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         label.frame = bounds.insetBy(dx: 2, dy: 0)
         icon.frame = bounds
+        hintLabel?.frame = CGRect(x: bounds.maxX - 13, y: 2, width: 11, height: 12)
         if bounds != shadowBounds {
             shadowBounds = bounds
             layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: style.cornerRadius).cgPath
@@ -116,6 +122,28 @@ final class KeyView: UIView {
                 self.transform = transform
             }
         }
+    }
+
+    private func applyHint(_ hint: String?, color: RGBA) {
+        guard let hint else {
+            hintLabel?.isHidden = true
+            return
+        }
+        let hintLabel = hintLabel ?? makeHintLabel()
+        hintLabel.isHidden = false
+        if hintLabel.text != hint { hintLabel.text = hint }
+        hintLabel.textColor = color.uiColor.withAlphaComponent(0.42)
+    }
+
+    private func makeHintLabel() -> UILabel {
+        let hint = UILabel()
+        hint.font = Typography.rounded(size: 9.5, weight: .semibold)
+        hint.textAlignment = .center
+        hint.isAccessibilityElement = false
+        addSubview(hint)
+        hintLabel = hint
+        setNeedsLayout()
+        return hint
     }
 
     private func applyLabel(_ keyLabel: KeyLabel) {

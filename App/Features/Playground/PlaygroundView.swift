@@ -7,6 +7,7 @@ struct PlaygroundView: View {
     @FocusState private var isFocused: Bool
 
     private let reminders = [
+        ("scribble.variable", "Swipe through a word"),
         ("cursorarrow.motionlines", "Slide on space"),
         ("delete.left", "Tap delete for a word"),
         ("arrow.uturn.backward", "Swipe right on delete to undo"),

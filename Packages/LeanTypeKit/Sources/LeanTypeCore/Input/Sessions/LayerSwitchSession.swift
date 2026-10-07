@@ -1,7 +1,8 @@
 import CoreGraphics
 
 /// The 123 / ABC / #+= keys. The layer switches on touch-down so the finger can slide straight
-/// onto a symbol; releasing on one types it and returns to the original layer.
+/// onto a symbol; releasing on one types it and returns to the original layer. Sliding to
+/// sentence punctuation also adds the space that always follows it.
 @MainActor
 final class LayerSwitchSession: InteractionSession {
     private unowned let context: any SessionContext
@@ -19,7 +20,7 @@ final class LayerSwitchSession: InteractionSession {
         originLayer = context.currentLayer
         startPoint = track.start.location
         ticket = context.composer.reserve()
-        context.emit(.keyDown(.modifier))
+        context.emit(.keyDown(.modifier, at: track.start.location))
         context.perform(.switchLayer(target))
     }
 
@@ -52,7 +53,14 @@ final class LayerSwitchSession: InteractionSession {
         guard !isFinished else { return }
         switch slideTarget?.key.kind {
         case let .character(character):
-            context.composer.commit(ticket, [.insert(character), .switchLayer(originLayer)])
+            var intents: [KeyboardIntent] = [.insert(character)]
+            if context.settings.smartPunctuationEnabled,
+               let mark = character.first, character.count == 1,
+               TextBoundary.hoppingPunctuation.contains(mark) {
+                intents.append(.autoSpace)
+            }
+            intents.append(.switchLayer(originLayer))
+            context.composer.commit(ticket, intents)
         case .space:
             context.composer.commit(ticket, [.space])
         default:

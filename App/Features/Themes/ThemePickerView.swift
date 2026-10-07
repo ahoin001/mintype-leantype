@@ -7,7 +7,7 @@ struct ThemePickerView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(SettingsModel.self) private var settings
-    @State private var preview = PreviewKeyboardModel(settings: .default, placeholder: "Looks lovely")
+    @State private var preview = PreviewKeyboardModel(placeholder: "Looks lovely")
 
     private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
 
@@ -30,7 +30,6 @@ struct ThemePickerView: View {
         .pebbleScreen()
         .navigationTitle("Themes")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { preview.update(settings: settings.settings) }
     }
 
     private func swatch(_ id: ThemeIdentifier, title: String, subtitle: String) -> some View {

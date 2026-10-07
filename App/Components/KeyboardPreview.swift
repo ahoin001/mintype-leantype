@@ -4,8 +4,16 @@ import LeanTypeKeyboardUI
 import Observation
 import SwiftUI
 
+/// One dictionary for every preview in the app. It's memory-mapped, so sharing it costs nothing
+/// and previews never learn words.
+@MainActor
+enum PreviewLanguage {
+    static let shared = LanguageModel.bundled()
+}
+
 /// Drives the real keyboard engine against an in-memory document, so the app can show (and
-/// let people try) the exact keyboard they'll get, in any theme.
+/// let people try) the exact keyboard they'll get, in any theme. Settings flow in through
+/// `KeyboardPreview`, which applies them to the whole keyboard surface.
 @MainActor
 @Observable
 final class PreviewKeyboardModel {
@@ -15,10 +23,10 @@ final class PreviewKeyboardModel {
     @ObservationIgnored let engine: KeyboardEngine
     @ObservationIgnored private let document: InMemoryTextDocument
 
-    init(settings: KeyboardSettings, placeholder: String = "") {
+    init(placeholder: String = "") {
         let document = InMemoryTextDocument(text: placeholder)
         self.document = document
-        engine = KeyboardEngine(document: document, settings: settings, showsNextKeyboardKey: false)
+        engine = KeyboardEngine(document: document, showsNextKeyboardKey: false, language: PreviewLanguage.shared)
         textBeforeCursor = document.before
         document.onChange = { [weak self] document in
             self?.textBeforeCursor = document.before
@@ -28,10 +36,6 @@ final class PreviewKeyboardModel {
 
     var isEmpty: Bool {
         textBeforeCursor.isEmpty && textAfterCursor.isEmpty
-    }
-
-    func update(settings: KeyboardSettings) {
-        engine.update(settings: settings)
     }
 
     func clear() {
@@ -44,22 +48,32 @@ final class PreviewKeyboardModel {
 struct KeyboardPreview: UIViewRepresentable {
     let model: PreviewKeyboardModel
     let theme: Theme
-    var hapticsEnabled = true
+    let settings: KeyboardSettings
 
     func makeUIView(context _: Context) -> KeyboardView {
         let view = KeyboardView(
             engine: model.engine,
             theme: theme,
-            feedback: FeedbackCoordinator(hapticsEnabled: hapticsEnabled, clicksEnabled: false)
+            feedback: FeedbackCoordinator(hapticsEnabled: settings.hapticsEnabled, clicksEnabled: false)
         )
         view.metricsOverride = .portrait
+        view.update(settings: settings)
         view.feedback.prepare()
+        view.keyboardWillAppear()
         return view
     }
 
     func updateUIView(_ view: KeyboardView, context _: Context) {
         view.theme = theme
-        view.feedback.hapticsEnabled = hapticsEnabled
+        view.feedback.hapticsEnabled = settings.hapticsEnabled
+        if view.engine.settings != settings {
+            view.update(settings: settings)
+            view.invalidateIntrinsicContentSize()
+        }
+    }
+
+    static func dismantleUIView(_ view: KeyboardView, coordinator _: ()) {
+        view.keyboardDidDisappear()
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: KeyboardView, context _: Context) -> CGSize? {
@@ -90,7 +104,7 @@ struct KeyboardPlayground: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
 
-            KeyboardPreview(model: model, theme: theme, hapticsEnabled: settings.settings.hapticsEnabled)
+            KeyboardPreview(model: model, theme: theme, settings: settings.settings)
         }
         .background(theme.surface.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
@@ -99,7 +113,6 @@ struct KeyboardPlayground: View {
                 .strokeBorder(theme.surfaceRim, lineWidth: 1)
         }
         .shadow(color: theme.shadow.opacity(0.7), radius: 18, y: 8)
-        .onChange(of: settings.settings) { _, new in model.update(settings: new) }
     }
 
     private var typedText: some View {

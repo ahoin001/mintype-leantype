@@ -48,25 +48,30 @@ public struct KeySpec: Hashable, Sendable, Identifiable {
     public let widthUnits: CGFloat
     /// Long-press alternates, ordered from nearest to farthest from the key.
     public let alternates: [String]
+    /// Typed by a short downward flick (digits on the top letter row, common symbols below).
+    public let secondary: String?
 
-    public init(id: KeyID, kind: KeyKind, widthUnits: CGFloat = 1, alternates: [String] = []) {
+    public init(id: KeyID, kind: KeyKind, widthUnits: CGFloat = 1, alternates: [String] = [], secondary: String? = nil) {
         self.id = id
         self.kind = kind
         self.widthUnits = widthUnits
         self.alternates = alternates
+        self.secondary = secondary
     }
 
     static func character(
         _ value: String,
         on layer: KeyboardLayer,
         width: CGFloat = 1,
-        alternates: [String] = []
+        alternates: [String] = [],
+        secondary: String? = nil
     ) -> KeySpec {
         KeySpec(
             id: KeyID(rawValue: "\(layer.rawValue).char.\(value)"),
             kind: .character(value),
             widthUnits: width,
-            alternates: alternates
+            alternates: alternates,
+            secondary: secondary
         )
     }
 

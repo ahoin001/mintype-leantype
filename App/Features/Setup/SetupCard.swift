@@ -23,7 +23,7 @@ struct SetupCard: View {
                 SetupStep(number: 3, title: "Turn on Allow Full Access", isDone: setup.hasSeenFullAccess)
 
                 Label {
-                    Text("Full Access lets LeanType use haptics and sync your theme and settings. "
+                    Text("Full Access lets LeanType use haptics, sync your settings, and remember your words. "
                         + "LeanType has no network code: what you type never leaves your iPhone.")
                 } icon: {
                     Image(systemName: "lock.shield")

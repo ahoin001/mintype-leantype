@@ -1,8 +1,10 @@
 import Foundation
 
 /// Backspace, Nintype-style:
-/// - Tap: delete the previous word (or one character, per settings).
-/// - Hold: repeat that deletion, accelerating.
+/// - Tap: undo the latest autocorrection or swiped word if the cursor is right after it;
+///   otherwise delete the previous word (or one character, per settings).
+/// - Hold: repeat that deletion, accelerating, and shift up a gear (characters, words,
+///   sentences) the longer it's held.
 /// - Scrub left: delete one character per step. Scrub back right: restore them one by one.
 /// - Swipe right without scrubbing first: restore the whole previous deletion (undo a word).
 @MainActor
@@ -10,18 +12,48 @@ final class BackspaceSession: InteractionSession {
     static let activationDistance: CGFloat = 10
     static let scrubStep: CGFloat = 11
     static let holdDelay: TimeInterval = 0.45
-    static let characterRepeat = RepeatTiming(initial: 0.1, minimum: 0.045, acceleration: 0.9)
-    static let wordRepeat = RepeatTiming(initial: 0.28, minimum: 0.12, acceleration: 0.88)
+    /// Time spent repeating in one gear before shifting up to the next.
+    static let escalationDelay: TimeInterval = 1.5
+    nonisolated static let characterRepeat = RepeatTiming(initial: 0.1, minimum: 0.045, acceleration: 0.9)
+    nonisolated static let wordRepeat = RepeatTiming(initial: 0.28, minimum: 0.12, acceleration: 0.88)
+    nonisolated static let sentenceRepeat = RepeatTiming(initial: 0.5, minimum: 0.35, acceleration: 0.92)
 
-    struct RepeatTiming {
+    struct RepeatTiming: Sendable {
         let initial: TimeInterval
         let minimum: TimeInterval
         let acceleration: Double
     }
 
+    /// One gear of hold-to-delete.
+    enum Gear: Int, Comparable {
+        case character
+        case word
+        case sentence
+
+        var intent: KeyboardIntent {
+            switch self {
+            case .character: .deleteCharacter
+            case .word: .deleteWord
+            case .sentence: .deleteSentence
+            }
+        }
+
+        var timing: RepeatTiming {
+            switch self {
+            case .character: BackspaceSession.characterRepeat
+            case .word: BackspaceSession.wordRepeat
+            case .sentence: BackspaceSession.sentenceRepeat
+            }
+        }
+
+        var next: Gear? { Gear(rawValue: rawValue + 1) }
+
+        static func < (lhs: Gear, rhs: Gear) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
     private enum Phase {
         case pressed
-        case holding(interval: TimeInterval)
+        case holding(gear: Gear, interval: TimeInterval, timeInGear: TimeInterval)
         case scrubbing(anchorX: CGFloat, applied: Int, restoredWhole: Bool)
         case finished
     }
@@ -31,10 +63,10 @@ final class BackspaceSession: InteractionSession {
     private var phase = Phase.pressed
     private var timer: (any Cancellable)?
 
-    init(key: KeyFrame, context: any SessionContext) {
+    init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
         self.context = context
-        context.emit(.keyDown(.delete))
+        context.emit(.keyDown(.delete, at: track.start.location))
         timer = context.schedule(after: Self.holdDelay) { [weak self] in
             self?.beginHolding()
         }
@@ -45,12 +77,8 @@ final class BackspaceSession: InteractionSession {
         return SessionPresentation(pressedKey: key.id)
     }
 
-    private var tapIntent: KeyboardIntent {
-        context.settings.backspaceTapAction == .deleteWord ? .deleteWord : .deleteCharacter
-    }
-
-    private var repeatTiming: RepeatTiming {
-        context.settings.backspaceTapAction == .deleteWord ? Self.wordRepeat : Self.characterRepeat
+    private var tapGear: Gear {
+        context.settings.backspaceTapAction == .deleteWord ? .word : .character
     }
 
     func moved(_ track: TouchTrack) {
@@ -67,8 +95,8 @@ final class BackspaceSession: InteractionSession {
     }
 
     func ended(_: TouchTrack) {
-        if case .pressed = phase {
-            context.perform(tapIntent)
+        if case .pressed = phase, !context.perform(.undoRecentCommit) {
+            context.perform(tapGear.intent)
         }
         finish()
     }
@@ -83,20 +111,29 @@ final class BackspaceSession: InteractionSession {
 
     private func beginHolding() {
         guard case .pressed = phase else { return }
-        repeatDelete(interval: repeatTiming.initial)
+        repeatDelete(gear: tapGear, interval: tapGear.timing.initial, timeInGear: 0)
     }
 
-    private func repeatDelete(interval: TimeInterval) {
-        guard context.perform(tapIntent) else {
+    private func repeatDelete(gear: Gear, interval: TimeInterval, timeInGear: TimeInterval) {
+        guard context.perform(gear.intent) else {
             finish()
             return
         }
         context.emit(.deleteStep)
-        phase = .holding(interval: interval)
-        let next = max(interval * repeatTiming.acceleration, repeatTiming.minimum)
+        phase = .holding(gear: gear, interval: interval, timeInGear: timeInGear)
+
+        var gear = gear
+        var timeInGear = timeInGear + interval
+        var next = max(interval * gear.timing.acceleration, gear.timing.minimum)
+        if timeInGear >= Self.escalationDelay, let higher = gear.next {
+            gear = higher
+            timeInGear = 0
+            next = higher.timing.initial
+            context.emit(.deleteEscalated)
+        }
         timer = context.schedule(after: interval) { [weak self] in
             guard let self, case .holding = phase else { return }
-            repeatDelete(interval: next)
+            repeatDelete(gear: gear, interval: next, timeInGear: timeInGear)
         }
     }
 

@@ -53,18 +53,27 @@ public struct InputTraits: Hashable, Sendable {
     public var autocapitalization: AutocapitalizationMode
     public var returnKey: ReturnKeyKind
     public var enablesReturnKeyAutomatically: Bool
+    /// The field accepts autocorrect and suggestions (off for passwords, codes, usernames).
+    public var allowsAutocorrection: Bool
 
     public init(
         variant: KeyboardVariant = .standard,
         autocapitalization: AutocapitalizationMode = .sentences,
         returnKey: ReturnKeyKind = .default,
-        enablesReturnKeyAutomatically: Bool = false
+        enablesReturnKeyAutomatically: Bool = false,
+        allowsAutocorrection: Bool = true
     ) {
         self.variant = variant
         self.autocapitalization = autocapitalization
         self.returnKey = returnKey
         self.enablesReturnKeyAutomatically = enablesReturnKeyAutomatically
+        self.allowsAutocorrection = allowsAutocorrection
     }
 
     public static let `default` = InputTraits()
+
+    /// Whether language features (autocorrect, suggestions, swipe) suit this field.
+    public var supportsLanguageFeatures: Bool {
+        allowsAutocorrection && variant == .standard
+    }
 }

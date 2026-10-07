@@ -7,13 +7,14 @@ public struct KeyboardViewState: Hashable, Sendable {
     public var interaction: InteractionState
     public var returnKey: ReturnKeyKind
     public var isReturnKeyEnabled: Bool
+    public var candidates: CandidateState
 }
 
 @MainActor
 public protocol KeyboardEngineDelegate: AnyObject {
     func keyboardEngine(_ engine: KeyboardEngine, didUpdateGeometry geometry: KeyboardGeometry)
     func keyboardEngine(_ engine: KeyboardEngine, didUpdateState state: KeyboardViewState)
-    func keyboardEngine(_ engine: KeyboardEngine, didEmit feedback: FeedbackEvent)
+    func keyboardEngine(_ engine: KeyboardEngine, didEmit event: KeyboardEvent)
     func keyboardEngineDidRequestNextKeyboard(_ engine: KeyboardEngine)
 }
 
@@ -34,6 +35,7 @@ public final class KeyboardEngine {
     private let editor: TextEditor
     private let scheduler: any Scheduler
     private let shift = ShiftController()
+    private let words: WordAssistant
     private var layer: KeyboardLayer
     private var showsNextKeyboardKey: Bool
     private var insertionCount = 0
@@ -50,15 +52,39 @@ public final class KeyboardEngine {
         return engine
     }()
 
+    private lazy var flow = FlowMonitor(scheduler: scheduler) { [weak self] event in
+        self?.emit(event)
+    }
+
+    private lazy var swipe: SwipeCoordinator = {
+        let coordinator = SwipeCoordinator(composer: composer) { [weak self] gesture in
+            await self?.decode(gesture) ?? .empty
+        }
+        coordinator.onPreview = { [weak self] result in
+            guard let self else { return }
+            if let result {
+                words.showPreview(result)
+            } else {
+                words.clearPreview()
+            }
+            publishState()
+        }
+        coordinator.onFinish = { [weak self] in self?.touchEngine.refreshPresentation() }
+        return coordinator
+    }()
+
     public init(
         document: any TextDocument,
         settings: KeyboardSettings = .default,
         traits: InputTraits = .default,
         showsNextKeyboardKey: Bool = true,
         metrics: KeyboardMetrics = .portrait,
+        language: LanguageModel? = nil,
         scheduler: (any Scheduler)? = nil
     ) {
         editor = TextEditor(document: document)
+        words = WordAssistant(editor: editor)
+        words.language = language
         self.scheduler = scheduler ?? MainQueueScheduler()
         self.settings = settings
         self.traits = traits
@@ -76,8 +102,10 @@ public final class KeyboardEngine {
             shift: .off,
             interaction: .idle,
             returnKey: traits.returnKey,
-            isReturnKeyEnabled: true
+            isReturnKeyEnabled: true,
+            candidates: .empty
         )
+        applySettings()
         refreshTextState()
     }
 
@@ -85,6 +113,8 @@ public final class KeyboardEngine {
     public var preferredHeight: CGFloat {
         geometry.metrics.totalHeight(rowCount: geometry.layout.rows.count)
     }
+
+    public var language: LanguageModel? { words.language }
 
     // MARK: - Inputs from the host
 
@@ -103,6 +133,7 @@ public final class KeyboardEngine {
     public func update(settings: KeyboardSettings) {
         guard settings != self.settings else { return }
         self.settings = settings
+        applySettings()
         refreshTextState()
     }
 
@@ -114,6 +145,14 @@ public final class KeyboardEngine {
             layer = Self.initialLayer(for: traits)
             rebuildGeometry()
         }
+        applySettings()
+        refreshTextState()
+    }
+
+    /// Installs (or removes) the language model: suggestions, autocorrect, and swipe.
+    public func setLanguageModel(_ model: LanguageModel?) {
+        words.language = model
+        applySettings()
         refreshTextState()
     }
 
@@ -122,6 +161,7 @@ public final class KeyboardEngine {
     public func documentDidChange() {
         if editor.contextBefore != lastObservedContext {
             shift.noteContextChanged()
+            words.noteContextChanged()
         }
         refreshTextState()
     }
@@ -129,8 +169,10 @@ public final class KeyboardEngine {
     /// Returns to a fresh state, e.g. when the keyboard reappears in a new field.
     public func reset() {
         touchEngine.cancelAll()
+        swipe.reset()
         composer.reset()
         shift.reset()
+        flow.reset()
         lastSpaceTime = nil
         let initial = Self.initialLayer(for: traits)
         if initial != layer {
@@ -148,6 +190,7 @@ public final class KeyboardEngine {
 
     public func cancelAllTouches() {
         touchEngine.cancelAll()
+        swipe.reset()
         composer.reset()
     }
 
@@ -173,6 +216,12 @@ public final class KeyboardEngine {
         }
     }
 
+    /// Accepts suggestion slot `index`, in order with any typing still in flight.
+    public func acceptCandidate(_ index: Int) {
+        let ticket = composer.reserve()
+        composer.commit(ticket, [.acceptCandidate(index)])
+    }
+
     // MARK: - Applying intents
 
     @discardableResult
@@ -185,52 +234,63 @@ public final class KeyboardEngine {
         }
 
         let changed: Bool
-        var changesText = false
+        var changesText = true
         switch intent {
         case let .insert(character):
-            editor.insert(displayText(for: character))
-            insertionCount += 1
-            shift.consumeAfterInsertion()
-            changed = true
-            changesText = true
+            changed = insertCharacter(character, at: nil)
+        case let .tapCharacter(character, point):
+            changed = insertCharacter(character, at: point)
         case .space:
             changed = insertSpace()
-            changesText = true
+        case .autoSpace:
+            changed = !(editor.contextBefore?.last?.isWhitespace ?? true)
+            if changed { editor.insertSpace() }
         case .returnKey:
+            _ = finishWord(trailing: "")
             editor.insert("\n")
             changed = true
-            changesText = true
         case .deleteWord:
-            changed = editor.deleteWord()
-            changesText = true
+            changed = deleteRun(editor.deleteWord())
+        case .deleteSentence:
+            changed = deleteRun(editor.deleteSentence())
         case .deleteCharacter:
-            changed = editor.deleteCharacter()
-            changesText = true
+            changed = editor.deleteCharacter() != nil
+            words.noteCharacterDeleted()
+            flow.noteDeletion()
         case .restoreCharacter:
             changed = editor.restoreCharacter()
-            changesText = changed
         case .restoreLastDeletion:
-            changed = editor.restoreLastDeletion()
-            changesText = changed
+            changed = restoreLastDeletion()
+        case .undoRecentCommit:
+            changed = undoRecentCommit()
         case let .moveCursor(direction):
             changed = editor.moveCursor(by: direction)
-            changesText = changed
+        case let .moveCursorByWord(direction):
+            changed = editor.moveCursorByWord(direction)
+        case let .commitSwipe(readings, unsure):
+            changed = commitSwipe(readings, unsure: unsure)
+        case let .acceptCandidate(index):
+            changed = acceptCandidate(at: index)
         case .shiftPressBegan:
             if shift.pressBegan(at: scheduler.now, insertionCount: insertionCount) {
                 emit(.capsLockEngaged)
             }
             changed = true
+            changesText = false
         case .shiftPressEnded:
             shift.pressEnded(at: scheduler.now, insertionCount: insertionCount)
             changed = true
+            changesText = false
         case let .switchLayer(target):
             changed = setLayer(target)
+            changesText = false
         case .nextKeyboard:
             delegate?.keyboardEngineDidRequestNextKeyboard(self)
             changed = true
+            changesText = false
         }
 
-        if changesText {
+        if changesText, changed {
             shift.noteContextChanged()
         }
         refreshTextState()
@@ -243,6 +303,30 @@ public final class KeyboardEngine {
         }
     }
 
+    // MARK: - Typing
+
+    private func insertCharacter(_ character: String, at point: CGPoint?) -> Bool {
+        let text = displayText(for: character)
+        if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
+            let hadWord = !editor.currentWord.isEmpty
+            if !finishWord(trailing: "") {
+                editor.insertPunctuation(text, hoppingSpace: settings.smartPunctuationEnabled && traits.variant == .standard)
+            } else {
+                editor.insert(text)
+            }
+            if hadWord { completeWord(.tap) }
+        } else {
+            editor.insert(text)
+            if text.count == 1, text.first?.isLetter == true {
+                words.noteLetter(at: point)
+            }
+        }
+        insertionCount += 1
+        shift.consumeAfterInsertion()
+        flow.noteKeystroke()
+        return true
+    }
+
     private func insertSpace() -> Bool {
         let now = scheduler.now
         if settings.doubleSpacePeriodEnabled,
@@ -250,8 +334,13 @@ public final class KeyboardEngine {
            now - lastSpaceTime < Self.doubleSpaceInterval,
            editor.applyDoubleSpacePeriod() {
             self.lastSpaceTime = nil
+            emit(.sentenceEnded(at: center(of: .space)))
         } else {
-            editor.insert(" ")
+            let hadWord = !editor.currentWord.isEmpty
+            if !finishWord(trailing: " ") {
+                editor.insertSpace()
+            }
+            if hadWord { completeWord(.tap) }
             lastSpaceTime = now
         }
         insertionCount += 1
@@ -261,6 +350,94 @@ public final class KeyboardEngine {
         return true
     }
 
+    /// Ends the current word, autocorrecting it if appropriate. Returns whether a correction
+    /// was applied (in which case `trailing` was inserted with it).
+    private func finishWord(trailing: String) -> Bool {
+        let corrected = words.finishWord(trailing: trailing, autocorrects: autocorrects)
+        if corrected {
+            emit(.correctionApplied)
+            flow.noteCorrection()
+        }
+        return corrected
+    }
+
+    private func completeWord(_ source: KeyboardEvent.WordSource) {
+        emit(.wordCommitted(source))
+        flow.noteWordCompleted()
+    }
+
+    private func commitSwipe(_ readings: [String], unsure: Bool) -> Bool {
+        guard !readings.isEmpty else { return false }
+        let cased = readings.map(applyShift(to:))
+        editor.commitWord(cased[0])
+        words.swipeCommitted(cased, unsure: unsure)
+        insertionCount += 1
+        shift.consumeAfterInsertion()
+        completeWord(.swipe)
+        return true
+    }
+
+    private func acceptCandidate(at index: Int) -> Bool {
+        guard let acceptance = words.accept(index, from: state.candidates) else { return false }
+        switch acceptance {
+        case let .keep(word):
+            words.keep(word)
+            return insertSpace()
+        case let .replace(word):
+            guard editor.replaceCurrentWord(with: word, kind: .completed) else { return false }
+            lastSpaceTime = nil
+            completeWord(.suggestion)
+            return true
+        case let .swap(word):
+            return editor.replaceRecentCommitWord(with: word)
+        case .revert:
+            guard let commit = editor.undoRecentCommit() else { return false }
+            emit(.correctionReverted)
+            words.keep(commit.original)
+            return insertSpace()
+        }
+    }
+
+    // MARK: - Deleting
+
+    private func deleteRun(_ removed: String?) -> Bool {
+        guard let removed else { return false }
+        let visible = removed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !visible.isEmpty {
+            emit(.wordDeleted(visible, origin: center(of: .backspace)))
+        }
+        flow.noteDeletion()
+        return true
+    }
+
+    private func restoreLastDeletion() -> Bool {
+        guard let restored = editor.restoreLastDeletion() else { return false }
+        let visible = restored.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !visible.isEmpty {
+            emit(.deletionRestored(visible, origin: center(of: .backspace)))
+        }
+        return true
+    }
+
+    /// Backspace right after a unit commit undoes it: corrections go back to what was typed,
+    /// a swiped word disappears in one go.
+    private func undoRecentCommit() -> Bool {
+        guard let commit = editor.undoRecentCommit() else { return false }
+        switch commit.kind {
+        case .corrected:
+            emit(.correctionReverted)
+            words.keep(commit.original)
+        case .completed:
+            words.keep(commit.original)
+        case .swiped:
+            emit(.wordDeleted(commit.word, origin: center(of: .backspace)))
+        }
+        flow.noteDeletion()
+        return true
+    }
+
+    // MARK: - Modes
+
     @discardableResult
     private func setLayer(_ target: KeyboardLayer) -> Bool {
         guard target != layer else { return false }
@@ -269,10 +446,40 @@ public final class KeyboardEngine {
         return true
     }
 
+    private func applySettings() {
+        flow.celebratesMilestones = settings.effects.celebrateMilestones
+        let swipes = settings.typingMode == .swipe && words.language != nil && traits.supportsLanguageFeatures
+        touchEngine.arbiter.typingMode = swipes ? SwipeTypingMode(coordinator: swipe) : TapTypingMode()
+    }
+
+    private func decode(_ gesture: SwipeGesture) async -> DecodeResult {
+        guard let language = words.language, let layout = words.letterLayout else { return .empty }
+        return await language.decode(gesture, layout: layout)
+    }
+
     // MARK: - Derived state
 
     var isReturnKeyEnabled: Bool {
         !traits.enablesReturnKeyAutomatically || !editor.isDocumentEmpty
+    }
+
+    private var autocorrects: Bool {
+        settings.autocorrectEnabled && traits.supportsLanguageFeatures
+    }
+
+    private func applyShift(to word: String) -> String {
+        switch shift.state {
+        case .off: word
+        case .once: word.prefix(1).uppercased() + word.dropFirst()
+        case .locked: word.uppercased()
+        }
+    }
+
+    private func center(of kind: KeyKind) -> CGPoint {
+        guard let frame = geometry.keys.first(where: { $0.key.kind == kind }) else {
+            return CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+        }
+        return CGPoint(x: frame.visualFrame.midX, y: frame.visualFrame.midY)
     }
 
     private func refreshTextState() {
@@ -290,7 +497,11 @@ public final class KeyboardEngine {
             shift: shift.state,
             interaction: touchEngine.interaction,
             returnKey: traits.returnKey,
-            isReturnKeyEnabled: isReturnKeyEnabled
+            isReturnKeyEnabled: isReturnKeyEnabled,
+            candidates: words.candidates(
+                suggests: settings.suggestionsEnabled && traits.supportsLanguageFeatures,
+                autocorrects: autocorrects
+            )
         )
         guard next != state else { return }
         state = next
@@ -310,6 +521,7 @@ public final class KeyboardEngine {
             size: size ?? geometry.size,
             metrics: metrics ?? geometry.metrics
         )
+        words.updateLayout(for: geometry, layer: layer)
         delegate?.keyboardEngine(self, didUpdateGeometry: geometry)
         publishState()
     }
@@ -335,8 +547,8 @@ extension KeyboardEngine: SessionContext {
         return upper.count == character.count ? upper : character
     }
 
-    func emit(_ feedback: FeedbackEvent) {
-        delegate?.keyboardEngine(self, didEmit: feedback)
+    func emit(_ event: KeyboardEvent) {
+        delegate?.keyboardEngine(self, didEmit: event)
     }
 
     func schedule(after delay: TimeInterval, _ action: @escaping @MainActor @Sendable () -> Void) -> any Cancellable {

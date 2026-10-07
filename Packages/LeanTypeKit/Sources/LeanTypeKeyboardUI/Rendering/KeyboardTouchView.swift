@@ -12,6 +12,11 @@ final class KeyboardTouchView: UIView {
     var onGlobeEvent: ((UIView, UIEvent?) -> Void)?
     var onAccessibilityActivate: ((KeyID) -> Void)?
 
+    /// Draw each letter's flick-down character in its corner.
+    var showsHints = false {
+        didSet { if showsHints != oldValue { render() } }
+    }
+
     private let calloutView = CalloutView()
     /// Views for every layer seen so far, so switching layers mid-slide never allocates.
     private var viewPool: [KeyID: KeyView] = [:]
@@ -26,12 +31,25 @@ final class KeyboardTouchView: UIView {
     private var isGlobePressed = false
     private var areLabelsHidden = false
     private var accessibilityKeys: [KeyAccessibilityElement] = []
+    /// The letter key that was down on the previous state, so a release can grow a flow rim.
+    private var pressedIDs: Set<KeyID> = []
+    private var flowValue = 0.0
+    private var flowEffectsEnabled = false
+    private let flowRim = CAShapeLayer()
+    private let rimHost = UIView()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isMultipleTouchEnabled = true
         clipsToBounds = false
+        rimHost.isUserInteractionEnabled = false
+        rimHost.isAccessibilityElement = false
+        addSubview(rimHost)
         addSubview(calloutView)
+        flowRim.fillColor = nil
+        flowRim.lineWidth = 2
+        flowRim.opacity = 0
+        rimHost.layer.addSublayer(flowRim)
     }
 
     @available(*, unavailable)
@@ -64,9 +82,20 @@ final class KeyboardTouchView: UIView {
         render()
     }
 
+    /// Flow from the engine. The rim only appears once typing has a rhythm and effects are on.
+    func noteFlow(_ flow: FlowLevel, effectsEnabled: Bool) {
+        flowValue = flow.value
+        flowEffectsEnabled = effectsEnabled
+    }
+
     func apply(state newState: KeyboardViewState) {
         let trackpadChanged = newState.interaction.isTrackpadActive != state?.interaction.isTrackpadActive
+        let released = pressedIDs.subtracting(newState.interaction.pressedKeys)
+        pressedIDs = newState.interaction.pressedKeys
         state = newState
+        if let id = released.first(where: isLetterKey) {
+            flashFlowRim(on: id)
+        }
         render()
         if trackpadChanged {
             setLabelsHidden(newState.interaction.isTrackpadActive)
@@ -88,6 +117,8 @@ final class KeyboardTouchView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         calloutView.frame = bounds
+        rimHost.frame = bounds
+        insertSubview(rimHost, belowSubview: calloutView)
     }
 
     // MARK: - Touches
@@ -173,7 +204,7 @@ final class KeyboardTouchView: UIView {
         let compact = geometry.metrics.isCompact
         for frame in geometry.keys {
             guard let view = viewPool[frame.id] else { continue }
-            let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state)
+            let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state, showsHints: showsHints)
             view.configure(
                 label: presentation.label,
                 colors: theme.colors(for: presentation.family),
@@ -181,7 +212,8 @@ final class KeyboardTouchView: UIView {
                 style: style,
                 isPressed: state.interaction.pressedKeys.contains(frame.id) || (isGlobePressed && frame.id == globeKeyID),
                 isEnabled: presentation.isEnabled,
-                isCompact: compact
+                isCompact: compact,
+                hint: presentation.hint
             )
         }
         calloutView.apply(theme: theme, style: style, isCompact: compact)
@@ -201,6 +233,37 @@ final class KeyboardTouchView: UIView {
         guard pressed != isGlobePressed else { return }
         isGlobePressed = pressed
         render()
+    }
+
+    private func isLetterKey(_ id: KeyID) -> Bool {
+        guard let character = geometry?.keys.first(where: { $0.id == id })?.key.kind.character,
+              character.count == 1, let first = character.first
+        else { return false }
+        return first.isLetter
+    }
+
+    /// A single accent ring on the key that was just released. One layer, one shot, then gone.
+    private func flashFlowRim(on id: KeyID) {
+        guard flowEffectsEnabled, flowValue > 0.35, !UIAccessibility.isReduceMotionEnabled,
+              let theme, let frame = geometry?.keys.first(where: { $0.id == id })
+        else { return }
+        let rect = frame.visualFrame.insetBy(dx: -2, dy: -2)
+        flowRim.frame = rect
+        flowRim.path = UIBezierPath(
+            roundedRect: CGRect(origin: .zero, size: rect.size),
+            cornerRadius: style.cornerRadius + 2
+        ).cgPath
+        flowRim.strokeColor = theme.accentKey.fill.uiColor.cgColor
+        flowRim.removeAnimation(forKey: "fade")
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.85
+        fade.toValue = 0
+        fade.duration = 0.2
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        fade.fillMode = .forwards
+        fade.isRemovedOnCompletion = false
+        flowRim.opacity = 0
+        flowRim.add(fade, forKey: "fade")
     }
 
     private func makeKeyView(for id: KeyID) -> KeyView {
@@ -226,7 +289,7 @@ final class KeyboardTouchView: UIView {
     private func updateAccessibilityLabels() {
         guard let geometry, let state else { return }
         for (element, frame) in zip(accessibilityKeys, geometry.keys) {
-            let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state)
+            let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state, showsHints: showsHints)
             element.accessibilityLabel = presentation.accessibilityLabel
             element.accessibilityTraits = presentation.isEnabled ? .keyboardKey : [.keyboardKey, .notEnabled]
         }

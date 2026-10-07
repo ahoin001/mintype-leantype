@@ -67,10 +67,65 @@ struct TextEditorTests {
         let document = InMemoryTextDocument(text: "hello brave world")
         let editor = TextEditor(document: document)
 
-        #expect(editor.deleteWord())
+        #expect(editor.deleteWord() == "world")
         #expect(document.text == "hello brave ")
-        #expect(editor.restoreLastDeletion())
+        #expect(editor.restoreLastDeletion() == "world")
         #expect(document.text == "hello brave world")
+    }
+
+    @Test func deleteSentenceKeepsPreviousSentence() {
+        let document = InMemoryTextDocument(text: "First one. Second one here")
+        let editor = TextEditor(document: document)
+        #expect(editor.deleteSentence() == "Second one here")
+        #expect(document.text == "First one. ")
+    }
+
+    @Test func swipedWordGetsSpacingAndUndoesAsUnit() {
+        let document = InMemoryTextDocument(text: "say")
+        let editor = TextEditor(document: document)
+        editor.commitWord("hello")
+        #expect(document.text == "say hello ")
+        #expect(editor.replaceRecentCommitWord(with: "jello"))
+        #expect(document.text == "say jello ")
+        #expect(editor.undoRecentCommit()?.word == "jello")
+        #expect(document.text == "say")
+        #expect(editor.restoreLastDeletion() == " jello ")
+    }
+
+    @Test func correctionRevertsToTypedWord() {
+        let document = InMemoryTextDocument(text: "see teh")
+        let editor = TextEditor(document: document)
+        #expect(editor.replaceCurrentWord(with: "the", kind: .corrected))
+        #expect(document.text == "see the ")
+        #expect(editor.recentCommit?.original == "teh")
+        #expect(editor.undoRecentCommit() != nil)
+        #expect(document.text == "see teh")
+        #expect(editor.recentCommit == nil)
+    }
+
+    @Test func punctuationHopsOverKeyboardSpace() {
+        let document = InMemoryTextDocument(text: "done")
+        let editor = TextEditor(document: document)
+        editor.insertSpace()
+        #expect(editor.insertPunctuation(".", hoppingSpace: true))
+        #expect(document.text == "done. ")
+    }
+
+    @Test func punctuationDoesNotHopOverUsersOwnSpace() {
+        let document = InMemoryTextDocument(text: "done ")
+        let editor = TextEditor(document: document)
+        #expect(!editor.insertPunctuation(".", hoppingSpace: true))
+        #expect(document.text == "done .")
+    }
+
+    @Test func cursorMovesByWord() {
+        let document = InMemoryTextDocument(before: "one two", after: " three")
+        let editor = TextEditor(document: document)
+        #expect(editor.moveCursorByWord(-1))
+        #expect(document.before == "one ")
+        #expect(editor.moveCursorByWord(1))
+        #expect(editor.moveCursorByWord(1))
+        #expect(document.before == "one two three")
     }
 
     @Test func scrubDeleteThenRestoreCharacterByCharacter() {
@@ -96,9 +151,9 @@ struct TextEditorTests {
         #expect(document.text == "")
         #expect(editor.restoreCharacter())
         #expect(document.text == "o")
-        #expect(editor.restoreLastDeletion())
+        #expect(editor.restoreLastDeletion() != nil)
         #expect(document.text == "one ")
-        #expect(editor.restoreLastDeletion())
+        #expect(editor.restoreLastDeletion() != nil)
         #expect(document.text == "one two")
     }
 
@@ -118,7 +173,7 @@ struct TextEditorTests {
 
         editor.deleteWord()
         document.insert("pasted")
-        #expect(!editor.restoreLastDeletion())
+        #expect(editor.restoreLastDeletion() == nil)
     }
 
     @Test func cursorMovesByGraphemeAndStopsAtEdges() {
@@ -157,5 +212,23 @@ struct SettingsTests {
         #expect(settings.backspaceTapAction == .deleteWord)
         #expect(settings.hapticsEnabled)
         #expect(settings.schemaVersion == KeyboardSettings.currentSchemaVersion)
+    }
+
+    @Test func versionOneSettingsGainPhaseTwoDefaults() throws {
+        let json = #"{"schemaVersion":1,"theme":"mint","hapticsEnabled":false}"#
+        let settings = try JSONDecoder().decode(KeyboardSettings.self, from: Data(json.utf8))
+        #expect(settings.theme == "mint")
+        #expect(!settings.hapticsEnabled)
+        #expect(settings.typingMode == .swipe)
+        #expect(settings.effects == .default)
+        #expect(settings.height == .regular)
+    }
+
+    @Test func effectsDecodeLeniently() throws {
+        let json = #"{"effects":{"intensity":"party","trailStyle":"unknownStyle"}}"#
+        let settings = try JSONDecoder().decode(KeyboardSettings.self, from: Data(json.utf8))
+        #expect(settings.effects.intensity == .party)
+        #expect(settings.effects.trailStyle == EffectsSettings.default.trailStyle)
+        #expect(settings.effects.celebrateMilestones)
     }
 }

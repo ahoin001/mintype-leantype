@@ -1,0 +1,16 @@
+# Words LeanType must never suggest, decode, or autocorrect to. One per line; plurals and
+# -ed/-ing forms are removed too. Typing them by hand still works.
+nigger
+nigga
+faggot
+fag
+kike
+spic
+chink
+gook
+wetback
+tranny
+retard
+raghead
+towelhead
+paki

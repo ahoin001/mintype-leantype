@@ -58,10 +58,10 @@ private struct GestureDemo: View {
         ZStack {
             keycap
             if reduceMotion {
-                finger(for: tip.poses.first { $0.isDown } ?? tip.poses[0])
+                fingers(for: tip.poses.first { $0.isDown } ?? tip.poses[0])
             } else {
                 PhaseAnimator(tip.poses) { pose in
-                    finger(for: pose)
+                    fingers(for: pose)
                 } animation: { pose in
                     .smooth(duration: pose.duration)
                 }
@@ -84,6 +84,15 @@ private struct GestureDemo: View {
                 }
                 .foregroundStyle(theme.ink)
             }
+            .overlay(alignment: .topTrailing) {
+                if let hint = tip.keyHint {
+                    Text(hint)
+                        .font(.pebble(.caption2, weight: .semibold))
+                        .foregroundStyle(theme.subtleInk.opacity(0.7))
+                        .padding(.top, 4)
+                        .padding(.trailing, 6)
+                }
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .strokeBorder(theme.surfaceRim, lineWidth: 1)
@@ -91,13 +100,21 @@ private struct GestureDemo: View {
             .shadow(color: theme.shadow, radius: 1.5, y: 1.5)
     }
 
-    private func finger(for pose: FingerPose) -> some View {
+    private func fingers(for pose: FingerPose) -> some View {
+        ZStack {
+            ForEach(pose.fingers.indices, id: \.self) { index in
+                fingertip(pose.fingers[index])
+            }
+        }
+    }
+
+    private func fingertip(_ finger: FingerPose.Finger) -> some View {
         Circle()
             .fill(theme.accent.opacity(0.35))
             .overlay { Circle().strokeBorder(theme.accent.opacity(0.7), lineWidth: 2) }
             .frame(width: 30, height: 30)
-            .scaleEffect(pose.isDown ? 0.85 : 1.15)
-            .opacity(pose.isDown ? 1 : 0)
-            .offset(x: pose.x, y: 4)
+            .scaleEffect(finger.isDown ? 0.85 : 1.15)
+            .opacity(finger.isDown ? 1 : 0)
+            .offset(x: finger.x, y: 4 + finger.y)
     }
 }

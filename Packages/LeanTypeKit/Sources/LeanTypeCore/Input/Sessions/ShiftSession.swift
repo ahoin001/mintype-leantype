@@ -10,10 +10,10 @@ final class ShiftSession: InteractionSession {
     private var hasLeftKey = false
     private var isFinished = false
 
-    init(key: KeyFrame, context: any SessionContext) {
+    init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
         self.context = context
-        context.emit(.keyDown(.modifier))
+        context.emit(.keyDown(.modifier, at: track.start.location))
         context.perform(.shiftPressBegan)
     }
 

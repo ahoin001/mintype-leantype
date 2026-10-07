@@ -2,6 +2,10 @@ import Foundation
 
 /// The space bar: a tap types a space; a horizontal drag (or a long press) turns the keyboard
 /// into a trackpad that moves the cursor one character per step, faster with faster swipes.
+///
+/// In trackpad mode a fast fling jumps whole words, a second finger switches to word steps
+/// for as long as it rests on the keyboard, and parking the finger at either edge of the
+/// keyboard keeps the cursor gliding.
 @MainActor
 final class SpaceSession: InteractionSession {
     static let activationDistance: CGFloat = 10
@@ -11,6 +15,12 @@ final class SpaceSession: InteractionSession {
     static let accelerationOnset: CGFloat = 250
     static let accelerationRange: CGFloat = 700
     static let maxBoost: CGFloat = 1.6
+    /// Above this finger speed (points per second), steps jump whole words.
+    static let flingSpeed: CGFloat = 1500
+    static let wordStep: CGFloat = 26
+    /// Distance from the keyboard's side edges that starts gliding.
+    static let edgeZone: CGFloat = 22
+    static let edgeRepeat: (character: TimeInterval, word: TimeInterval) = (0.07, 0.2)
 
     private enum Phase {
         case pressed
@@ -25,12 +35,15 @@ final class SpaceSession: InteractionSession {
     private var longPress: (any Cancellable)?
     private var lastX: CGFloat?
     private var residual: CGFloat = 0
+    private var extraFingers: Set<TouchID> = []
+    private var edgeDirection = 0
+    private var edgeTimer: (any Cancellable)?
 
-    init(key: KeyFrame, context: any SessionContext) {
+    init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
         self.context = context
         ticket = context.composer.reserve()
-        context.emit(.keyDown(.modifier))
+        context.emit(.keyDown(.modifier, at: track.start.location))
         longPress = context.schedule(after: Self.longPressDelay) { [weak self] in
             self?.enterTrackpad()
         }
@@ -58,6 +71,7 @@ final class SpaceSession: InteractionSession {
             lastX = track.current.location.x
         case .trackpad:
             moveCursor(with: track)
+            updateEdgeGlide(at: track.current.location.x)
         case .finished:
             break
         }
@@ -83,7 +97,27 @@ final class SpaceSession: InteractionSession {
         finish()
     }
 
+    func absorbTouch(_ track: TouchTrack) -> Bool {
+        switch phase {
+        case .trackpad:
+            break
+        case .pressed:
+            guard key.hitFrame.contains(track.start.location) else { return false }
+            enterTrackpad()
+        case .finished:
+            return false
+        }
+        extraFingers.insert(track.id)
+        return true
+    }
+
+    func absorbedTouchEnded(_ track: TouchTrack) {
+        extraFingers.remove(track.id)
+    }
+
     // MARK: - Private
+
+    private var stepsByWord: Bool { !extraFingers.isEmpty }
 
     private func enterTrackpad() {
         guard case .pressed = phase else { return }
@@ -91,7 +125,7 @@ final class SpaceSession: InteractionSession {
         longPress = nil
         context.composer.cancel(ticket)
         phase = .trackpad
-        context.emit(.trackpadEngaged)
+        context.emit(.trackpadEngaged(bar: key.visualFrame))
     }
 
     private func moveCursor(with track: TouchTrack) {
@@ -99,23 +133,59 @@ final class SpaceSession: InteractionSession {
         defer { lastX = x }
         guard let lastX else { return }
 
+        let byWord = stepsByWord || abs(track.velocity.dx) >= Self.flingSpeed
+        let step = byWord ? Self.wordStep : Self.stepLength(forSpeed: abs(track.velocity.dx))
         residual += x - lastX
-        let step = Self.stepLength(forSpeed: abs(track.velocity.dx))
         while abs(residual) >= step {
             let direction = residual < 0 ? -1 : 1
-            guard context.perform(.moveCursor(direction)) else {
+            guard self.step(direction, byWord: byWord) else {
                 // At the end of the text: drop accumulated travel so reversing responds at once.
                 residual = 0
                 return
             }
-            context.emit(.cursorStep)
             residual -= CGFloat(direction) * step
+        }
+    }
+
+    @discardableResult
+    private func step(_ direction: Int, byWord: Bool) -> Bool {
+        let moved = context.perform(byWord ? .moveCursorByWord(direction) : .moveCursor(direction))
+        if moved {
+            context.emit(.cursorStep(direction: direction, byWord: byWord))
+        }
+        return moved
+    }
+
+    private func updateEdgeGlide(at x: CGFloat) {
+        let width = context.geometry.size.width
+        let direction = x <= Self.edgeZone ? -1 : (x >= width - Self.edgeZone ? 1 : 0)
+        guard direction != edgeDirection else { return }
+        edgeDirection = direction
+        edgeTimer?.cancel()
+        edgeTimer = nil
+        if direction != 0 {
+            scheduleEdgeStep()
+        }
+    }
+
+    private func scheduleEdgeStep() {
+        let interval = stepsByWord ? Self.edgeRepeat.word : Self.edgeRepeat.character
+        edgeTimer = context.schedule(after: interval) { [weak self] in
+            guard let self, case .trackpad = phase, edgeDirection != 0 else { return }
+            if step(edgeDirection, byWord: stepsByWord) {
+                scheduleEdgeStep()
+            }
         }
     }
 
     private func finish() {
         longPress?.cancel()
         longPress = nil
+        edgeTimer?.cancel()
+        edgeTimer = nil
+        if case .trackpad = phase {
+            context.emit(.trackpadEnded)
+        }
         phase = .finished
     }
 }

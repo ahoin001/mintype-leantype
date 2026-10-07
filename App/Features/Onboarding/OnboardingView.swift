@@ -12,7 +12,7 @@ struct OnboardingView: View {
 
     @Environment(\.pebbleTheme) private var theme
     @State private var page = Page.welcome
-    @State private var preview = PreviewKeyboardModel(settings: .default)
+    @State private var preview = PreviewKeyboardModel()
 
     let onFinish: () -> Void
 
@@ -123,7 +123,7 @@ private struct TryItPage: View {
                 .font(.pebble(.largeTitle, weight: .bold))
                 .foregroundStyle(theme.ink)
                 .padding(.top, 40)
-            Text("This is the real LeanType engine. Type a few words, tap delete to remove a whole word, then swipe right on delete to bring it back.")
+            Text("This is the real LeanType engine. Slide through hello — a trail means you’re swiping a word. Tap delete to remove a whole word, then swipe right on delete to bring it back.")
                 .font(.pebble(.body))
                 .foregroundStyle(theme.subtleInk)
             Spacer(minLength: 0)

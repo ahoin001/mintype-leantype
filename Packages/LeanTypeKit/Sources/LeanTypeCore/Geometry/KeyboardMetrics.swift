@@ -56,6 +56,23 @@ public struct KeyboardMetrics: Hashable, Sendable {
         isCompact: true
     )
 
+    /// These metrics with taller or shorter keys (the Size setting). Spacing scales with the
+    /// keys so proportions hold; the dock keeps its height.
+    public func scaled(by scale: Double) -> KeyboardMetrics {
+        guard scale != 1 else { return self }
+        let factor = CGFloat(scale)
+        return KeyboardMetrics(
+            keyHeight: (keyHeight * factor).rounded(),
+            rowSpacing: (rowSpacing * factor).rounded(),
+            keySpacing: keySpacing,
+            sideInset: sideInset,
+            topInset: topInset,
+            bottomInset: bottomInset,
+            dockHeight: dockHeight,
+            isCompact: isCompact
+        )
+    }
+
     /// Height of the key area alone (excluding the dock).
     public func keyAreaHeight(rowCount: Int) -> CGFloat {
         let rows = CGFloat(rowCount)

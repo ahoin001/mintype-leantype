@@ -5,10 +5,12 @@ final class TouchEngine {
     private struct ActiveTouch {
         var track: TouchTrack
         let session: any InteractionSession
+        /// The finger was taken over by another finger's session (e.g. two-finger trackpad).
+        let isAbsorbed: Bool
     }
 
     private unowned let context: any SessionContext
-    private var arbiter = SessionArbiter()
+    var arbiter = SessionArbiter()
     private var touches: [TouchID: ActiveTouch] = [:]
     /// Touch-down order, so the most recent finger's callout wins.
     private var order: [TouchID] = []
@@ -34,7 +36,7 @@ final class TouchEngine {
     }
 
     func cancelAll() {
-        let active = order.compactMap { touches[$0] }
+        let active = order.compactMap { touches[$0] }.filter { !$0.isAbsorbed }
         touches.removeAll()
         order.removeAll()
         active.forEach { $0.session.cancelled() }
@@ -45,17 +47,27 @@ final class TouchEngine {
         var pressed = Set<KeyID>()
         var callout: CalloutState?
         var isTrackpadActive = false
+        var strokes = Set<TouchID>()
 
         for id in order {
-            guard let presentation = touches[id]?.session.presentation else { continue }
+            guard let touch = touches[id], !touch.isAbsorbed else { continue }
+            let presentation = touch.session.presentation
             if let key = presentation.pressedKey {
                 pressed.insert(key)
             }
             callout = presentation.callout ?? callout
             isTrackpadActive = isTrackpadActive || presentation.isTrackpadActive
+            if presentation.isStroke {
+                strokes.insert(id)
+            }
         }
 
-        let next = InteractionState(pressedKeys: pressed, callout: callout, isTrackpadActive: isTrackpadActive)
+        let next = InteractionState(
+            pressedKeys: pressed,
+            callout: callout,
+            isTrackpadActive: isTrackpadActive,
+            strokes: strokes
+        )
         guard next != interaction else { return }
         interaction = next
         onInteractionChange?(next)
@@ -65,28 +77,57 @@ final class TouchEngine {
         switch sample.phase {
         case .began:
             guard touches[sample.id] == nil, let key = context.geometry.key(at: sample.location) else { return }
-            for id in order {
+            let track = TouchTrack(start: sample)
+            if let owner = absorbingSession(for: track) {
+                touches[sample.id] = ActiveTouch(track: track, session: owner, isAbsorbed: true)
+                order.append(sample.id)
+                return
+            }
+            for id in order where touches[id]?.isAbsorbed == false {
                 touches[id]?.session.otherTouchBegan()
             }
-            let track = TouchTrack(start: sample)
             let session = arbiter.makeSession(for: key, track: track, context: context)
-            touches[sample.id] = ActiveTouch(track: track, session: session)
+            touches[sample.id] = ActiveTouch(track: track, session: session, isAbsorbed: false)
             order.append(sample.id)
 
         case .moved:
             guard var active = touches[sample.id] else { return }
             active.track.append(sample)
             touches[sample.id] = active
-            active.session.moved(active.track)
+            if active.isAbsorbed {
+                active.session.absorbedTouchMoved(active.track)
+            } else {
+                active.session.moved(active.track)
+            }
 
         case .ended:
             guard var active = remove(sample.id) else { return }
             active.track.append(sample)
-            active.session.ended(active.track)
+            if active.isAbsorbed {
+                active.session.absorbedTouchEnded(active.track)
+            } else {
+                active.session.ended(active.track)
+            }
 
         case .cancelled:
-            remove(sample.id)?.session.cancelled()
+            guard let active = remove(sample.id) else { return }
+            if active.isAbsorbed {
+                active.session.absorbedTouchEnded(active.track)
+            } else {
+                active.session.cancelled()
+            }
         }
+    }
+
+    /// The most recent primary session that wants to take over a newly landed finger.
+    private func absorbingSession(for track: TouchTrack) -> (any InteractionSession)? {
+        for id in order.reversed() {
+            guard let touch = touches[id], !touch.isAbsorbed else { continue }
+            if touch.session.absorbTouch(track) {
+                return touch.session
+            }
+        }
+        return nil
     }
 
     private func remove(_ id: TouchID) -> ActiveTouch? {

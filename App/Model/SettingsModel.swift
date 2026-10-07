@@ -8,17 +8,26 @@ import Observation
 final class SettingsModel {
     var settings: KeyboardSettings {
         didSet {
-            guard settings != oldValue else { return }
+            guard settings != oldValue, !isLoading else { return }
             store.save(settings)
             DarwinNotifications.post(SharedContainer.settingsDidChangeNotification)
         }
     }
 
     @ObservationIgnored private let store: any SettingsStore
+    @ObservationIgnored private var isLoading = false
 
     init(store: any SettingsStore = AppGroupSettingsStore()) {
         self.store = store
         settings = store.load()
+    }
+
+    /// Picks up changes the keyboard made itself (one-handed mode from the dock), so the app
+    /// never writes a stale copy back over them.
+    func reload() {
+        isLoading = true
+        settings = store.load()
+        isLoading = false
     }
 }
 

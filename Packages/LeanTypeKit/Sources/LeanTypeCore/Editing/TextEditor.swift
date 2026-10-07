@@ -1,13 +1,34 @@
-/// Applies editing operations to a `TextDocument` and owns undo-style deletion history.
+/// Applies editing operations to a `TextDocument` and owns the short-term memory that makes
+/// them reversible: deletion history (scrub back, restore a word), the most recent word the
+/// keyboard committed as a unit (undo an autocorrection, swap a swiped word), and whether the
+/// last space was the keyboard's own (so punctuation can hop over it).
 ///
-/// Every method reports whether it changed anything, so callers only give feedback (haptics,
-/// clicks) for edits that actually happened.
+/// Every piece of memory is guarded by an anchor: the tail of the text right after the edit.
+/// If the document no longer ends that way, the user edited elsewhere and the memory is void.
 @MainActor
 public final class TextEditor {
-    private enum LastOperation {
+    /// A word the keyboard inserted (or rewrote) in one step.
+    public struct RecentCommit: Equatable, Sendable {
+        public enum Kind: Equatable, Sendable {
+            case swiped
+            case corrected
+            case completed
+        }
+
+        public let kind: Kind
+        /// What the commit replaced (the typed word for corrections and completions).
+        public let original: String
+        public let leading: String
+        public let word: String
+        public let trailing: String
+
+        var inserted: String { leading + word + trailing }
+    }
+
+    private enum LastDeletion {
         case none
-        case deleteCharacter
-        case deleteWord
+        case character
+        case word
         case restore
     }
 
@@ -16,10 +37,10 @@ public final class TextEditor {
 
     private let document: any TextDocument
     private var deletions = DeletionBuffer()
-    private var lastOperation = LastOperation.none
-    /// Tail of the text right after our last delete or restore. If the document no longer ends
-    /// this way, the user edited elsewhere and the deletion history no longer applies.
-    private var anchor: Substring?
+    private var lastDeletion = LastDeletion.none
+    private var deletionAnchor: Substring?
+    private var commit: (value: RecentCommit, anchor: Substring?)?
+    private var spaceAnchor: Substring?
 
     public init(document: any TextDocument) {
         self.document = document
@@ -32,67 +53,155 @@ public final class TextEditor {
         (document.contextBefore ?? "").isEmpty && (document.contextAfter ?? "").isEmpty
     }
 
+    /// The word right before the cursor, if the cursor is at the end of one.
+    public var currentWord: Substring {
+        TextBoundary.currentWord(before: document.contextBefore)
+    }
+
+    /// The most recent unit commit, if the cursor is still right after it.
+    public var recentCommit: RecentCommit? {
+        guard let commit, isValid(commit.anchor) else { return nil }
+        return commit.value
+    }
+
     // MARK: - Insertion
 
     public func insert(_ text: String) {
         guard !text.isEmpty else { return }
-        forgetDeletions()
+        forgetEverything()
         document.insert(text)
+    }
+
+    /// Types a space and remembers it was the keyboard's, so punctuation can hop over it.
+    public func insertSpace() {
+        insert(" ")
+        spaceAnchor = currentAnchor()
+    }
+
+    /// Types hopping punctuation. Right after a space the keyboard added ("word |"), the mark
+    /// takes the space's place and the space moves after it ("word.| "). Returns whether it hopped.
+    @discardableResult
+    public func insertPunctuation(_ mark: String, hoppingSpace: Bool) -> Bool {
+        let canHop = hoppingSpace
+            && isValid(spaceAnchor)
+            && TextBoundary.endsWithWordAndSingleSpace(document.contextBefore)
+        guard canHop else {
+            insert(mark)
+            return false
+        }
+        forgetEverything()
+        document.deleteBackward()
+        document.insert(mark + " ")
+        spaceAnchor = currentAnchor()
+        return true
     }
 
     /// Turns "word " into "word. " for a double-tapped space. Returns `false` (and changes
     /// nothing) when the text doesn't end in a word followed by a single space.
     public func applyDoubleSpacePeriod() -> Bool {
         guard TextBoundary.canApplyDoubleSpacePeriod(before: document.contextBefore) else { return false }
-        forgetDeletions()
+        forgetEverything()
         document.deleteBackward()
         document.insert(". ")
+        spaceAnchor = currentAnchor()
         return true
+    }
+
+    // MARK: - Word commits
+
+    /// Inserts a whole word as one unit (from a swipe), with a space before it if the cursor is
+    /// mid-text and a space after it so the next word can follow.
+    public func commitWord(_ word: String) {
+        let leading = TextBoundary.needsSpaceBeforeWord(document.contextBefore) ? " " : ""
+        let value = RecentCommit(kind: .swiped, original: "", leading: leading, word: word, trailing: " ")
+        forgetEverything()
+        document.insert(value.inserted)
+        remember(value)
+    }
+
+    /// Replaces the word before the cursor (an autocorrection or an accepted completion),
+    /// followed by `trailing` (usually a space). Returns `false` if there is no current word.
+    @discardableResult
+    public func replaceCurrentWord(with replacement: String, kind: RecentCommit.Kind, trailing: String = " ") -> Bool {
+        let original = String(currentWord)
+        guard !original.isEmpty else { return false }
+        forgetEverything()
+        for _ in 0..<original.count {
+            document.deleteBackward()
+        }
+        let value = RecentCommit(kind: kind, original: original, leading: "", word: replacement, trailing: trailing)
+        document.insert(value.inserted)
+        remember(value)
+        return true
+    }
+
+    /// Swaps the word of the most recent commit (e.g. picking another swipe candidate).
+    @discardableResult
+    public func replaceRecentCommitWord(with word: String) -> Bool {
+        guard let current = recentCommit else { return false }
+        removeInserted(current)
+        let value = RecentCommit(
+            kind: current.kind,
+            original: current.original,
+            leading: current.leading,
+            word: word,
+            trailing: current.trailing
+        )
+        document.insert(value.inserted)
+        remember(value)
+        return true
+    }
+
+    /// Undoes the most recent commit if the cursor is still right after it: a correction or
+    /// completion goes back to what was typed (without the space), a swiped word is removed
+    /// and can be restored with a right swipe on backspace.
+    @discardableResult
+    public func undoRecentCommit() -> RecentCommit? {
+        guard let current = recentCommit else { return nil }
+        removeInserted(current)
+        forgetEverything()
+        switch current.kind {
+        case .corrected, .completed:
+            document.insert(current.original)
+        case .swiped:
+            deletions.record(Array(current.inserted.reversed()), extendingLastGroup: false)
+            lastDeletion = .word
+            deletionAnchor = currentAnchor()
+        }
+        return current
     }
 
     // MARK: - Deletion
 
+    /// Deletes the previous word. Returns the removed text, or `nil` when there was nothing
+    /// visible to remove (a single backspace is still sent for the host).
     @discardableResult
-    public func deleteWord() -> Bool {
-        let before = document.contextBefore
-        if hasSelection {
-            forgetDeletions()
-            document.deleteBackward()
-            return true
-        }
-        guard let before, !before.isEmpty else {
-            // No context: the host may still have text we can't see, so send one backspace.
-            forgetDeletions()
-            document.deleteBackward()
-            return false
-        }
+    public func deleteWord() -> String? {
+        deleteRun(length: TextBoundary.wordDeletionLength(before:))
+    }
 
-        let continuesHistory = historyIsValid()
-        let length = TextBoundary.wordDeletionLength(before: before)
-        let removed = Array(before.suffix(length).reversed())
-        for _ in 0..<length {
-            document.deleteBackward()
-        }
-        record(removed, as: .deleteWord, continuingHistory: continuesHistory)
-        return true
+    /// Deletes back to the end of the previous sentence.
+    @discardableResult
+    public func deleteSentence() -> String? {
+        deleteRun(length: TextBoundary.sentenceDeletionLength(before:))
     }
 
     @discardableResult
-    public func deleteCharacter() -> Bool {
+    public func deleteCharacter() -> String? {
         if hasSelection {
-            forgetDeletions()
+            forgetEverything()
             document.deleteBackward()
-            return true
+            return ""
         }
         guard let last = document.contextBefore?.last else {
-            forgetDeletions()
+            forgetEverything()
             document.deleteBackward()
-            return false
+            return nil
         }
-        let continuesHistory = historyIsValid()
+        let continuesHistory = deletionHistoryIsValid()
         document.deleteBackward()
-        record([last], as: .deleteCharacter, continuingHistory: continuesHistory)
-        return true
+        record([last], as: .character, continuingHistory: continuesHistory)
+        return String(last)
     }
 
     // MARK: - Restoration
@@ -100,19 +209,19 @@ public final class TextEditor {
     /// Re-inserts the most recently deleted character.
     @discardableResult
     public func restoreCharacter() -> Bool {
-        guard historyIsValid(), let character = deletions.popCharacter() else { return false }
+        guard deletionHistoryIsValid(), let character = deletions.popCharacter() else { return false }
         document.insert(String(character))
         markRestored()
         return true
     }
 
-    /// Re-inserts the most recently deleted word (or scrubbed run) in one step.
+    /// Re-inserts the most recently deleted word (or scrubbed run) in one step and returns it.
     @discardableResult
-    public func restoreLastDeletion() -> Bool {
-        guard historyIsValid(), let text = deletions.popGroup() else { return false }
+    public func restoreLastDeletion() -> String? {
+        guard deletionHistoryIsValid(), let text = deletions.popGroup() else { return nil }
         document.insert(text)
         markRestored()
-        return true
+        return text
     }
 
     // MARK: - Cursor
@@ -131,42 +240,108 @@ public final class TextEditor {
         } else {
             return false
         }
-        forgetDeletions()
+        forgetEverything()
         document.adjustCursor(byUTF16Offset: offset)
         return true
     }
 
-    // MARK: - History bookkeeping
+    /// Moves the cursor to the start of the previous word or the end of the next one.
+    @discardableResult
+    public func moveCursorByWord(_ direction: Int) -> Bool {
+        let offset: Int
+        if direction < 0 {
+            let before = document.contextBefore ?? ""
+            let length = TextBoundary.wordMovementLength(before: before)
+            offset = -before.suffix(length).utf16.count
+        } else if direction > 0 {
+            let after = document.contextAfter ?? ""
+            let length = TextBoundary.wordMovementLength(after: after)
+            offset = after.prefix(length).utf16.count
+        } else {
+            return false
+        }
+        guard offset != 0 else { return false }
+        forgetEverything()
+        document.adjustCursor(byUTF16Offset: offset)
+        return true
+    }
+
+    // MARK: - Memory bookkeeping
 
     private var hasSelection: Bool {
         !(document.selectedText ?? "").isEmpty
     }
 
+    private func deleteRun(length: (String?) -> Int) -> String? {
+        let before = document.contextBefore
+        if hasSelection {
+            forgetEverything()
+            document.deleteBackward()
+            return ""
+        }
+        guard let before, !before.isEmpty else {
+            // No context: the host may still have text we can't see, so send one backspace.
+            forgetEverything()
+            document.deleteBackward()
+            return nil
+        }
+        let continuesHistory = deletionHistoryIsValid()
+        let count = length(before)
+        let removed = before.suffix(count)
+        for _ in 0..<count {
+            document.deleteBackward()
+        }
+        record(Array(removed.reversed()), as: .word, continuingHistory: continuesHistory)
+        return String(removed)
+    }
+
+    private func removeInserted(_ value: RecentCommit) {
+        for _ in 0..<value.inserted.count {
+            document.deleteBackward()
+        }
+    }
+
     /// `continuingHistory` must be checked before deleting, since the deletion itself changes
     /// the text the history anchor is compared against.
-    private func record(_ removed: [Character], as operation: LastOperation, continuingHistory: Bool) {
+    private func record(_ removed: [Character], as operation: LastDeletion, continuingHistory: Bool) {
+        commit = nil
+        spaceAnchor = nil
         if !continuingHistory {
             deletions.removeAll()
-            lastOperation = .none
+            lastDeletion = .none
         }
-        let extend = operation == .deleteCharacter && lastOperation == .deleteCharacter
+        let extend = operation == .character && lastDeletion == .character
         deletions.record(removed, extendingLastGroup: extend)
-        lastOperation = operation
-        anchor = currentAnchor()
+        lastDeletion = operation
+        deletionAnchor = currentAnchor()
     }
 
     private func markRestored() {
-        lastOperation = .restore
-        anchor = currentAnchor()
+        commit = nil
+        spaceAnchor = nil
+        lastDeletion = .restore
+        deletionAnchor = currentAnchor()
     }
 
-    private func forgetDeletions() {
+    private func remember(_ value: RecentCommit) {
+        let anchor = currentAnchor()
+        commit = (value, anchor)
+        spaceAnchor = value.trailing == " " ? anchor : nil
+    }
+
+    private func forgetEverything() {
         deletions.removeAll()
-        lastOperation = .none
-        anchor = nil
+        lastDeletion = .none
+        deletionAnchor = nil
+        commit = nil
+        spaceAnchor = nil
     }
 
-    private func historyIsValid() -> Bool {
+    private func deletionHistoryIsValid() -> Bool {
+        deletionAnchor != nil && isValid(deletionAnchor)
+    }
+
+    private func isValid(_ anchor: Substring?) -> Bool {
         guard let anchor else { return false }
         guard let current = currentAnchor() else { return true }
         return current == anchor
