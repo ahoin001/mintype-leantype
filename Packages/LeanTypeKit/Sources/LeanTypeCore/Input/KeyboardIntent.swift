@@ -7,7 +7,7 @@ public enum KeyboardIntent: Hashable, Sendable {
     case insert(String)
     /// A tapped character key and where the finger actually landed, which autocorrect uses
     /// to judge what was meant.
-    case tapCharacter(String, at: CGPoint)
+    case tapCharacter(String, at: CGPoint, time: Double)
     case space
     /// A space the keyboard adds on the user's behalf (after a slid punctuation mark).
     case autoSpace
@@ -26,7 +26,7 @@ public enum KeyboardIntent: Hashable, Sendable {
     case moveCursorByWord(Int)
     /// Commits a decoded swipe. Candidates are best first and never empty. `unsure` means the
     /// top two readings were too close to present the first as the one a space accepts.
-    case commitSwipe([String], unsure: Bool, strokes: Int)
+    case commitSwipe([String], unsure: Bool, strokes: Int, observations: [StrokeObservation])
     /// Picks a slot in the suggestion bar.
     case acceptCandidate(Int)
     case shiftPressBegan

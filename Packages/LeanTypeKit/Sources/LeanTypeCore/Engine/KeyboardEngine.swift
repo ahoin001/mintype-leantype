@@ -41,6 +41,11 @@ public final class KeyboardEngine {
     private var insertionCount = 0
     private var lastSpaceTime: TimeInterval?
     private var lastObservedContext: String?
+    /// The latest swiped word, still open to another tap or swipe. Nil once it locks.
+    private var openWord: OpenWord?
+    /// The word just before this one, kept so a letter tapped during the latest stroke can
+    /// pull the two back together ("es" + "tagged" + N becomes "estranged").
+    private var rejoin: Rejoin?
 
     lazy var composer = InputComposer { [weak self] intents in
         self?.performBatch(intents)
@@ -160,6 +165,7 @@ public final class KeyboardEngine {
     /// so a manual shift choice only resets when the visible context actually differs.
     public func documentDidChange() {
         if editor.contextBefore != lastObservedContext {
+            closeOpenWord()
             shift.noteContextChanged()
             words.noteContextChanged()
         }
@@ -174,6 +180,7 @@ public final class KeyboardEngine {
         shift.reset()
         flow.reset()
         lastSpaceTime = nil
+        openWord = nil
         let initial = Self.initialLayer(for: traits)
         if initial != layer {
             layer = initial
@@ -237,23 +244,29 @@ public final class KeyboardEngine {
         var changesText = true
         switch intent {
         case let .insert(character):
-            changed = insertCharacter(character, at: nil)
-        case let .tapCharacter(character, point):
-            changed = insertCharacter(character, at: point)
+            changed = insertCharacter(character, at: nil, time: scheduler.now)
+        case let .tapCharacter(character, point, time):
+            changed = insertCharacter(character, at: point, time: time)
         case .space:
+            closeOpenWord()
             changed = insertSpace()
         case .autoSpace:
+            closeOpenWord()
             changed = !(editor.contextBefore?.last?.isWhitespace ?? true)
             if changed { editor.insertSpace() }
         case .returnKey:
+            closeOpenWord()
             _ = finishWord(trailing: "")
             editor.insert("\n")
             changed = true
         case .deleteWord:
+            closeOpenWord()
             changed = deleteRun(editor.deleteWord())
         case .deleteSentence:
+            closeOpenWord()
             changed = deleteRun(editor.deleteSentence())
         case .deleteCharacter:
+            closeOpenWord()
             changed = editor.deleteCharacter() != nil
             words.noteCharacterDeleted()
             flow.noteDeletion()
@@ -264,12 +277,15 @@ public final class KeyboardEngine {
         case .undoRecentCommit:
             changed = undoRecentCommit()
         case let .moveCursor(direction):
+            closeOpenWord()
             changed = editor.moveCursor(by: direction)
         case let .moveCursorByWord(direction):
+            closeOpenWord()
             changed = editor.moveCursorByWord(direction)
-        case let .commitSwipe(readings, unsure, strokes):
-            changed = commitSwipe(readings, unsure: unsure, strokes: strokes)
+        case let .commitSwipe(readings, unsure, strokes, observations):
+            changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations)
         case let .acceptCandidate(index):
+            closeOpenWord()
             changed = acceptCandidate(at: index)
         case .shiftPressBegan:
             if shift.pressBegan(at: scheduler.now, insertionCount: insertionCount) {
@@ -305,9 +321,10 @@ public final class KeyboardEngine {
 
     // MARK: - Typing
 
-    private func insertCharacter(_ character: String, at point: CGPoint?) -> Bool {
+    private func insertCharacter(_ character: String, at point: CGPoint?, time: Double) -> Bool {
         let text = displayText(for: character)
         if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
+            closeOpenWord()
             let hadWord = !editor.currentWord.isEmpty
             if !finishWord(trailing: "") {
                 editor.insertPunctuation(text, hoppingSpace: settings.smartPunctuationEnabled && traits.variant == .standard)
@@ -315,10 +332,14 @@ public final class KeyboardEngine {
                 editor.insert(text)
             }
             if hadWord { completeWord(.tap) }
+        } else if text.count == 1, text.first?.isLetter == true, reviseOpenWord(with: text, at: point, time: time) {
+            // The letter joined the swiped word already on screen.
         } else {
             editor.insert(text)
             if text.count == 1, text.first?.isLetter == true {
-                words.noteLetter(at: point)
+                words.noteLetter(at: point, time: time)
+            } else if text.count > 1 {
+                words.noteLiteralText()
             }
         }
         insertionCount += 1
@@ -366,16 +387,203 @@ public final class KeyboardEngine {
         flow.noteWordCompleted()
     }
 
-    private func commitSwipe(_ readings: [String], unsure: Bool, strokes: Int) -> Bool {
-        guard !readings.isEmpty else { return false }
-        let cased = readings.map(applyShift(to:))
+    private func commitSwipe(
+        _ readings: [String],
+        unsure: Bool,
+        strokes: Int,
+        observations: [StrokeObservation]
+    ) -> Bool {
+        guard !readings.isEmpty || !observations.isEmpty else { return false }
+        let typed = words.placedObservations()
+        if !typed.isEmpty {
+            let merged = (typed + observations).sorted { $0.time < $1.time }
+            if let joined = joinedReading(existing: typed, adding: observations, merged: merged) {
+                erasePlacedLetters(typed.count)
+                return publishSwipe(joined, events: merged, strokes: strokes, countsAsNewWord: true)
+            }
+            closeOpenWord()
+            _ = finishWord(trailing: " ")
+        } else if let open = openWord, editor.recentCommit?.kind == .swiped {
+            let merged = (open.events + observations).sorted { $0.time < $1.time }
+            let existing = sequenceOutcome(open.events)
+            if let joined = joinedReading(existing: existing, existingScore: open.score, adding: observations, merged: merged) {
+                return revise(open, with: joined, batch: observations, strokes: strokes)
+            }
+            if let word = editor.recentCommit?.word {
+                let events = open.events
+                closeOpenWord()
+                rejoin = Rejoin(events: events, word: word)
+            } else {
+                closeOpenWord()
+            }
+        }
+
+        let outcome = sequenceOutcome(observations)
+        let score = outcome.result.readings.first?.score ?? -6
+        let wordsToCommit = readings.isEmpty ? [outcome.traced] : readings
+        guard let first = wordsToCommit.first, !first.isEmpty else { return false }
+        return publishSwipe(
+            DecodeResult(readings: wordsToCommit.map { DecodeResult.Reading(word: $0, score: score) }),
+            events: observations,
+            strokes: strokes,
+            countsAsNewWord: true,
+            unsure: unsure
+        )
+    }
+
+    /// A letter typed while a swiped word is still open. Returns whether it rewrote that word.
+    private func reviseOpenWord(with letter: String, at point: CGPoint?, time: Double) -> Bool {
+        guard let open = openWord, !open.events.isEmpty, editor.recentCommit?.kind == .swiped else { return false }
+        var directionX: CGFloat = 0
+        var directionY: CGFloat = 0
+        let location = point ?? .zero
+        if let previous = open.events.max(by: { $0.time < $1.time }) {
+            let rawX = location.x - previous.point.x
+            let rawY = location.y - previous.point.y
+            let length = hypot(rawX, rawY)
+            if length > 1 {
+                directionX = rawX / length
+                directionY = rawY / length
+            }
+        }
+        let batch = [StrokeObservation(
+            time: time,
+            point: location,
+            directionX: directionX,
+            directionY: directionY,
+            letter: letter.lowercased()
+        )]
+        let merged = (open.events + batch).sorted { $0.time < $1.time }
+        let existing = sequenceOutcome(open.events)
+        if let joined = joinedReading(existing: existing, existingScore: open.score, adding: batch, merged: merged) {
+            return revise(open, with: joined, batch: batch, strokes: 0)
+        }
+        if reassemble(adding: batch) { return true }
+        closeOpenWord()
+        return false
+    }
+
+    /// Pulls the previous word back in when a letter tapped during this stroke finishes one
+    /// word out of both.
+    private func reassemble(adding batch: [StrokeObservation]) -> Bool {
+        guard let prior = rejoin, let open = openWord, let current = editor.recentCommit, current.kind == .swiped else { return false }
+        let merged = (prior.events + open.events + batch).sorted { $0.time < $1.time }
+        let outcome = sequenceOutcome(merged)
+        guard let best = outcome.result.readings.first else { return false }
+        guard LexiconKey.make(best.word).count + 1 >= merged.count else { return false }
+        let suffix = (prior.word + " " + current.word + " ").lowercased()
+        guard editor.contextBefore?.lowercased().hasSuffix(suffix) == true else { return false }
+        guard editor.undoRecentCommit() != nil else { return false }
+        for _ in 0..<(prior.word.count + 1) {
+            guard editor.deleteCharacter() != nil else { return false }
+        }
+        rejoin = nil
+        let result = DecodeResult(readings: [.init(word: best.word, score: best.score)])
+        return publishSwipe(result, events: merged, strokes: 0, countsAsNewWord: false)
+    }
+
+    private func joinedReading(
+        existing typed: [StrokeObservation],
+        adding: [StrokeObservation],
+        merged: [StrokeObservation]
+    ) -> DecodeResult? {
+        let outcome = sequenceOutcome(typed)
+        let openScore = outcome.result.readings.first?.score ?? WordJoiner.provisionalScore
+        return joinedReading(existing: outcome, existingScore: openScore, adding: adding, merged: merged)
+    }
+
+    private func joinedReading(
+        existing: SequenceOutcome,
+        existingScore: Double,
+        adding: [StrokeObservation],
+        merged: [StrokeObservation]
+    ) -> DecodeResult? {
+        guard words.letterLayout != nil else { return nil }
+        let extended = sequenceOutcome(merged)
+        return WordJoiner.choose(
+            openScore: existingScore,
+            displayedWord: editor.recentCommit?.word,
+            existingWord: existing.result.readings.first?.word,
+            batch: adding,
+            extended: extended,
+            alone: sequenceOutcome(adding),
+            fragmentContinues: fragmentContinues(existing: existing, extended: extended)
+        )
+    }
+
+    /// The letters actually hit still begin a longer dictionary word, and that longer word is
+    /// more common than stopping at the letters already typed. "wa" continues toward "wait";
+    /// "the" does not continue toward "theater".
+    private func fragmentContinues(existing: SequenceOutcome, extended: SequenceOutcome) -> Bool {
+        guard let lexicon = words.language?.lexicon else { return false }
+        let extendedKey = LexiconKey.make(extended.traced)
+        let existingKey = LexiconKey.make(existing.traced)
+        guard extendedKey.count > existingKey.count, extendedKey.count >= 2 else { return false }
+        var existingCount = -Double.infinity
+        for index in lexicon.indices(ofKey: existingKey) {
+            existingCount = max(existingCount, lexicon.logCount(at: index))
+        }
+        for index in lexicon.indices(withPrefix: extendedKey) {
+            guard lexicon.key(at: index).count > extendedKey.count else { continue }
+            if lexicon.logCount(at: index) > existingCount { return true }
+        }
+        return false
+    }
+
+    private func sequenceOutcome(_ observations: [StrokeObservation]) -> SequenceOutcome {
+        guard let language = words.language, let layout = words.letterLayout else { return .empty }
+        return language.sequenceDecode(observations, layout: layout)
+    }
+
+    private func publishSwipe(
+        _ result: DecodeResult,
+        events: [StrokeObservation],
+        strokes: Int,
+        countsAsNewWord: Bool,
+        unsure: Bool? = nil
+    ) -> Bool {
+        guard let word = result.readings.first?.word, !word.isEmpty else { return false }
+        let cased = result.words.map(applyShift(to:))
+        let score = result.readings[0].score
+        let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
         editor.commitWord(cased[0])
-        words.swipeCommitted(cased, unsure: unsure)
+        words.swipeCommitted(cased, unsure: tentative)
+        openWord = OpenWord(chunks: [OpenChunk(events: events, readings: cased, score: score)])
         insertionCount += 1
         shift.consumeAfterInsertion()
-        completeWord(.swipe)
-        emit(.swipeGestureCommitted(strokes: strokes))
+        if countsAsNewWord { completeWord(.swipe) }
+        if strokes > 0 { emit(.swipeGestureCommitted(strokes: strokes)) }
         return true
+    }
+
+    private func revise(_ open: OpenWord, with result: DecodeResult, batch: [StrokeObservation], strokes: Int) -> Bool {
+        guard let word = result.readings.first?.word, !word.isEmpty else { return false }
+        let cased = result.words.map(applyShift(to:))
+        guard editor.replaceRecentCommitWord(with: cased[0]) else { return false }
+        let score = result.readings[0].score
+        let tentative = result.isUnsure || score <= WordJoiner.provisionalScore
+        words.swipeCommitted(cased, unsure: tentative)
+        var open = open
+        open.chunks.append(OpenChunk(events: batch, readings: cased, score: score))
+        openWord = open
+        if strokes > 0 {
+            insertionCount += 1
+            shift.consumeAfterInsertion()
+            emit(.swipeGestureCommitted(strokes: strokes))
+        }
+        return true
+    }
+
+    private func erasePlacedLetters(_ count: Int) {
+        for _ in 0..<count {
+            guard editor.deleteCharacter() != nil else { break }
+            words.noteCharacterDeleted()
+        }
+    }
+
+    private func closeOpenWord() {
+        openWord = nil
+        rejoin = nil
     }
 
     private func acceptCandidate(at index: Int) -> Bool {
@@ -427,6 +635,7 @@ public final class KeyboardEngine {
     /// Backspace right after a unit commit undoes it: corrections go back to what was typed,
     /// a swiped word disappears in one go.
     private func undoRecentCommit() -> Bool {
+        if peelOpenWord() { return true }
         guard let commit = editor.undoRecentCommit() else { return false }
         switch commit.kind {
         case .corrected:
@@ -438,6 +647,18 @@ public final class KeyboardEngine {
         case .swiped:
             emit(.wordDeleted(commit.word, origin: center(of: .backspace)))
         }
+        flow.noteDeletion()
+        return true
+    }
+
+    /// Drops the last tap or swipe of an open word and restores the reading from before it.
+    private func peelOpenWord() -> Bool {
+        guard var open = openWord, open.chunks.count > 1, editor.recentCommit?.kind == .swiped else { return false }
+        open.chunks.removeLast()
+        guard let chunk = open.chunks.last, let word = chunk.readings.first else { return false }
+        guard editor.replaceRecentCommitWord(with: word) else { return false }
+        words.swipeCommitted(chunk.readings, unsure: chunk.score <= WordJoiner.provisionalScore)
+        openWord = open
         flow.noteDeletion()
         return true
     }
@@ -454,7 +675,7 @@ public final class KeyboardEngine {
 
     private func applySettings() {
         flow.celebratesMilestones = settings.effects.celebrateMilestones
-        let swipes = settings.typingMode == .swipe && words.language != nil && traits.supportsLanguageFeatures
+        let swipes = settings.typingMode == .swipe && words.language != nil && traits.supportsSwipe
         touchEngine.arbiter.typingMode = swipes ? SwipeTypingMode(coordinator: swipe) : TapTypingMode()
     }
 
@@ -537,6 +758,32 @@ public final class KeyboardEngine {
     }
 }
 
+/// The swiped word before the one on screen, in case the next letter belongs to both.
+private struct Rejoin {
+    var events: [StrokeObservation]
+    var word: String
+}
+
+/// One thumb action that still belongs to the word on screen, and the reading it produced.
+private struct OpenChunk {
+    var events: [StrokeObservation]
+    var readings: [String]
+    var score: Double
+}
+
+/// The swiped word that a later tap or swipe can still rewrite.
+private struct OpenWord {
+    var chunks: [OpenChunk]
+
+    var events: [StrokeObservation] {
+        chunks.flatMap(\.events).sorted { $0.time < $1.time }
+    }
+
+    var score: Double {
+        chunks.last?.score ?? WordJoiner.provisionalScore
+    }
+}
+
 // MARK: - SessionContext
 
 extension KeyboardEngine: SessionContext {
@@ -548,7 +795,7 @@ extension KeyboardEngine: SessionContext {
     }
 
     func displayText(for character: String) -> String {
-        guard shift.state != .off else { return character }
+        guard character.count == 1, shift.state != .off else { return character }
         let upper = character.uppercased()
         return upper.count == character.count ? upper : character
     }

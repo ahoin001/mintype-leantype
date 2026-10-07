@@ -152,13 +152,13 @@ final class CharacterTapSession: InteractionSession {
         if let secondary = flickSecondary(for: track) {
             context.composer.commit(ticket, [.insert(secondary)])
         } else {
-            commitTarget()
+            commitTarget(time: track.current.timestamp)
         }
     }
 
-    private func commitTarget() {
+    private func commitTarget(time: Double) {
         if let character = target?.key.kind.character {
-            context.composer.commit(ticket, [.tapCharacter(character, at: touchPoint)])
+            context.composer.commit(ticket, [.tapCharacter(character, at: touchPoint, time: time)])
         } else {
             context.composer.cancel(ticket)
         }
@@ -167,7 +167,7 @@ final class CharacterTapSession: InteractionSession {
     private func scheduleLongPress() {
         longPress?.cancel()
         longPress = nil
-        guard let target, !target.key.alternates.isEmpty else { return }
+        guard let target, !alternateRow(for: target).isEmpty else { return }
         longPress = context.schedule(after: Self.longPressDelay) { [weak self] in
             self?.presentAlternates()
         }
@@ -175,15 +175,32 @@ final class CharacterTapSession: InteractionSession {
 
     private func presentAlternates() {
         guard case .tracking = phase, let target else { return }
-        let options = target.key.alternates
+        let options = alternateRow(for: target)
+        guard !options.isEmpty else { return }
+        let available = context.calloutBounds.width - 2 * context.geometry.metrics.sideInset
+        let widths = CalloutGeometry.cellWidths(
+            for: options,
+            keyWidth: target.visualFrame.width,
+            available: available
+        )
         let layout = CalloutGeometry.layout(
             anchor: target.visualFrame,
             optionCount: options.count,
             metrics: context.geometry.metrics,
-            bounds: context.calloutBounds
+            bounds: context.calloutBounds,
+            cellWidths: widths
         )
         phase = .alternates(layout: layout, options: options, selected: 0)
         context.emit(.alternatesPresented)
+    }
+
+    /// Built-in accents, or the row the user saved for this letter.
+    private func alternateRow(for key: KeyFrame) -> [String] {
+        KeyShortcuts.row(
+            for: key.key.kind.character ?? "",
+            builtIn: key.key.alternates,
+            overrides: context.settings.keyShortcuts
+        )
     }
 
     private func finish() {

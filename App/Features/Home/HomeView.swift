@@ -15,7 +15,6 @@ struct HomeView: View {
     @Environment(SetupStatusModel.self) private var setup
     @Environment(KeyboardDataModel.self) private var data
     @Environment(\.scenePhase) private var scenePhase
-    @State private var preview = PreviewKeyboardModel()
     @State private var diagnostics = KeyboardReport()
 
     private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
@@ -36,11 +35,6 @@ struct HomeView: View {
                     SetupCard()
                 }
 
-                VStack(spacing: 10) {
-                    PebbleSectionHeader(title: "Try it right here")
-                    KeyboardPlayground(model: preview, prompt: "Swipe a word, slide on space")
-                }
-
                 if setup.hasSeenFullAccess {
                     FlowStatsCard(stats: data.stats)
                 }
@@ -48,7 +42,7 @@ struct HomeView: View {
                 VStack(spacing: 14) {
                     LazyVGrid(columns: columns, spacing: 14) {
                         tile(.themes, icon: "paintpalette", title: "Themes", subtitle: theme.name)
-                        tile(.flair, icon: "sparkles", title: "Flair", subtitle: "Trails and bursts")
+                        tile(.flair, icon: "sparkles", title: "Flair", subtitle: "Ripples, trails, bursts")
                         tile(.gestures, icon: "hand.draw", title: "Gestures", subtitle: "The good stuff")
                         tile(.settings, icon: "slider.horizontal.3", title: "Settings", subtitle: "Make it yours")
                     }

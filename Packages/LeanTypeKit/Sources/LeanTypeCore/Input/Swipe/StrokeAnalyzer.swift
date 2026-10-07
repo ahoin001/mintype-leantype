@@ -135,8 +135,14 @@ enum GestureComposer {
         let strokes = strokes.filter { !$0.points.isEmpty }
         guard !strokes.isEmpty else { return nil }
         let traced = tracedLetters(in: strokes)
+        let observations = observations(in: strokes)
         if strokes.count == 1 {
-            return SwipeGesture(path: strokes[0].points.map(\.location), strokeCount: 1, tracedLetters: traced)
+            return SwipeGesture(
+                path: strokes[0].points.map(\.location),
+                strokeCount: 1,
+                tracedLetters: traced,
+                observations: observations
+            )
         }
 
         let arrivals = strokes.flatMap(\.arrivals).sorted { $0.time < $1.time }
@@ -147,14 +153,48 @@ enum GestureComposer {
             path.append(arrival.center)
         }
         if path.count >= 2 {
-            return SwipeGesture(path: path, strokeCount: strokes.count, tracedLetters: traced)
+            return SwipeGesture(path: path, strokeCount: strokes.count, tracedLetters: traced, observations: observations)
         }
 
         let salient = strokes
             .flatMap { StrokeAnalyzer.salientPoints(of: $0.points) }
             .sorted { $0.time < $1.time }
             .map(\.location)
-        return SwipeGesture(path: salient, strokeCount: strokes.count, tracedLetters: traced)
+        return SwipeGesture(path: salient, strokeCount: strokes.count, tracedLetters: traced, observations: observations)
+    }
+
+    /// One observation per new letter, in the order thumbs reached them, with the direction
+    /// of travel from the previous letter.
+    private static func observations(in strokes: [StrokeBuffer]) -> [StrokeObservation] {
+        let arrivals = strokes.flatMap(\.arrivals).sorted { $0.time < $1.time }
+        var result: [StrokeObservation] = []
+        var previous: CGPoint?
+        for arrival in arrivals {
+            if result.last?.letter == arrival.letter {
+                previous = arrival.center
+                continue
+            }
+            var directionX: CGFloat = 0
+            var directionY: CGFloat = 0
+            if let previous {
+                let rawX = arrival.center.x - previous.x
+                let rawY = arrival.center.y - previous.y
+                let length = hypot(rawX, rawY)
+                if length > 1 {
+                    directionX = rawX / length
+                    directionY = rawY / length
+                }
+            }
+            result.append(StrokeObservation(
+                time: arrival.time,
+                point: arrival.center,
+                directionX: directionX,
+                directionY: directionY,
+                letter: arrival.letter
+            ))
+            previous = arrival.center
+        }
+        return result
     }
 
     /// Letters in the order thumbs reached them, skipping a letter repeated by the same thumb.

@@ -275,8 +275,7 @@ struct SwipeTypingTests {
         harness.up(right)
         harness.up(left)
         await harness.settle()
-        #expect(harness.text.hasSuffix("e"))
-        #expect(harness.text.contains(" "))
+        #expect(harness.text == "the ")
         #expect(harness.recorder.events.contains { if case .swipeGestureCommitted(strokes: 1) = $0 { true } else { false } })
     }
 
@@ -393,13 +392,59 @@ struct SwipeTypingTests {
             await Task.yield()
         }
         #expect(!composer.hasPendingCommits)
-        #expect(committed == [.commitSwipe(["hello"], unsure: false, strokes: 1)])
+        #expect(committed == [.commitSwipe(["hello"], unsure: false, strokes: 1, observations: [])])
     }
 
     @Test func swipeIsOffWhenTypingModeIsTap() {
         let harness = EngineHarness(
             settings: KeyboardSettings(typingMode: .tap),
             traits: InputTraits(autocapitalization: .none),
+            language: LanguageModel(lexicon: TestLexicon.shared)
+        )
+        let id = harness.down(at: harness.point(for: "q"))
+        harness.move(id, to: harness.point(for: "r"))
+        #expect(harness.state.interaction.strokes.isEmpty)
+        harness.up(id)
+        #expect(harness.text == "r")
+    }
+
+    @Test func swipeWorksWhenTheFieldTurnsAutocorrectOff() async {
+        let harness = EngineHarness(
+            traits: InputTraits(variant: .url, autocapitalization: .none, allowsAutocorrection: false),
+            language: LanguageModel(lexicon: TestLexicon.shared)
+        )
+        swipe("hello", on: harness)
+        await harness.settle()
+        #expect(harness.text == "hello ")
+
+        let tapped = EngineHarness(
+            traits: InputTraits(variant: .url, autocapitalization: .none, allowsAutocorrection: false),
+            language: LanguageModel(lexicon: TestLexicon.shared)
+        )
+        tapped.type("teh ")
+        #expect(tapped.text == "teh ")
+    }
+
+    @Test func searchFieldStillOffersSwipeAlternatives() async throws {
+        let harness = EngineHarness(
+            traits: InputTraits(
+                variant: .url,
+                autocapitalization: .none,
+                returnKey: .search,
+                allowsAutocorrection: false
+            ),
+            language: LanguageModel(lexicon: TestLexicon.shared)
+        )
+        swipe("in", on: harness)
+        await harness.settle()
+        let alternatives = harness.state.candidates.candidates
+        try #require(!alternatives.isEmpty)
+        #expect(alternatives.allSatisfy { $0.role == .alternative })
+    }
+
+    @Test func swipeStaysOffForPasswords() {
+        let harness = EngineHarness(
+            traits: InputTraits(autocapitalization: .none, blocksLexicalEntry: true),
             language: LanguageModel(lexicon: TestLexicon.shared)
         )
         let id = harness.down(at: harness.point(for: "q"))
@@ -428,7 +473,14 @@ struct SwipeTypingTests {
             spins += 1
             await Task.yield()
         }
-        #expect(committed == [.commitSwipe(["qw"], unsure: true, strokes: 1)])
+        guard case let .commitSwipe(words, unsure, strokes, observations) = committed.first else {
+            Issue.record("Expected a swipe commit")
+            return
+        }
+        #expect(words == ["qw"])
+        #expect(unsure)
+        #expect(strokes == 1)
+        #expect(observations.map(\.letter) == ["q", "w"])
     }
 
     @Test func aRejectedSwipeReadingMovesBehindThePreferredWord() {
@@ -439,6 +491,102 @@ struct SwipeTypingTests {
             .init(word: "teh", score: -0.4),
         ]))
         #expect(ranked.words == ["teh", "the"])
+    }
+
+    @Test func pillThenLStaysPill() async {
+        let harness = makeHarness()
+        swipe("pil", on: harness)
+        await harness.settle()
+        harness.tap(.character("l"))
+        #expect(harness.text == "pill ")
+    }
+
+    @Test func pilThenEBecomesPile() async {
+        let harness = makeHarness()
+        swipe("pil", on: harness)
+        await harness.settle()
+        harness.tap(.character("e"))
+        #expect(harness.text == "pile ")
+    }
+
+    @Test func quitFromATapASwipeAndATap() async {
+        let harness = makeHarness()
+        harness.tap(.character("q"))
+        swipe("ui", on: harness)
+        await harness.settle()
+        harness.tap(.character("t"))
+        #expect(harness.text == "quit ")
+    }
+
+    @Test func waitFromASwipeAndTwoTaps() async {
+        let harness = makeHarness()
+        swipe("wa", on: harness)
+        await harness.settle()
+        harness.tap(.character("i"))
+        harness.tap(.character("t"))
+        #expect(harness.text == "wait ")
+    }
+
+    @Test func privateFromTapsAndTwoSwipes() async {
+        let harness = makeHarness()
+        harness.tap(.character("p"))
+        harness.tap(.character("r"))
+        harness.tap(.character("i"))
+        swipe("va", on: harness)
+        await harness.settle()
+        swipe("te", on: harness)
+        await harness.settle()
+        #expect(harness.text == "private ")
+    }
+
+    @Test func aZigzagWordIsNotARetreat() {
+        let harness = makeHarness()
+        let letters = Array("traged")
+        let points = letters.map { harness.point(for: String($0)) }
+        var stroke = StrokeBuffer(start: StrokePoint(location: points[0], time: 0))
+        stroke.arrive(String(letters[0]), at: points[0], time: 0)
+        for (index, point) in points.dropFirst().enumerated() {
+            stroke.append(StrokePoint(location: point, time: Double(index + 1)))
+            stroke.arrive(String(letters[index + 1]), at: point, time: Double(index + 1))
+        }
+        #expect(stroke.arrivals.map(\.letter).joined() == "traged")
+    }
+
+    @Test func estrangedKeepsNInsideTheSecondStroke() async {
+        let harness = makeHarness()
+        swipe("es", on: harness)
+        await harness.settle()
+        let points = ["t", "r", "a", "g", "e", "d"].map { harness.point(for: $0) }
+        let thumb = harness.down(at: points[0])
+        harness.move(thumb, to: points[1], over: 0.05)
+        harness.move(thumb, to: points[2], over: 0.05)
+        harness.tap(.character("n"), gap: 0.02)
+        harness.move(thumb, to: points[3], over: 0.05)
+        harness.move(thumb, to: points[4], over: 0.05)
+        harness.move(thumb, to: points[5], over: 0.05)
+        harness.up(thumb)
+        await harness.settle()
+        #expect(harness.text == "estranged ")
+    }
+
+    @Test func aFollowingWordStartsANewWord() async {
+        let harness = makeHarness()
+        swipe("pill", on: harness)
+        await harness.settle()
+        swipe("the", on: harness)
+        await harness.settle()
+        #expect(harness.text == "pill the ")
+    }
+
+    @Test func backspacePeelsTheLastThumbAction() async {
+        let harness = makeHarness()
+        swipe("pil", on: harness)
+        await harness.settle()
+        let swiped = harness.text
+        harness.tap(.character("e"))
+        #expect(harness.text == "pile ")
+        harness.tap(.backspace)
+        #expect(harness.text == swiped)
     }
 
     @Test func aRejectedTapCorrectionIsNotApplied() {

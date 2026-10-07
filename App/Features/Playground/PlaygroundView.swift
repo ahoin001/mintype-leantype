@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// A real text field for trying LeanType as the system keyboard, with gesture reminders.
+/// The one place to try the keyboard: the in-app engine, then a real text field for LeanType
+/// as the system keyboard.
 struct PlaygroundView: View {
     @Environment(\.pebbleTheme) private var theme
+    @State private var preview = PreviewKeyboardModel()
     @State private var text = ""
     @FocusState private var isFocused: Bool
 
@@ -17,9 +19,16 @@ struct PlaygroundView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Switch to LeanType with the globe key, then try a few moves.")
+                Text("This is LeanType, on this screen. Swipe a word, slide on space, or tap delete.")
                     .font(.pebble(.subheadline))
                     .foregroundStyle(theme.subtleInk)
+
+                KeyboardPlayground(model: preview, prompt: "Swipe a word, slide on space")
+
+                Text("In any app, switch to LeanType with the globe key.")
+                    .font(.pebble(.subheadline))
+                    .foregroundStyle(theme.subtleInk)
+                    .padding(.top, 8)
 
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {

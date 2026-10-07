@@ -29,6 +29,9 @@ struct StrokeBuffer {
     static let minimumSpacing: CGFloat = 1.5
     /// How far back along the stroke, in points, drops the tail the finger has left behind.
     static let retreatStep: CGFloat = 34
+    /// A pull-back only undoes the letters just drawn. A later key that sits near an older
+    /// part of a zigzag ("d" on the row already crossed in "traged") is a new letter.
+    static let retreatLookback: CGFloat = 120
 
     private(set) var points: [StrokePoint] = []
     private(set) var arrivals: [KeyArrival] = []
@@ -77,6 +80,7 @@ struct StrokeBuffer {
         let total = arcLength
         guard total > Self.retreatStep, points.count >= 2 else { return nil }
         let prefixEnd = total - Self.retreatStep
+        let windowStart = max(0, total - Self.retreatLookback)
         var traveled: CGFloat = 0
         var bestDistance = CGFloat.greatestFiniteMagnitude
         var bestAlong: CGFloat = 0
@@ -85,11 +89,13 @@ struct StrokeBuffer {
             let end = points[index].location
             let segment = hypot(end.x - start.x, end.y - start.y)
             let segmentEnd = traveled + segment
-            if traveled < prefixEnd, segment > 0.001 {
-                let usable = min(prefixEnd, segmentEnd) - traveled
+            let from = max(traveled, windowStart)
+            let to = min(prefixEnd, segmentEnd)
+            if from < to, segment > 0.001 {
                 let dx = end.x - start.x
                 let dy = end.y - start.y
-                let t = min(max(((location.x - start.x) * dx + (location.y - start.y) * dy) / (segment * segment), 0), usable / segment)
+                let raw = ((location.x - start.x) * dx + (location.y - start.y) * dy) / (segment * segment)
+                let t = min(max(raw, (from - traveled) / segment), (to - traveled) / segment)
                 let projected = CGPoint(x: start.x + dx * t, y: start.y + dy * t)
                 let distance = hypot(location.x - projected.x, location.y - projected.y)
                 if distance < bestDistance {
@@ -144,11 +150,19 @@ public struct SwipeGesture: Hashable, Sendable {
     /// Distinct letters the fingers actually entered, in arrival order. Used when decoding
     /// finds nothing, so the gesture still types.
     public let tracedLetters: String
+    /// Each letter a thumb entered, with the time and the direction of travel into it.
+    public let observations: [StrokeObservation]
 
-    public init(path: [CGPoint], strokeCount: Int, tracedLetters: String = "") {
+    public init(
+        path: [CGPoint],
+        strokeCount: Int,
+        tracedLetters: String = "",
+        observations: [StrokeObservation] = []
+    ) {
         self.path = path
         self.strokeCount = strokeCount
         self.tracedLetters = tracedLetters
+        self.observations = observations
     }
 
     public var isMultiStroke: Bool { strokeCount > 1 }

@@ -1,8 +1,7 @@
-import LeanTypeCore
 import LeanTypeDesign
 import SwiftUI
 
-/// First-run flow: meet LeanType, set it up, then try it with the real engine in-app.
+/// First-run flow: meet LeanType, set it up, then point at the Playground.
 struct OnboardingView: View {
     private enum Page: Int, CaseIterable {
         case welcome
@@ -12,7 +11,6 @@ struct OnboardingView: View {
 
     @Environment(\.pebbleTheme) private var theme
     @State private var page = Page.welcome
-    @State private var preview = PreviewKeyboardModel()
 
     let onFinish: () -> Void
 
@@ -21,7 +19,7 @@ struct OnboardingView: View {
             TabView(selection: $page) {
                 WelcomePage().tag(Page.welcome)
                 SetupPage().tag(Page.setup)
-                TryItPage(preview: preview).tag(Page.tryIt)
+                TryItPage().tag(Page.tryIt)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
 
@@ -115,21 +113,21 @@ private struct SetupPage: View {
 private struct TryItPage: View {
     @Environment(\.pebbleTheme) private var theme
 
-    let preview: PreviewKeyboardModel
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Give it a spin")
                 .font(.pebble(.largeTitle, weight: .bold))
                 .foregroundStyle(theme.ink)
                 .padding(.top, 40)
-            Text("This is the real LeanType engine. Slide through hello — a trail means you’re swiping a word. Tap delete to remove a whole word, then swipe right on delete to bring it back.")
+            Text("Open Playground on the home screen. The keyboard there is LeanType: swipe a word, slide on space, tap delete for a whole word, then swipe right on delete to bring it back.")
+                .font(.pebble(.body))
+                .foregroundStyle(theme.subtleInk)
+            Text("In any app, switch to LeanType with the globe key.")
                 .font(.pebble(.body))
                 .foregroundStyle(theme.subtleInk)
             Spacer(minLength: 0)
-            KeyboardPlayground(model: preview)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 24)
         .padding(.bottom, 8)
     }
 }

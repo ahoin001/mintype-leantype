@@ -115,6 +115,11 @@ public enum LayoutProvider {
         "z": "%", "x": "*", "c": "+", "v": "=", "b": "/", "n": ";", "m": ":",
     ]
 
+    /// Accents and symbols a hold offers before the user edits that key.
+    public static func builtInAlternates(for key: String) -> [String] {
+        alternates[key] ?? []
+    }
+
     // MARK: - Long-press alternates (English)
 
     static let alternates: [String: [String]] = [

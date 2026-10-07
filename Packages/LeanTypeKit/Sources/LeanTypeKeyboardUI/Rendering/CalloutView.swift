@@ -5,7 +5,7 @@ import UIKit
 /// The balloon that rises out of a pressed key: a letter preview, or the long-press
 /// alternates row with a selection pill. Shown instantly; dismissed with a quick fade.
 final class CalloutView: UIView {
-    private static let maxOptions = 10
+    private static let maxOptions = KeyShortcuts.maxCount
 
     private let shape = CAShapeLayer()
     private let selection = CALayer()

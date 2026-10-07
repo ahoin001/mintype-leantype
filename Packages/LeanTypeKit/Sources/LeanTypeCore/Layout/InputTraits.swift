@@ -53,27 +53,36 @@ public struct InputTraits: Hashable, Sendable {
     public var autocapitalization: AutocapitalizationMode
     public var returnKey: ReturnKeyKind
     public var enablesReturnKeyAutomatically: Bool
-    /// The field accepts autocorrect and suggestions (off for passwords, codes, usernames).
+    /// The host allows autocorrect (`autocorrectionType` is not `.no`).
     public var allowsAutocorrection: Bool
+    /// Passwords, usernames, and one-time codes must be entered exactly.
+    public var blocksLexicalEntry: Bool
 
     public init(
         variant: KeyboardVariant = .standard,
         autocapitalization: AutocapitalizationMode = .sentences,
         returnKey: ReturnKeyKind = .default,
         enablesReturnKeyAutomatically: Bool = false,
-        allowsAutocorrection: Bool = true
+        allowsAutocorrection: Bool = true,
+        blocksLexicalEntry: Bool = false
     ) {
         self.variant = variant
         self.autocapitalization = autocapitalization
         self.returnKey = returnKey
         self.enablesReturnKeyAutomatically = enablesReturnKeyAutomatically
         self.allowsAutocorrection = allowsAutocorrection
+        self.blocksLexicalEntry = blocksLexicalEntry
     }
 
     public static let `default` = InputTraits()
 
-    /// Whether language features (autocorrect, suggestions, swipe) suit this field.
+    /// Whether autocorrect and suggestions suit this field.
     public var supportsLanguageFeatures: Bool {
-        allowsAutocorrection && variant == .standard
+        allowsAutocorrection && !blocksLexicalEntry && variant == .standard
+    }
+
+    /// Swipe is an input method. Search bars and URL fields turn autocorrect off and still have letter keys.
+    public var supportsSwipe: Bool {
+        variant != .numeric && !blocksLexicalEntry
     }
 }

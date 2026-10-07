@@ -46,6 +46,11 @@ final class LayerPool {
         layer.mask = nil
         if let shape = layer as? CAShapeLayer {
             shape.path = nil
+            shape.lineWidth = 0
+            shape.strokeColor = nil
+            shape.shadowOpacity = 0
+            shape.shadowRadius = 0
+            shape.shadowPath = nil
             freeShapes.append(shape)
         } else if let text = layer as? CATextLayer {
             text.string = nil

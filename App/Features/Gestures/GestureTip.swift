@@ -180,7 +180,7 @@ struct GestureTip: Identifiable {
         GestureTip(
             id: "accents",
             title: "Accents and extras",
-            detail: "Hold a letter like e or n to pick é, ñ and friends. Slide to choose, lift to type.",
+            detail: "Hold a letter like e or n to pick é, ñ, or a shortcut you added, such as an email. Slide to choose, lift to type.",
             keyLabel: "e",
             keySymbol: nil,
             keyWidth: 52,

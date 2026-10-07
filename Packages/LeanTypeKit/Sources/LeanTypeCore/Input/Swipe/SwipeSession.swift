@@ -172,7 +172,7 @@ final class SwipeSession: InteractionSession {
         context.composer.cancel(ticket)
         let later = context.composer.reserve()
         if let character = origin.key.kind.character {
-            context.composer.commit(later, [.tapCharacter(character, at: track.start.location)])
+            context.composer.commit(later, [.tapCharacter(character, at: track.start.location, time: track.start.timestamp)])
         } else {
             context.composer.cancel(later)
         }

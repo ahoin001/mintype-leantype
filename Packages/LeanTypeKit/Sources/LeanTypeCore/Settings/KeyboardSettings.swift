@@ -54,10 +54,14 @@ public struct EffectsSettings: Codable, Sendable, Equatable {
     }
 
     public enum TrailStyle: String, Codable, Sendable, CaseIterable {
-        /// The theme's accent color.
+        /// A tapered ribbon in the theme's accent.
         case theme
-        /// A shifting rainbow.
+        /// The ribbon, in a rainbow.
         case prism
+        /// A bright head with a tail of soft beads.
+        case comet
+        /// A stroke that thickens when the finger slows down.
+        case brush
     }
 
     public var intensity: Intensity
@@ -113,6 +117,9 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     public var height: KeyboardHeight
     public var oneHandedMode: OneHandedMode
     public var effects: EffectsSettings
+    /// Hold-and-slide rows the user has edited, keyed by a lowercase letter. A missing key
+    /// keeps the built-in accents. An empty row means holding that letter types nothing extra.
+    public var keyShortcuts: [String: [String]]
 
     public init(
         theme: ThemeIdentifier = .automatic,
@@ -131,7 +138,8 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         learnWordsEnabled: Bool = true,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
-        effects: EffectsSettings = .default
+        effects: EffectsSettings = .default,
+        keyShortcuts: [String: [String]] = [:]
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.theme = theme
@@ -151,6 +159,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.height = height
         self.oneHandedMode = oneHandedMode
         self.effects = effects
+        self.keyShortcuts = keyShortcuts
     }
 
     public static let `default` = KeyboardSettings()
@@ -174,6 +183,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case height
         case oneHandedMode
         case effects
+        case keyShortcuts
     }
 
     /// Decodes leniently: missing or unreadable fields fall back to defaults, so older blobs
@@ -201,6 +211,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)
         effects = lenient.value(.effects, defaults.effects)
+        keyShortcuts = lenient.value(.keyShortcuts, defaults.keyShortcuts)
     }
 }
 

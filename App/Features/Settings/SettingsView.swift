@@ -50,6 +50,17 @@ struct SettingsView: View {
                         )
                     }
                     PebbleDivider()
+                    NavigationLink {
+                        ShortcutsView()
+                    } label: {
+                        PebbleLinkRow(
+                            systemImage: "character.cursor.ibeam",
+                            title: "Hold shortcuts",
+                            detail: shortcutDetail
+                        )
+                    }
+                    .buttonStyle(PebblePressStyle())
+                    PebbleDivider()
                     PebbleToggleRow(
                         systemImage: "textformat",
                         title: "Auto-capitalize",
@@ -109,16 +120,8 @@ struct SettingsView: View {
                 }
 
                 section("Flair") {
-                    PebblePickerRow(
-                        systemImage: "sparkles",
-                        title: "Effects",
-                        detail: "Ripples, trails, and a gust of wind for deleted words.",
-                        selection: $model.settings.effects.intensity,
-                        options: [("Off", .off), ("Subtle", .subtle), ("Lively", .lively), ("Party", .party)]
-                    )
-                    PebbleDivider()
                     NavigationLink(value: HomeDestination.flair) {
-                        PebbleLinkRow(systemImage: "wand.and.rays", title: "Trails and streaks", detail: "Try every effect on a live keyboard.")
+                        PebbleLinkRow(systemImage: "sparkles", title: "Effects", detail: flairDetail)
                     }
                     .buttonStyle(PebblePressStyle())
                 }
@@ -180,6 +183,23 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { data.refresh() }
+    }
+
+    private var shortcutDetail: String {
+        let count = model.settings.keyShortcuts.count
+        if count == 0 {
+            return "Hold a letter, then slide to an accent or a shortcut you add."
+        }
+        return count == 1 ? "1 letter customized." : "\(count) letters customized."
+    }
+
+    private var flairDetail: String {
+        switch model.settings.effects.intensity {
+        case .off: "Off. The keys stay still."
+        case .subtle: "Subtle. Smaller ripples, trails, and bursts."
+        case .lively: "Lively. Ripples, trails, and bursts at the usual size."
+        case .party: "Party. Larger bursts and brighter trails."
+        }
     }
 
     private var clearLearnedWordsRow: some View {

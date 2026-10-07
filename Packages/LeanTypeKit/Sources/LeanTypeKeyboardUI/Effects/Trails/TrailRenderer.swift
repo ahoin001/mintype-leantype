@@ -1,24 +1,28 @@
 import LeanTypeCore
 import UIKit
 
-/// Draws the glowing ribbon behind each swiping finger.
+/// Draws the trail behind each swiping finger.
 ///
 /// Every touch keeps its last few dozen points in a fixed ring buffer, so when a finger turns
 /// into a stroke its trail appears with the path it already drew. A display link runs only
-/// while at least one trail is live; each frame rebuilds a tapered outline (thin and faded at
-/// the tail, full width at the fingertip). When the finger lifts, the ribbon collapses into
-/// the suggestion bar, where the word appears.
+/// while at least one trail is live. Theme and Prism are a tapered ribbon. Comet is a bright
+/// head with a short tail of beads. Brush is a stroke whose width follows how fast the finger
+/// moves. When the finger lifts, the trail collapses into the suggestion bar.
 @MainActor
 final class TrailRenderer {
     nonisolated static let pointCapacity = 64
     /// How long a point stays in the ribbon.
     static let lifetime: CFTimeInterval = 0.3
+    /// Beads stay a little longer than a ribbon, so the tail is readable.
+    static let cometLifetime: CFTimeInterval = 0.5
     static let maximumWidth: CGFloat = 7
     static let collapseDuration: CFTimeInterval = 0.26
+    static let cometBeads = 12
 
     private struct Trail {
         let shape: CAShapeLayer
         let gradient: CAGradientLayer?
+        let style: EffectsSettings.TrailStyle
         var root: CALayer { gradient ?? shape }
     }
 
@@ -96,26 +100,46 @@ final class TrailRenderer {
     private func begin(_ id: TouchID) {
         guard let shape = stage.pool.shape() else { return }
         let startX = histories[id].flatMap { $0.count > 0 ? $0[0].location.x : nil } ?? stage.bounds.midX
+        // A thumb on the right half shifts hue, so two trails through one word stay distinct.
         let hueOffset: CGFloat = startX < stage.bounds.midX ? 0 : 0.38
+        let color = palette.shifted(by: hueOffset)
         shape.frame = stage.bounds
         shape.strokeColor = nil
         shape.lineWidth = 0
+        shape.shadowOpacity = 0
+        shape.shadowRadius = 0
+        shape.shadowPath = nil
+        shape.fillColor = color.withAlphaComponent(0.85).cgColor
 
-        let trail: Trail
-        if style == .prism {
-            let gradient = spareGradients.popLast() ?? CAGradientLayer()
-            gradient.actions = LayerPool.noActions
-            gradient.frame = stage.bounds
-            gradient.startPoint = CGPoint(x: 0, y: 0.5)
-            gradient.endPoint = CGPoint(x: 1, y: 0.5)
-            gradient.colors = palette.prism(count: 5, offset: hueOffset)
+        var gradient: CAGradientLayer?
+        switch style {
+        case .prism:
+            let wash = spareGradients.popLast() ?? CAGradientLayer()
+            wash.actions = LayerPool.noActions
+            wash.frame = stage.bounds
+            wash.startPoint = CGPoint(x: 0, y: 0.5)
+            wash.endPoint = CGPoint(x: 1, y: 0.5)
+            wash.colors = palette.prism(count: 5, offset: hueOffset)
             shape.fillColor = UIColor.white.cgColor
-            gradient.mask = shape
-            trail = Trail(shape: shape, gradient: gradient)
-        } else {
-            shape.fillColor = palette.shifted(by: hueOffset).withAlphaComponent(0.85).cgColor
-            trail = Trail(shape: shape, gradient: nil)
+            wash.mask = shape
+            gradient = wash
+        case .comet:
+            shape.fillColor = color.withAlphaComponent(0.95).cgColor
+            shape.shadowColor = color.cgColor
+            shape.shadowRadius = 12
+            shape.shadowOpacity = 0.9
+            shape.shadowOffset = .zero
+        case .brush:
+            shape.fillColor = color.withAlphaComponent(0.78).cgColor
+            shape.strokeColor = palette.shifted(by: hueOffset + 0.06).withAlphaComponent(0.5).cgColor
+            shape.lineWidth = 1.4
+            shape.lineJoin = .round
+            shape.lineCap = .round
+        case .theme:
+            break
         }
+
+        let trail = Trail(shape: shape, gradient: gradient, style: style)
         trail.root.opacity = Float(min(0.6 + 0.35 * intensity, 1))
         stage.present(trail.root)
         trails[id] = trail
@@ -185,47 +209,122 @@ final class TrailRenderer {
         defer { Signposts.effects.endInterval("Trail frame", interval) }
         let now = CACurrentMediaTime()
         for (id, trail) in trails {
-            histories[id]?.dropOlder(than: now - Self.lifetime)
-            trail.shape.path = histories[id].flatMap { ribbon(through: $0, now: now) }
+            let life = trail.style == .comet ? Self.cometLifetime : Self.lifetime
+            histories[id]?.dropOlder(than: now - life)
+            guard let points = histories[id] else {
+                trail.shape.path = nil
+                trail.shape.shadowPath = nil
+                continue
+            }
+            switch trail.style {
+            case .theme, .prism:
+                trail.shape.path = ribbon(through: points, now: now)
+                trail.shape.shadowPath = nil
+            case .comet:
+                let drawn = comet(through: points, now: now)
+                trail.shape.path = drawn.path
+                trail.shape.shadowPath = drawn.head
+            case .brush:
+                trail.shape.path = brush(through: points, now: now)
+                trail.shape.shadowPath = nil
+            }
         }
     }
 
-    /// A closed outline around the points, widening from the tail to a round fingertip.
-    private func ribbon(through points: TrailPoints, now: CFTimeInterval) -> CGPath? {
+    /// Beads along the recent path, small at the tail and a glowing head under the finger.
+    private func comet(through points: TrailPoints, now: CFTimeInterval) -> (path: CGPath?, head: CGPath?) {
+        let count = points.count
+        guard count >= 1 else { return (nil, nil) }
+        let path = CGMutablePath()
+        let beads = min(Self.cometBeads, count)
+        let scale = min(max(intensity, 0.7), 1.25)
+        var head: CGPath?
+        for bead in 0..<beads {
+            let index = beads == 1 ? count - 1 : Int((CGFloat(bead) / CGFloat(beads - 1) * CGFloat(count - 1)).rounded())
+            let point = points[index]
+            let progress = CGFloat(bead) / CGFloat(max(beads - 1, 1))
+            let freshness = CGFloat(max(0, 1 - (now - point.time) / Self.cometLifetime))
+            let isHead = bead == beads - 1
+            let radius = (isHead ? 7.5 : 1.4 + 3.6 * progress) * (isHead ? 1 : max(freshness, 0.35)) * scale
+            guard radius > 0.5 else { continue }
+            let beadPath = CGPath(ellipseIn: CGRect(
+                x: point.location.x - radius,
+                y: point.location.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            ), transform: nil)
+            path.addPath(beadPath)
+            if isHead { head = beadPath }
+        }
+        return (path.isEmpty ? nil : path, head)
+    }
+
+    /// The ribbon's width follows speed, with a fainter copy lagging a few samples behind.
+    private func brush(through points: TrailPoints, now: CFTimeInterval) -> CGPath? {
+        guard let body = ribbon(through: points, now: now, kind: .brush) else { return nil }
+        guard let echo = ribbon(through: points, now: now, kind: .brush, lag: 3, widthScale: 0.62) else { return body }
+        let path = CGMutablePath()
+        path.addPath(body)
+        path.addPath(echo)
+        return path
+    }
+
+    private enum RibbonKind {
+        case taper
+        case brush
+    }
+
+    private func ribbon(
+        through points: TrailPoints,
+        now: CFTimeInterval,
+        kind: RibbonKind = .taper,
+        lag: Int = 0,
+        widthScale: CGFloat = 1
+    ) -> CGPath? {
         let count = points.count
         guard count >= 2 else { return nil }
-        let maximum = Self.maximumWidth * min(max(intensity, 0.7), 1.25)
+        let scale = min(max(intensity, 0.7), 1.25)
 
         leftEdge.removeAll(keepingCapacity: true)
         rightEdge.removeAll(keepingCapacity: true)
         var heading: CGFloat = 0
         var tipRadius: CGFloat = 0
         for index in 0..<count {
-            let point = points[index]
-            let previous = points[max(index - 1, 0)].location
-            let next = points[min(index + 1, count - 1)].location
+            let source = max(index - lag, 0)
+            let point = points[source]
+            let previous = points[max(source - 1, 0)].location
+            let next = points[min(source + 1, count - 1)].location
             var dx = next.x - previous.x
             var dy = next.y - previous.y
             let length = max((dx * dx + dy * dy).squareRoot(), 0.001)
             dx /= length
             dy /= length
-            let progress = CGFloat(index) / CGFloat(count - 1)
+            let progress = CGFloat(source) / CGFloat(count - 1)
             let freshness = CGFloat(max(0, 1 - (now - point.time) / Self.lifetime))
-            let half = maximum * 0.5 * pow(progress, 0.7) * (0.35 + 0.65 * freshness)
+            let half: CGFloat
+            switch kind {
+            case .taper:
+                half = Self.maximumWidth * 0.5 * scale * pow(progress, 0.7) * (0.35 + 0.65 * freshness) * widthScale
+            case .brush:
+                let earlier = points[max(source - 1, 0)]
+                let dt = max(point.time - earlier.time, 1.0 / 90)
+                let speed = hypot(point.location.x - earlier.location.x, point.location.y - earlier.location.y) / CGFloat(dt)
+                let fast = min(max((speed - 160) / 1100, 0), 1)
+                half = (1.3 + 6.4 * (1 - fast)) * scale * (0.4 + 0.6 * freshness) * widthScale
+            }
             leftEdge.append(CGPoint(x: point.location.x - dy * half, y: point.location.y + dx * half))
             rightEdge.append(CGPoint(x: point.location.x + dy * half, y: point.location.y - dx * half))
             heading = atan2(dy, dx)
             tipRadius = half
         }
 
-        // One outline: up the left edge, around a round cap at the fingertip, back down the right.
         let path = CGMutablePath()
         path.move(to: leftEdge[0])
         for index in 1..<count {
             path.addLine(to: leftEdge[index])
         }
         path.addArc(
-            center: points[count - 1].location,
+            center: points[max(count - 1 - lag, 0)].location,
             radius: tipRadius,
             startAngle: heading + .pi / 2,
             endAngle: heading - .pi / 2,

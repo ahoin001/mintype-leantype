@@ -17,6 +17,7 @@ public final class LanguageModel {
     private let rejections: RejectionMemory
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
+    private var letterBigram: LetterBigram?
     private var unsavedChanges = 0
 
     /// Learned words are written out after this many changes (and when the keyboard hides).
@@ -61,6 +62,24 @@ public final class LanguageModel {
     func decode(_ gesture: SwipeGesture, layout: LetterLayout) async -> DecodeResult {
         let result = await decoder.decode(gesture, layout: layout, personal: personalEntries)
         return rejections.applying(to: result)
+    }
+
+    /// Words for a sequence of taps and swipe arrivals, best first. Used when several thumb
+    /// actions are still one word. A single continuous swipe keeps using `decode`.
+    func sequenceDecode(_ observations: [StrokeObservation], layout: LetterLayout) -> SequenceOutcome {
+        guard !observations.isEmpty else { return .empty }
+        if letterBigram == nil {
+            letterBigram = LetterBigram(lexicon: lexicon)
+        }
+        guard let letterBigram else { return .empty }
+        let outcome = SequenceDecoder.decode(
+            observations,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personalEntries,
+            bigram: letterBigram
+        )
+        return SequenceOutcome(result: rejections.applying(to: outcome.result), traced: outcome.traced)
     }
 
     /// Remembers that the user wanted `preferred` instead of the `rejected` correction.

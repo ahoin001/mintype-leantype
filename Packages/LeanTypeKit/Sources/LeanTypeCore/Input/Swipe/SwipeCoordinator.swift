@@ -159,7 +159,7 @@ final class SwipeCoordinator {
     /// The decoded word, or the letters the fingers actually crossed when nothing matched.
     private func commit(_ result: DecodeResult, gesture: SwipeGesture, ticket: InputComposer.Ticket) {
         if !result.isEmpty {
-            composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount)])
+            composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount, observations: gesture.observations)])
             return
         }
         let traced = gesture.tracedLetters
@@ -168,7 +168,7 @@ final class SwipeCoordinator {
         } else if traced.count == 1 {
             composer.commit(ticket, [.insert(traced)])
         } else {
-            composer.commit(ticket, [.commitSwipe([traced], unsure: true, strokes: gesture.strokeCount)])
+            composer.commit(ticket, [.commitSwipe([traced], unsure: true, strokes: gesture.strokeCount, observations: gesture.observations)])
         }
     }
 
