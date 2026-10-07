@@ -23,6 +23,10 @@ final class SwipeCoordinator {
 
     private var active: [TouchID: StrokeBuffer] = [:]
     private var finished: [StrokeBuffer] = []
+    /// Letter fingers still down that have not started a stroke. Each is one tap in this beat.
+    private var held: [TouchID: StrokeObservation] = [:]
+    /// Taps that lifted while the beat was open, in touch-down order.
+    private var liftedTaps: [StrokeObservation] = []
     private var ticket: InputComposer.Ticket?
     private var decodeTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
@@ -41,8 +45,8 @@ final class SwipeCoordinator {
         self.decode = decode
     }
 
-    /// Fingers are down drawing a gesture; new fingers on letters may join it.
-    var isCollecting: Bool { !active.isEmpty }
+    /// A stroke or a held letter is still down. The word waits until both have lifted.
+    var isCollecting: Bool { !active.isEmpty || !held.isEmpty }
 
     func registerUndecided(_ session: SwipeSession) {
         undecided[ObjectIdentifier(session)] = WeakSession(session: session)
@@ -50,6 +54,37 @@ final class SwipeCoordinator {
 
     func unregisterUndecided(_ session: SwipeSession) {
         undecided.removeValue(forKey: ObjectIdentifier(session))
+    }
+
+    /// A letter finger that has not traveled. It stays out of the polyline.
+    func hold(_ id: TouchID, _ observation: StrokeObservation) {
+        held[id] = observation
+    }
+
+    /// The held finger lifted without leaving its key. The letter joins the beat at its touch-down time.
+    func liftHold(_ id: TouchID) {
+        if let observation = held.removeValue(forKey: id) {
+            liftedTaps.append(observation)
+        }
+        finishIfIdle()
+    }
+
+    /// The touch was cancelled. The letter is not part of the word.
+    func dropHold(_ id: TouchID) {
+        held.removeValue(forKey: id)
+        finishIfIdle()
+    }
+
+    /// The held finger started to travel, so it becomes a stroke of the same beat.
+    func promoteHold(_ id: TouchID, track: TouchTrack) {
+        held.removeValue(forKey: id)
+        join(track)
+    }
+
+    /// A tap that landed and lifted while this beat was open.
+    func noteTap(_ observation: StrokeObservation) {
+        liftedTaps.append(observation)
+        schedulePreview()
     }
 
     /// Fingers that were waiting when this gesture began become strokes of it.
@@ -67,6 +102,8 @@ final class SwipeCoordinator {
             composer.cancel(previous)
         }
         finished.removeAll()
+        liftedTaps.removeAll()
+        held.removeAll()
         self.ticket = ticket
         add(track)
     }
@@ -89,16 +126,12 @@ final class SwipeCoordinator {
         guard var stroke = active.removeValue(forKey: track.id) else { return }
         stroke.finish(at: Self.point(track.current))
         finished.append(stroke)
-        if active.isEmpty {
-            finishGesture()
-        }
+        finishIfIdle()
     }
 
     func cancelled(_ track: TouchTrack) {
         guard active.removeValue(forKey: track.id) != nil else { return }
-        if active.isEmpty {
-            finishGesture()
-        }
+        finishIfIdle()
     }
 
     /// Drops everything in flight, including a decode that hasn't returned yet.
@@ -109,6 +142,8 @@ final class SwipeCoordinator {
         decodeTask = nil
         active.removeAll()
         finished.removeAll()
+        held.removeAll()
+        liftedTaps.removeAll()
         if let ticket {
             composer.cancel(ticket)
         }
@@ -126,14 +161,25 @@ final class SwipeCoordinator {
         active[track.id] = stroke
     }
 
+    private func finishIfIdle() {
+        guard active.isEmpty, held.isEmpty else { return }
+        finishGesture()
+    }
+
+    private func pendingTaps() -> [StrokeObservation] {
+        liftedTaps + Array(held.values)
+    }
+
     private func finishGesture() {
         let strokes = finished
+        let taps = liftedTaps
         finished.removeAll()
+        liftedTaps.removeAll()
         guard let ticket else { return }
         self.ticket = nil
 
         invalidatePreview()
-        guard let gesture = GestureComposer.compose(strokes), gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
+        guard let gesture = GestureComposer.compose(strokes, taps: taps), gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
             composer.cancel(ticket)
             onPreview?(nil)
             return
@@ -185,7 +231,7 @@ final class SwipeCoordinator {
             previewTask = nil
             guard token == previewToken, expected == generation, isCollecting else { return }
             let strokes = finished + active.values
-            guard let gesture = GestureComposer.compose(strokes) else { return }
+            guard let gesture = GestureComposer.compose(strokes, taps: pendingTaps()) else { return }
             let result = await decode(gesture)
             guard token == previewToken, expected == generation, isCollecting, !result.isEmpty else { return }
             onPreview?(result)

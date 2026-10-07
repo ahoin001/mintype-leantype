@@ -589,6 +589,90 @@ struct SwipeTypingTests {
         #expect(harness.text == swiped)
     }
 
+    @Test func pileFromASwipeAndATapDuringTheStroke() async {
+        let harness = makeHarness()
+        let points = ["p", "i", "l"].map { harness.point(for: $0) }
+        let thumb = harness.down(at: points[0])
+        harness.move(thumb, to: points[1], over: 0.06)
+        harness.move(thumb, to: points[2], over: 0.06)
+        harness.tap(.character("e"))
+        harness.up(thumb)
+        await harness.settle()
+        #expect(harness.text == "pile ")
+    }
+
+    @Test func aLetterHeldBeforeTheSwipeStaysAtThatMoment() async {
+        let harness = makeHarness()
+        let held = harness.down(at: harness.point(for: "e"))
+        swipe("pil", on: harness)
+        harness.up(held)
+        await harness.settle()
+        #expect(!harness.text.hasPrefix("pil"))
+        #expect(!harness.text.hasPrefix("pull"))
+        #expect(harness.text.lowercased().hasPrefix("e"))
+    }
+
+    @Test func aBoundaryWobbleDoesNotTypeTheKeysCrossed() async {
+        var committed: [KeyboardIntent] = []
+        let composer = InputComposer { committed.append(contentsOf: $0) }
+        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let id = TouchID(rawValue: 1)
+        let start = TouchSample(id: id, location: .zero, timestamp: 0, phase: .began)
+        var track = TouchTrack(start: start)
+        coordinator.begin(track, ticket: composer.reserve())
+        let mash = Array("ghghguhgyughg")
+        for (index, letter) in mash.enumerated() {
+            let x = CGFloat(index) * 4
+            coordinator.arrive(id, letter: String(letter), at: CGPoint(x: x, y: 0), time: Double(index) * 0.01)
+            track.append(TouchSample(id: id, location: CGPoint(x: x, y: 0), timestamp: Double(index) * 0.01, phase: .moved))
+            coordinator.moved(track)
+        }
+        track.append(TouchSample(id: id, location: CGPoint(x: 80, y: 0), timestamp: 0.2, phase: .ended))
+        coordinator.ended(track)
+
+        var spins = 0
+        while composer.hasPendingCommits, spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        let typed = committed.reduce(into: "") { text, intent in
+            switch intent {
+            case let .commitSwipe(words, _, _, _): text += words.first ?? ""
+            case let .insert(character): text += character
+            default: break
+            }
+        }
+        #expect(!typed.contains("ghgh"))
+        #expect(typed.count < mash.count)
+    }
+
+    @Test func anEchoOfOurCommitLeavesTheWordOpen() async {
+        #expect(KeyboardEngine.isOwnEcho(previous: "", current: "pil ", inserted: "pil "))
+        #expect(KeyboardEngine.isOwnEcho(previous: "say ", current: "say pil ", inserted: "pil "))
+        #expect(KeyboardEngine.isOwnEcho(previous: "say pil ", current: "pil ", inserted: "pil "))
+        #expect(KeyboardEngine.isOwnEcho(previous: "pil ", current: "pile ", inserted: "pile "))
+        #expect(!KeyboardEngine.isOwnEcho(previous: "pil ", current: "xxpil ", inserted: "pil "))
+        #expect(!KeyboardEngine.isOwnEcho(previous: "pil ", current: "hello ", inserted: "pil "))
+
+        let harness = makeHarness()
+        harness.document.onChange = { _ in harness.engine.documentDidChange() }
+        swipe("pil", on: harness)
+        await harness.settle()
+        harness.engine.documentDidChange()
+        harness.tap(.character("e"))
+        #expect(harness.text == "pile ")
+    }
+
+    @Test func anExternalEditLocksTheOpenWord() async {
+        let harness = makeHarness()
+        swipe("pil", on: harness)
+        await harness.settle()
+        harness.document.replaceAll(with: "elsewhere")
+        harness.engine.documentDidChange()
+        harness.tap(.character("e"))
+        #expect(harness.text == "elsewheree")
+    }
+
     @Test func aRejectedTapCorrectionIsNotApplied() {
         let model = LanguageModel(lexicon: TestLexicon.shared)
         let before = model.analyze("teh", touches: nil, layout: nil)

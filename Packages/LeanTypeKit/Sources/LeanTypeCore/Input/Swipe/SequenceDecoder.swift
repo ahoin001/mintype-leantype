@@ -7,17 +7,34 @@ public struct StrokeObservation: Hashable, Sendable {
     public var directionX: CGFloat
     public var directionY: CGFloat
     public var letter: String
+    /// A thumb that tapped this letter rather than swiping through it.
+    public var isTap: Bool
 
-    public init(time: Double, point: CGPoint, directionX: CGFloat, directionY: CGFloat, letter: String) {
+    public init(
+        time: Double,
+        point: CGPoint,
+        directionX: CGFloat,
+        directionY: CGFloat,
+        letter: String,
+        isTap: Bool = false
+    ) {
         self.time = time
         self.point = point
         self.directionX = directionX
         self.directionY = directionY
         self.letter = letter
+        self.isTap = isTap
     }
 
     var directionLength: CGFloat {
         hypot(directionX, directionY)
+    }
+}
+
+extension Array where Element == StrokeObservation {
+    /// Time order, so a letter tapped during the other thumb's stroke lands at that moment.
+    func inReadingOrder() -> [StrokeObservation] {
+        sorted { $0.time < $1.time }
     }
 }
 
@@ -33,11 +50,12 @@ struct SequenceOutcome: Sendable {
 /// Decides whether a new tap or swipe still belongs to the open word.
 enum WordJoiner {
     /// The reading to show if the batch extends the open word, or `nil` to start a new word.
+    ///
+    /// A word joins when it uses every letter the thumbs aimed at, in order. A doubled letter
+    /// is allowed, which is how "pill" comes from P, I, L. Rewriting an earlier letter into a
+    /// neighbor ("hello" plus x becoming "helix") does not join, and neither does skipping the
+    /// new letter to keep the old word.
     static func choose(
-        openScore: Double,
-        displayedWord: String?,
-        existingWord: String?,
-        batch: [StrokeObservation],
         extended: SequenceOutcome,
         alone: SequenceOutcome,
         fragmentContinues: Bool
@@ -51,27 +69,8 @@ enum WordJoiner {
             }
             return DecodeResult(readings: [.init(word: extended.traced, score: provisionalScore)])
         }
-        // A single letter joins when it improves the word or confirms it. A neighbor that
-        // merely spells something else ("hello" plus x becoming "helix") does not.
-        if batch.count <= 1 {
-            if let best = extended.result.readings.first {
-                let shown = displayedWord?.lowercased()
-                let previous = existingWord?.lowercased()
-                let candidate = best.word.lowercased()
-                // The same word confirms a repeated last letter ("pill" plus L). Skipping the
-                // new letter and keeping "hello" does not: the tap has to be part of the word.
-                let confirms = (candidate == shown || candidate == previous) && candidate.last == batch.last?.letter.lowercased().last
-                if (shown == nil && previous == nil) || confirms || best.score > openScore {
-                    return extended.result
-                }
-            }
-            return nil
-        }
-        if let best = extended.result.readings.first {
-            let aloneScore = alone.result.readings.first?.score ?? 0
-            if alone.result.isEmpty || best.score > openScore + aloneScore {
-                return extended.result
-            }
+        if let aligned = alignedReading(in: extended) {
+            return DecodeResult(readings: [aligned])
         }
         // Neither side is a word yet ("es" then "traged"). Keep the letters together so a
         // letter that lands in the middle can still finish the word.
@@ -81,8 +80,130 @@ enum WordJoiner {
         return nil
     }
 
+    /// The best dictionary word whose letters are exactly the aimed keys, allowing one
+    /// doubled letter per key.
+    static func alignedReading(in outcome: SequenceOutcome) -> DecodeResult.Reading? {
+        outcome.result.readings
+            .filter { aligns($0.word, traced: outcome.traced) }
+            .max { $0.score < $1.score }
+    }
+
+    /// `word` is `traced` in order, where any traced letter may also cover one extra copy of
+    /// itself ("pill" from "pil", "hello" from "helo").
+    static func aligns(_ word: String, traced: String) -> Bool {
+        let target = Array(word.lowercased())
+        let source = Array(traced.lowercased())
+        guard !source.isEmpty, !target.isEmpty else { return false }
+        var reachable = Array(repeating: false, count: target.count + 1)
+        reachable[0] = true
+        for letter in source {
+            var next = Array(repeating: false, count: target.count + 1)
+            for index in 0..<target.count where reachable[index] && target[index] == letter {
+                next[index + 1] = true
+                if index + 1 < target.count, target[index + 1] == letter {
+                    next[index + 2] = true
+                }
+            }
+            reachable = next
+        }
+        return reachable[target.count]
+    }
+
     /// Readings built from traced letters, before a dictionary word exists.
     static let provisionalScore = -20.0
+}
+
+/// Picks the word a beat of strokes and taps should commit.
+///
+/// One moving finger and no extra tap keeps the shape match, including a common neighbor such
+/// as "pull" for a P–I–L swipe. A tap is part of the word only when the dictionary reading uses
+/// that letter and still matches the keys the moving thumb aimed at. Otherwise a tap that lands
+/// after the stroke is the next word, and a tap that lands earlier stays at that moment in time.
+enum BeatChooser {
+    enum Choice {
+        /// The shape match, unchanged.
+        case path(DecodeResult)
+        /// A dictionary word that accounts for every aimed letter and tap.
+        case aligned(DecodeResult)
+        /// The moving thumb's word, then taps that belong to the following word.
+        case split(path: DecodeResult, taps: [StrokeObservation])
+        /// No dictionary word. The caller types the aimed letters.
+        case traced
+    }
+
+    static func choose(
+        path: DecodeResult,
+        sequence: SequenceOutcome,
+        strokes: Int,
+        observations: [StrokeObservation]
+    ) -> Choice {
+        let taps = observations.filter(\.isTap)
+        // One moving finger and no extra tap: the shape match wins, even when a common
+        // neighbor ("pull") outranks the keys the finger passed through.
+        if taps.isEmpty, strokes <= 1 {
+            return path.isEmpty ? .traced : .path(path)
+        }
+        if let aligned = WordJoiner.alignedReading(in: sequence) {
+            return .aligned(preferring(aligned, over: path))
+        }
+        if strokes > 1 || path.isEmpty {
+            return .traced
+        }
+        let sorted = observations.inReadingOrder()
+        let tapsAreSuffix = sorted.last?.isTap == true && sorted.reversed().prefix(while: \.isTap).count == taps.count
+        let strokeTraced = observations.filter { !$0.isTap }.map(\.letter).joined()
+        if tapsAreSuffix, let word = path.readings.first?.word, WordJoiner.aligns(word, traced: strokeTraced) {
+            return .split(path: path, taps: taps.sorted { $0.time < $1.time })
+        }
+        return .traced
+    }
+
+    /// What the suggestion bar shows while the fingers are still down. An empty result leaves
+    /// the previous preview up; the commit then types the aimed letters.
+    static func reading(
+        path: DecodeResult,
+        sequence: SequenceOutcome,
+        strokes: Int,
+        observations: [StrokeObservation]
+    ) -> DecodeResult {
+        switch choose(path: path, sequence: sequence, strokes: strokes, observations: observations) {
+        case let .path(result), let .aligned(result), let .split(result, _):
+            result
+        case .traced:
+            .empty
+        }
+    }
+
+    /// Drops a letter that only bounces back to the one before it ("ghghgh" becomes "gh").
+    static func collapse(_ letters: String) -> String {
+        var output: [Character] = []
+        for character in letters {
+            if output.count >= 2 {
+                let previous = output[output.count - 1]
+                let before = output[output.count - 2]
+                if character == before, previous != character {
+                    output.removeLast()
+                    continue
+                }
+            }
+            output.append(character)
+        }
+        return String(output)
+    }
+
+    /// The aligned word leads, and the shape match's other readings stay available. The gap is
+    /// wide enough that the bar can present the tapped word as the one to accept.
+    private static func preferring(_ aligned: DecodeResult.Reading, over path: DecodeResult) -> DecodeResult {
+        var readings = [aligned]
+        readings.append(contentsOf: path.readings.filter { $0.word.lowercased() != aligned.word.lowercased() })
+        if readings.count >= 2, readings[0].score - readings[1].score < DecodeResult.confidenceMargin {
+            readings[0] = DecodeResult.Reading(
+                word: readings[0].word,
+                score: readings[1].score + DecodeResult.confidenceMargin + 0.01
+            )
+        }
+        return DecodeResult(readings: readings)
+    }
 }
 
 /// Letter-to-letter likelihoods learned from the dictionary, weighted toward common words.

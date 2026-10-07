@@ -142,8 +142,9 @@ struct StrokeBuffer {
 
 /// A complete swipe, ready to decode: a polyline in key-area coordinates.
 ///
-/// For one finger it's the finger's path. For several fingers it's the key center at each
-/// moment a thumb entered a new letter, merged in time order.
+/// The path is always a finger's real polyline, never the keys it happened to cross. Taps from
+/// the other thumb are observations beside that path. `tracedLetters` is the letters the thumbs
+/// aimed at — start, turns, pauses, lift, and stationary taps — with a bounced pair collapsed.
 public struct SwipeGesture: Hashable, Sendable {
     public let path: [CGPoint]
     public let strokeCount: Int

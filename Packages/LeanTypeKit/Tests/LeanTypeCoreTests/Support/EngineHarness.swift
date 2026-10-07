@@ -114,6 +114,9 @@ final class EngineHarness {
 
     @discardableResult
     func down(at location: CGPoint) -> TouchID {
+        // A new finger lands after whatever happened already, so two touches that the test
+        // starts back to back do not share a timestamp and sort into the wrong letter.
+        scheduler.advance(by: 0.001)
         let id = TouchID(rawValue: nextTouch)
         nextTouch += 1
         positions[id] = location

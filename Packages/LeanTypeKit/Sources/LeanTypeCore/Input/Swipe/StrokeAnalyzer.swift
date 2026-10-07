@@ -131,54 +131,96 @@ enum StrokeAnalyzer {
 
 /// Merges the strokes of one gesture into the path the decoder reads.
 enum GestureComposer {
-    static func compose(_ strokes: [StrokeBuffer]) -> SwipeGesture? {
+    /// A bend shallower than this, in radians, is the finger sliding on. About twenty-five
+    /// degrees: enough to drop a straight run of keys, and shallow enough to keep a corner
+    /// like R between T and A.
+    static let aimTurn: CGFloat = 0.45
+
+    /// `taps` are thumbs that never left their key. They do not change the moving finger's polyline.
+    static func compose(_ strokes: [StrokeBuffer], taps: [StrokeObservation] = []) -> SwipeGesture? {
         let strokes = strokes.filter { !$0.points.isEmpty }
-        guard !strokes.isEmpty else { return nil }
-        let traced = tracedLetters(in: strokes)
-        let observations = observations(in: strokes)
-        if strokes.count == 1 {
-            return SwipeGesture(
-                path: strokes[0].points.map(\.location),
-                strokeCount: 1,
-                tracedLetters: traced,
-                observations: observations
-            )
-        }
-
-        let arrivals = strokes.flatMap(\.arrivals).sorted { $0.time < $1.time }
-        var path: [CGPoint] = []
-        var letters: [String] = []
-        for arrival in arrivals where letters.last != arrival.letter {
-            letters.append(arrival.letter)
-            path.append(arrival.center)
-        }
-        if path.count >= 2 {
-            return SwipeGesture(path: path, strokeCount: strokes.count, tracedLetters: traced, observations: observations)
-        }
-
-        let salient = strokes
-            .flatMap { StrokeAnalyzer.salientPoints(of: $0.points) }
-            .sorted { $0.time < $1.time }
-            .map(\.location)
-        return SwipeGesture(path: salient, strokeCount: strokes.count, tracedLetters: traced, observations: observations)
+        guard !strokes.isEmpty || !taps.isEmpty else { return nil }
+        let moving = strokes.max { length($0) < length($1) }
+        let path = moving?.points.map(\.location) ?? []
+        let marks = strokes.flatMap(aimedMarks) + taps.map(mark)
+        let observations = observations(from: marks.sorted { $0.time < $1.time })
+        let traced = BeatChooser.collapse(observations.map(\.letter).joined())
+        guard path.count >= 2 || !traced.isEmpty else { return nil }
+        return SwipeGesture(
+            path: path,
+            strokeCount: max(strokes.count, path.count >= 2 ? 1 : 0),
+            tracedLetters: traced,
+            observations: observations
+        )
     }
 
-    /// One observation per new letter, in the order thumbs reached them, with the direction
-    /// of travel from the previous letter.
-    private static func observations(in strokes: [StrokeBuffer]) -> [StrokeObservation] {
-        let arrivals = strokes.flatMap(\.arrivals).sorted { $0.time < $1.time }
+    // MARK: - Private
+
+    private struct Mark {
+        var time: Double
+        var point: CGPoint
+        var letter: String
+        var isTap: Bool
+    }
+
+    /// Start, sharp turns, pauses, and the lift. A key the finger only slid across, without
+    /// turning or slowing, is not a letter. Every corner is kept, so a zigzag is not reduced
+    /// to its sharpest bend.
+    private static func aimedMarks(in stroke: StrokeBuffer) -> [Mark] {
+        let arrivals = stroke.arrivals
+        guard let first = arrivals.first else { return [] }
+        var chosen = [first]
+        if arrivals.count > 2 {
+            for index in 1..<(arrivals.count - 1) {
+                let previous = arrivals[index - 1]
+                let current = arrivals[index]
+                let next = arrivals[index + 1]
+                let turned = turn(previous.center, current.center, next.center) >= aimTurn
+                let elapsed = next.time - previous.time
+                let span = hypot(next.center.x - previous.center.x, next.center.y - previous.center.y)
+                let paused = elapsed > 0 && Double(span) / elapsed < StrokeAnalyzer.pauseSpeed
+                if turned || paused {
+                    chosen.append(current)
+                }
+            }
+        } else {
+            chosen = arrivals
+        }
+        if let last = arrivals.last, chosen.last?.time != last.time {
+            chosen.append(last)
+        }
+        var marks: [Mark] = []
+        for arrival in chosen where marks.last?.letter != arrival.letter {
+            marks.append(Mark(time: arrival.time, point: arrival.center, letter: arrival.letter, isTap: false))
+        }
+        return marks
+    }
+
+    private static func turn(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
+        let first = atan2(b.y - a.y, b.x - a.x)
+        let second = atan2(c.y - b.y, c.x - b.x)
+        var delta = abs(second - first)
+        if delta > .pi { delta = 2 * .pi - delta }
+        return delta
+    }
+
+    private static func mark(_ tap: StrokeObservation) -> Mark {
+        Mark(time: tap.time, point: tap.point, letter: tap.letter, isTap: true)
+    }
+
+    private static func observations(from marks: [Mark]) -> [StrokeObservation] {
         var result: [StrokeObservation] = []
         var previous: CGPoint?
-        for arrival in arrivals {
-            if result.last?.letter == arrival.letter {
-                previous = arrival.center
+        for mark in marks {
+            if result.last?.letter == mark.letter, result.last?.isTap == mark.isTap {
+                previous = mark.point
                 continue
             }
             var directionX: CGFloat = 0
             var directionY: CGFloat = 0
             if let previous {
-                let rawX = arrival.center.x - previous.x
-                let rawY = arrival.center.y - previous.y
+                let rawX = mark.point.x - previous.x
+                let rawY = mark.point.y - previous.y
                 let length = hypot(rawX, rawY)
                 if length > 1 {
                     directionX = rawX / length
@@ -186,23 +228,19 @@ enum GestureComposer {
                 }
             }
             result.append(StrokeObservation(
-                time: arrival.time,
-                point: arrival.center,
+                time: mark.time,
+                point: mark.point,
                 directionX: directionX,
                 directionY: directionY,
-                letter: arrival.letter
+                letter: mark.letter,
+                isTap: mark.isTap
             ))
-            previous = arrival.center
+            previous = mark.point
         }
         return result
     }
 
-    /// Letters in the order thumbs reached them, skipping a letter repeated by the same thumb.
-    private static func tracedLetters(in strokes: [StrokeBuffer]) -> String {
-        var letters: [String] = []
-        for arrival in strokes.flatMap(\.arrivals).sorted(by: { $0.time < $1.time }) where letters.last != arrival.letter {
-            letters.append(arrival.letter)
-        }
-        return letters.joined()
+    private static func length(_ stroke: StrokeBuffer) -> CGFloat {
+        StrokeAnalyzer.length(of: stroke.points.map(\.location))
     }
 }

@@ -3,9 +3,10 @@ import Foundation
 /// Swipe typing on top of tap typing: every finger on a letter starts as a tap and becomes a
 /// stroke once it travels far enough.
 ///
-/// Two thumbs land together without typing. The gesture starts when one of them travels, and
-/// every thumb still down joins it. A thumb that lifts without leaving its key, once a swipe
-/// is underway, types that letter after the word.
+/// Two thumbs land together without typing. The gesture starts when one of them travels.
+/// A thumb that never leaves its key is one letter in that word, at the moment it landed,
+/// and the word is committed when the last finger lifts. A thumb that later travels becomes
+/// another stroke. A tap with no swipe in progress types as it always has.
 struct SwipeTypingMode: TypingMode {
     let coordinator: SwipeCoordinator
 
@@ -23,6 +24,7 @@ final class SwipeSession: InteractionSession {
 
     private enum Phase {
         case tapping(CharacterTapSession)
+        case holding
         case stroking
         case finished
     }
@@ -33,6 +35,11 @@ final class SwipeSession: InteractionSession {
     private var phase: Phase
     private var latest: TouchTrack
     private var hoveredKey: KeyID?
+    /// The last letter this finger actually aimed at, and that key's center. A new letter
+    /// counts only once the finger is past the midpoint toward it, so riding a key boundary
+    /// does not alternate.
+    private var aimedLetter: String?
+    private var aimedCenter: CGPoint?
 
     init(key: KeyFrame, track: TouchTrack, coordinator: SwipeCoordinator, context: any SessionContext) {
         self.context = context
@@ -56,6 +63,8 @@ final class SwipeSession: InteractionSession {
         switch phase {
         case let .tapping(tap):
             tap.presentation
+        case .holding:
+            SessionPresentation(pressedKey: origin.id, isStroke: false)
         case .stroking:
             SessionPresentation(pressedKey: hoveredKey, isStroke: true)
         case .finished:
@@ -72,6 +81,12 @@ final class SwipeSession: InteractionSession {
             } else {
                 tap.moved(track)
             }
+        case .holding:
+            if hasBecomeStroke(track) {
+                coordinator.promoteHold(track.id, track: track)
+                phase = .stroking
+                noteArrival(track, includeStart: true)
+            }
         case .stroking:
             coordinator.moved(track)
             noteArrival(track)
@@ -85,6 +100,8 @@ final class SwipeSession: InteractionSession {
         switch phase {
         case let .tapping(tap):
             endTap(tap, track: track)
+        case .holding:
+            coordinator.liftHold(track.id)
         case .stroking:
             coordinator.ended(track)
         case .finished:
@@ -98,6 +115,8 @@ final class SwipeSession: InteractionSession {
         case let .tapping(tap):
             coordinator.unregisterUndecided(self)
             tap.cancelled()
+        case .holding:
+            coordinator.dropHold(latest.id)
         case .stroking:
             coordinator.reset()
         case .finished:
@@ -119,15 +138,18 @@ final class SwipeSession: InteractionSession {
         phase = .finished
     }
 
-    /// The gesture started under another thumb. This finger, still down, becomes a stroke of it.
+    /// The gesture started under another thumb. A finger that has already traveled joins as a
+    /// stroke. One that is still on its key is a single letter in the same word.
     func joinCurrentGesture() {
         guard case let .tapping(tap) = phase, tap.canRelinquish else { return }
+        if hasBecomeStroke(latest) {
+            beginStroke(from: tap, track: latest)
+            return
+        }
         let ticket = tap.relinquish()
         context.composer.cancel(ticket)
         coordinator.unregisterUndecided(self)
-        coordinator.join(latest)
-        phase = .stroking
-        noteArrival(latest, includeStart: true)
+        holdForCurrentGesture()
     }
 
     // MARK: - Private
@@ -136,10 +158,29 @@ final class SwipeSession: InteractionSession {
     /// or long enough to be a word becomes a stroke immediately.
     private func shouldUpgrade(_ tap: CharacterTapSession, track: TouchTrack) -> Bool {
         guard tap.canRelinquish, Self.canStroke(on: origin, context: context) else { return false }
+        return hasBecomeStroke(track)
+    }
+
+    private func hasBecomeStroke(_ track: TouchTrack) -> Bool {
         let move = track.translation
         if abs(move.dx) >= Self.sidewaysDistance { return true }
         if !origin.hitFrame.contains(track.current.location) { return true }
         return hypot(move.dx, move.dy) >= Self.strokeDistance
+    }
+
+    /// Keeps this finger's letter in the open beat without adding a point to the polyline.
+    private func holdForCurrentGesture() {
+        guard let character = origin.key.kind.character else { return }
+        let center = CGPoint(x: origin.visualFrame.midX, y: origin.visualFrame.midY)
+        coordinator.hold(latest.id, StrokeObservation(
+            time: latest.start.timestamp,
+            point: center,
+            directionX: 0,
+            directionY: 0,
+            letter: character.lowercased(),
+            isTap: true
+        ))
+        phase = .holding
     }
 
     private func beginStroke(from tap: CharacterTapSession, track: TouchTrack) {
@@ -158,23 +199,20 @@ final class SwipeSession: InteractionSession {
 
     private func endTap(_ tap: CharacterTapSession, track: TouchTrack) {
         coordinator.unregisterUndecided(self)
-        if coordinator.isCollecting, tap.canRelinquish {
-            commitTrailingTap(tap, track: track)
+        if coordinator.isCollecting, tap.canRelinquish, let character = origin.key.kind.character {
+            let ticket = tap.relinquish()
+            context.composer.cancel(ticket)
+            let center = CGPoint(x: origin.visualFrame.midX, y: origin.visualFrame.midY)
+            coordinator.noteTap(StrokeObservation(
+                time: track.start.timestamp,
+                point: center,
+                directionX: 0,
+                directionY: 0,
+                letter: character.lowercased(),
+                isTap: true
+            ))
         } else {
             tap.ended(track)
-        }
-    }
-
-    /// This letter was a tap beside a swipe, so it has to sort after the word. Its original
-    /// ticket may be older than the gesture's, which would type the letter first.
-    private func commitTrailingTap(_ tap: CharacterTapSession, track: TouchTrack) {
-        let ticket = tap.relinquish()
-        context.composer.cancel(ticket)
-        let later = context.composer.reserve()
-        if let character = origin.key.kind.character {
-            context.composer.commit(later, [.tapCharacter(character, at: track.start.location, time: track.start.timestamp)])
-        } else {
-            context.composer.cancel(later)
         }
     }
 
@@ -192,6 +230,15 @@ final class SwipeSession: InteractionSession {
         }
         hoveredKey = frame.id
         let center = CGPoint(x: frame.visualFrame.midX, y: frame.visualFrame.midY)
+        if letter != aimedLetter {
+            if let aimedCenter {
+                let towardNew = hypot(location.x - center.x, location.y - center.y)
+                let towardOld = hypot(location.x - aimedCenter.x, location.y - aimedCenter.y)
+                guard towardNew < towardOld else { return }
+            }
+            aimedLetter = letter
+            aimedCenter = center
+        }
         coordinator.arrive(id, letter: letter, at: center, time: time)
     }
 }
