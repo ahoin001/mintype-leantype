@@ -201,7 +201,7 @@ struct SettingsView: View {
         .confirmationDialog("Forget every word LeanType has learned?", isPresented: $isConfirmingClear, titleVisibility: .visible) {
             Button("Clear learned words", role: .destructive) { data.clearLearnedWords() }
         } message: {
-            Text("Names from your contacts stay. Autocorrect may start fixing words you use often until it learns them again.")
+            Text("Autocorrect may start fixing words you use often until it learns them again.")
         }
     }
 

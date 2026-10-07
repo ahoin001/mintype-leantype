@@ -17,7 +17,6 @@ public final class LanguageModel {
     private let rejections: RejectionMemory
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
-    private var supplementaryWords: [String] = []
     private var unsavedChanges = 0
 
     /// Learned words are written out after this many changes (and when the keyboard hides).
@@ -87,16 +86,9 @@ public final class LanguageModel {
         }
     }
 
-    /// Contact names and text-replacement words from the system's supplementary lexicon.
-    public func setSupplementaryWords(_ words: [String]) {
-        supplementaryWords = words
-        personal.setSupplementary(words)
-        personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
-    }
-
     /// Re-reads learned words (after the app cleared them).
     public func reloadLearnedWords() {
-        personal = PersonalLexicon(learned: store?.load() ?? [], supplementary: supplementaryWords)
+        personal = PersonalLexicon(learned: store?.load() ?? [])
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
         unsavedChanges = 0
     }

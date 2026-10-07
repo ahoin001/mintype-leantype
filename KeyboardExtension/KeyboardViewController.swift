@@ -90,7 +90,6 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         DiagnosticLog.shared.markOpened()
-        loadSupplementaryWords()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -181,22 +180,6 @@ final class KeyboardViewController: UIInputViewController {
         guard hasFullAccess else { return }
         settingsStore.save(settings)
         DarwinNotifications.post(SharedContainer.settingsDidChangeNotification)
-    }
-
-    /// Contact names and text-replacement expansions, so they're never "corrected".
-    /// Runs after the keyboard is on screen, and keeps only a capped list of single words:
-    /// the system lexicon can be large enough to get the extension killed mid-launch.
-    private func loadSupplementaryWords() {
-        guard language != nil else { return }
-        DiagnosticLog.shared.mark("Loading contacts")
-        requestSupplementaryLexicon { [weak self] lexicon in
-            let words = PersonalLexicon.acceptedSupplementary(from: lexicon.entries.lazy.map(\.documentText))
-            let count = words.count
-            Task { @MainActor in
-                self?.language?.setSupplementaryWords(words)
-                DiagnosticLog.shared.mark("Contacts ready (\(count))")
-            }
-        }
     }
 
     private func applyTheme() {

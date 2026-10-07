@@ -169,21 +169,6 @@ struct PersonalLexiconTests {
         #expect(!personal.contains("word1"), "The stalest word makes room")
         #expect(personal.contains("fresh"))
     }
-
-    @Test func supplementaryWordsSkipPhrases() {
-        let personal = PersonalLexicon(supplementary: ["Hoinville", "On my way!"])
-        #expect(personal.contains("hoinville"))
-        #expect(!personal.contains("On my way!"))
-    }
-
-    @Test func supplementaryWordsStopAtTheCap() {
-        let words = (0..<(PersonalLexicon.supplementaryLimit + 50)).map { "Name\($0)" }
-        let kept = PersonalLexicon.acceptedSupplementary(from: words)
-        #expect(kept.count == PersonalLexicon.supplementaryLimit)
-        var personal = PersonalLexicon()
-        personal.setSupplementary(words)
-        #expect(personal.entries(logCountRange: 0...10).count == PersonalLexicon.supplementaryLimit)
-    }
 }
 
 @MainActor

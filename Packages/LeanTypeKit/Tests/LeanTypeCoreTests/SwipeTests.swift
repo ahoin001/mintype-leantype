@@ -128,7 +128,9 @@ struct PathDecoderTests {
     }
 
     @Test func personalWordsDecode() async {
-        let personal = PersonalLexicon(supplementary: ["Hoinville"]).entries(logCountRange: TestLexicon.shared.logCountRange)
+        let personal = PersonalLexicon(learned: [
+            LearnedWord(word: "Hoinville", uses: 2, lastUsed: .now),
+        ]).entries(logCountRange: TestLexicon.shared.logCountRange)
         let path = SwipeSynthesizer.path(for: "hoinville", layout: layout, jitter: 0.08, seed: 7)
         let result = await decoder.decode(SwipeGesture(path: path, strokeCount: 1), layout: layout, personal: personal)
         #expect(result.words.first == "Hoinville")

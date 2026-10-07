@@ -20,19 +20,6 @@ struct DiagnosticsTests {
         #expect(!log.load().hasTrouble)
     }
 
-    @Test func loadingContactsAfterOpenIsTroubleUntilItFinishes() {
-        let log = makeLog()
-        let opened = Date(timeIntervalSince1970: 2_000)
-        log.markOpened(at: opened)
-        log.mark("Loading contacts", at: opened.addingTimeInterval(1))
-        let report = log.load()
-        #expect(report.hasTrouble)
-        #expect(report.explanation.contains("contacts"))
-
-        log.mark("Contacts ready (12)", at: opened.addingTimeInterval(2))
-        #expect(!log.load().hasTrouble)
-    }
-
     @Test func aCrashNewerThanTheLastOpenIsShownAndCanBeDismissed() {
         let log = makeLog()
         let opened = Date(timeIntervalSince1970: 3_000)

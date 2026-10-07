@@ -36,7 +36,6 @@ public struct KeyboardReport: Codable, Equatable, Sendable {
         "Opening",
         "Opening with Full Access",
         "Settings loaded",
-        "Loading contacts",
     ]
 
     public var events: [Event]
@@ -67,13 +66,11 @@ public struct KeyboardReport: Codable, Equatable, Sendable {
         if let crash, isNewerThanLastOpen(crash.date) {
             if crash.summary.localizedCaseInsensitiveContains("jetsam")
                 || crash.summary.localizedCaseInsensitiveContains("memory") {
-                return "iOS closed it for using too much memory. Names from your contacts are capped now. Copy the details if it happens again."
+                return "iOS closed it for using too much memory. Copy the details if it happens again."
             }
             return "iOS closed it while it was opening. \(crash.summary)"
         }
         switch events.last?.step {
-        case "Loading contacts":
-            return "It closed while reading names from your contacts. Only a short list is kept now, so the next try should stay up."
         case "Starting", "Keyboard built":
             return "It closed while drawing the keys. Copy the details to see the last step it reached."
         default:
