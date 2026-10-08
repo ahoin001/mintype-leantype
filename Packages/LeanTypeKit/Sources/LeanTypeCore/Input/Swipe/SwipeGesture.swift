@@ -146,6 +146,8 @@ struct StrokeBuffer {
 public struct SwipeGesture: Hashable, Sendable {
     public let path: [CGPoint]
     public let strokeCount: Int
+    /// Each moving stroke's polyline, in stroke order. The longest one is also `path`.
+    public let strokePaths: [[CGPoint]]
     /// Letters the thumbs aimed at, in arrival order, with a return trip already removed.
     /// Used when decoding finds nothing, so the gesture still types what was meant.
     public let tracedLetters: String
@@ -157,12 +159,14 @@ public struct SwipeGesture: Hashable, Sendable {
     public init(
         path: [CGPoint],
         strokeCount: Int,
+        strokePaths: [[CGPoint]] = [],
         tracedLetters: String = "",
         observations: [StrokeObservation] = [],
         prefersContraction: Bool = false
     ) {
         self.path = path
         self.strokeCount = strokeCount
+        self.strokePaths = strokePaths
         self.tracedLetters = tracedLetters
         self.observations = observations
         self.prefersContraction = prefersContraction

@@ -149,7 +149,10 @@ enum GestureComposer {
         guard !strokes.isEmpty || !taps.isEmpty else { return nil }
         let moving = strokes.max { length($0) < length($1) }
         let path = moving?.points.map(\.location) ?? []
-        let marks = strokes.flatMap(aimedMarks) + taps.map(mark)
+        let strokePaths = strokes.map { $0.points.map(\.location) }
+        let marks = strokes.enumerated().flatMap { index, stroke in
+            aimedMarks(in: stroke, strokeIndex: index)
+        } + taps.map(mark)
         let observations = observations(from: marks.sorted { $0.time < $1.time })
         let traced = BeatChooser.collapse(observations.map(\.letter).joined())
         guard path.count >= 2 || !traced.isEmpty else { return nil }
@@ -157,6 +160,7 @@ enum GestureComposer {
         return SwipeGesture(
             path: path,
             strokeCount: max(strokes.count, path.count >= 2 ? 1 : 0),
+            strokePaths: strokePaths,
             tracedLetters: traced,
             observations: observations,
             prefersContraction: prefersContraction
@@ -170,12 +174,13 @@ enum GestureComposer {
         var point: CGPoint
         var letter: String
         var isTap: Bool
+        var strokeIndex: Int
     }
 
     /// Start, sharp turns, dwells, and the lift, after a return trip has been removed.
     /// A key the finger only slid across is not a letter, even when the slide is slow.
     /// Every remaining corner is kept, so a zigzag is not reduced to its sharpest bend.
-    private static func aimedMarks(in stroke: StrokeBuffer) -> [Mark] {
+    private static func aimedMarks(in stroke: StrokeBuffer, strokeIndex: Int) -> [Mark] {
         let arrivals = StrokeLetters.aimedArrivals(stroke.arrivals)
         guard let first = arrivals.first else { return [] }
         var chosen = [first]
@@ -197,7 +202,13 @@ enum GestureComposer {
         }
         var marks: [Mark] = []
         for arrival in chosen where marks.last?.letter != arrival.letter {
-            marks.append(Mark(time: arrival.time, point: arrival.center, letter: arrival.letter, isTap: false))
+            marks.append(Mark(
+                time: arrival.time,
+                point: arrival.center,
+                letter: arrival.letter,
+                isTap: false,
+                strokeIndex: strokeIndex
+            ))
         }
         return marks
     }
@@ -238,14 +249,15 @@ enum GestureComposer {
     }
 
     private static func mark(_ tap: StrokeObservation) -> Mark {
-        Mark(time: tap.time, point: tap.point, letter: tap.letter, isTap: true)
+        Mark(time: tap.time, point: tap.point, letter: tap.letter, isTap: true, strokeIndex: -1)
     }
 
     private static func observations(from marks: [Mark]) -> [StrokeObservation] {
         var result: [StrokeObservation] = []
         var previous: CGPoint?
         for mark in marks {
-            if result.last?.letter == mark.letter, result.last?.isTap == mark.isTap {
+            if result.last?.letter == mark.letter, result.last?.isTap == mark.isTap,
+               result.last?.strokeIndex == mark.strokeIndex {
                 previous = mark.point
                 continue
             }
@@ -266,7 +278,8 @@ enum GestureComposer {
                 directionX: directionX,
                 directionY: directionY,
                 letter: mark.letter,
-                isTap: mark.isTap
+                isTap: mark.isTap,
+                strokeIndex: mark.strokeIndex
             ))
             previous = mark.point
         }

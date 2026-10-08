@@ -25,6 +25,7 @@ struct LayoutTests {
         let space = try #require(keys.firstIndex { $0.kind == .space })
         #expect(keys[space - 1].kind == .character("'"))
         #expect(keys[space + 1].kind == .character("."))
+        #expect(keys.contains { $0.kind == .emoji })
         #expect(keys[space - 1].widthUnits == 0.85)
         #expect(keys[space + 1].widthUnits == 0.85)
 

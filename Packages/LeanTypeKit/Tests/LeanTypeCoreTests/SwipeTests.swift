@@ -248,10 +248,9 @@ struct SwipeTypingTests {
         await harness.settle()
         let first = harness.text
         let alternatives = harness.state.candidates.candidates
-        try #require(!alternatives.isEmpty)
-        #expect(alternatives.allSatisfy { $0.role == .alternative })
-        harness.engine.acceptCandidate(0)
-        #expect(harness.text == alternatives[0].text + " ")
+        let side = try #require(alternatives.firstIndex { $0.role == .alternative })
+        harness.engine.acceptCandidate(side)
+        #expect(harness.text == alternatives[side].text + " ")
         #expect(harness.text != first)
         #expect(harness.state.candidates.candidates.contains { $0.text + " " == first }, "The original reading is offered back")
     }
@@ -438,9 +437,10 @@ struct SwipeTypingTests {
         )
         swipe("in", on: harness)
         await harness.settle()
-        let alternatives = harness.state.candidates.candidates
-        try #require(!alternatives.isEmpty)
-        #expect(alternatives.allSatisfy { $0.role == .alternative })
+        let strip = harness.state.candidates
+        let word = harness.text.trimmingCharacters(in: .whitespaces)
+        try #require(strip.candidates.contains { $0.role == .alternative })
+        #expect(strip.highlightedIndex.map { strip.candidates[$0].text } == word)
     }
 
     @Test func swipeStaysOffForPasswords() {
@@ -776,11 +776,11 @@ struct SwipeTypingTests {
         await harness.settle()
         #expect(harness.text.hasPrefix("hello "))
         let alternatives = harness.state.candidates.candidates
-        try #require(!alternatives.isEmpty)
-        harness.engine.acceptCandidate(0)
+        let side = try #require(alternatives.firstIndex { $0.role == .alternative })
+        harness.engine.acceptCandidate(side)
         #expect(harness.text.hasPrefix("hello "))
-        #expect(harness.text.hasSuffix(alternatives[0].text + " "))
-        #expect(!harness.text.hasPrefix(alternatives[0].text))
+        #expect(harness.text.hasSuffix(alternatives[side].text + " "))
+        #expect(!harness.text.hasPrefix(alternatives[side].text))
     }
 
     @Test func aSlowStraightRunDoesNotTypeEveryKey() async {
@@ -990,6 +990,179 @@ struct SwipeTypingTests {
         #expect(language.preferringFollowers(in: clear).words.first == "quit")
     }
 
+    @Test func aCloseCallUsesACommonPairUntilTheUserHasOne() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("to")
+        let close = DecodeResult(readings: [
+            .init(word: "too", score: -1),
+            .init(word: "the", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: close).words.first == "the")
+        let clear = DecodeResult(readings: [
+            .init(word: "too", score: -1),
+            .init(word: "the", score: -3),
+        ])
+        #expect(language.preferringFollowers(in: clear).words.first == "too")
+
+        language.noteCommitted("too")
+        language.noteCommitted("to")
+        #expect(language.preferringFollowers(in: close).words.first == "too")
+    }
+
+    @Test func bothThumbsOutrankAWordThatSkipsOne() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let observations = [
+            aimedStroke("t", stroke: 0, at: harness.point(for: "t"), time: 0),
+            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
+            aimedStroke("a", stroke: 1, at: harness.point(for: "a"), time: 0.04),
+            aimedStroke("s", stroke: 1, at: harness.point(for: "s"), time: 0.14),
+        ]
+        let paths = [
+            [harness.point(for: "t"), harness.point(for: "h")],
+            [harness.point(for: "a"), harness.point(for: "s")],
+        ]
+        let ranked = DecodeResult(readings: [
+            .init(word: "these", score: -1),
+            .init(word: "that's", score: -1.5),
+        ])
+        let fitted = ThumbFit.adjust(ranked, observations: observations, strokePaths: paths, layout: layout)
+        let chosen = BeatChooser.reading(
+            path: .empty,
+            sequence: SequenceOutcome(result: fitted, traced: "thas"),
+            strokes: 2,
+            observations: observations
+        )
+        #expect(chosen.words.first == "that's")
+    }
+
+    @Test func aCloserPathBreaksACloseCallAndLeavesAClearOne() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let observations = [
+            aimedStroke("t", stroke: 0, at: harness.point(for: "t"), time: 0),
+            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
+            aimedStroke("e", stroke: 1, at: harness.point(for: "e"), time: 0.12),
+        ]
+        let paths = [
+            [harness.point(for: "t"), harness.point(for: "h")],
+            [harness.point(for: "e"), harness.point(for: "e")],
+        ]
+        let close = DecodeResult(readings: [
+            .init(word: "then", score: -1),
+            .init(word: "the", score: -1.2),
+        ])
+        let fitted = ThumbFit.adjust(close, observations: observations, strokePaths: paths, layout: layout)
+        #expect(fitted.words.first == "the")
+        let clear = DecodeResult(readings: [
+            .init(word: "then", score: -1),
+            .init(word: "the", score: -3),
+        ])
+        let kept = ThumbFit.adjust(clear, observations: observations, strokePaths: paths, layout: layout)
+        #expect(kept.words.first == "then")
+    }
+
+    @Test func tappingAPreviewReadingCommitsThatWord() async throws {
+        let editor = TextEditor(document: InMemoryTextDocument(text: ""))
+        let words = WordAssistant(editor: editor)
+        let first = DecodeResult(readings: [
+            .init(word: "hello", score: -1),
+            .init(word: "help", score: -1.2),
+        ])
+        words.showPreview(first)
+        #expect(words.promotePreview(at: 1))
+        let shown = words.candidates(suggests: true, autocorrects: true)
+        #expect(shown.isTentative)
+        #expect(shown.candidates.first?.text == "help")
+        let refreshed = DecodeResult(readings: [
+            .init(word: "hello", score: -1),
+            .init(word: "help", score: -1.4),
+            .init(word: "held", score: -2),
+        ])
+        words.showPreview(refreshed)
+        #expect(words.candidates(suggests: true, autocorrects: true).candidates.first?.text == "help")
+        let committed = words.placingChoice(on: refreshed)
+        #expect(committed.words.first == "help")
+    }
+
+    @Test func theLandedWordSitsInTheCenterAndASideStillSwaps() async throws {
+        let harness = makeHarness()
+        swipe("in", on: harness)
+        await harness.settle()
+        let landed = harness.text
+        let candidates = harness.state.candidates
+        let center = try #require(candidates.highlightedIndex)
+        #expect(candidates.candidates[center].text + " " == landed)
+        harness.engine.acceptCandidate(center)
+        #expect(harness.text == landed)
+        #expect(harness.state.candidates.highlightedIndex == nil)
+
+        let again = makeHarness()
+        swipe("in", on: again)
+        await again.settle()
+        let original = again.text
+        let sides = again.state.candidates.candidates
+        let side = try #require(sides.firstIndex { $0.role == .alternative })
+        again.engine.acceptCandidate(side)
+        #expect(again.text == sides[side].text + " ")
+        #expect(again.text != original)
+    }
+
+    @Test func interleavedThumbsSpellTheWordBothOfThemDrew() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let harness = EngineHarness(language: language)
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let observations = [
+            aimedStroke("t", stroke: 0, at: harness.point(for: "t"), time: 0),
+            aimedStroke("a", stroke: 1, at: harness.point(for: "a"), time: 0.04),
+            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
+            aimedStroke("t", stroke: 1, at: harness.point(for: "t"), time: 0.12),
+            aimedStroke("s", stroke: 1, at: harness.point(for: "s"), time: 0.16),
+        ]
+        let outcome = language.sequenceDecode(observations, layout: layout)
+        #expect(outcome.result.words.first?.lowercased() == "that's")
+    }
+
+    @Test func theTracedLettersKeepASideSlot() {
+        let editor = TextEditor(document: InMemoryTextDocument(text: ""))
+        editor.commitWord("these")
+        let words = WordAssistant(editor: editor)
+        words.language = LanguageModel(lexicon: TestLexicon.shared)
+        words.swipeCommitted(["these", "there", "the", "thas"], unsure: false, literal: "thas")
+        let strip = words.candidates(suggests: true, autocorrects: true)
+        #expect(strip.candidates.map(\.text) == ["there", "these", "thas"])
+        #expect(strip.highlightedIndex == 1)
+    }
+
+    @Test func twoPrecedingWordsBreakACloseCall() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("going")
+        language.noteCommitted("to")
+        let close = DecodeResult(readings: [
+            .init(word: "a", score: -1),
+            .init(word: "the", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: close).words.first == "the")
+
+        language.noteCommitted("zoo")
+        language.noteCommitted("going")
+        language.noteCommitted("to")
+        let learned = DecodeResult(readings: [
+            .init(word: "the", score: -1),
+            .init(word: "zoo", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: learned).words.first == "zoo")
+    }
+
     @Test func aSwappedUnknownWordJoinsTheNextDecode() {
         let language = LanguageModel(lexicon: TestLexicon.shared)
         language.isLearningEnabled = true
@@ -1029,6 +1202,17 @@ private func aimed(_ letters: String) -> [StrokeObservation] {
             letter: String(character)
         )
     }
+}
+
+private func aimedStroke(_ letter: String, stroke: Int, at point: CGPoint, time: Double) -> StrokeObservation {
+    StrokeObservation(
+        time: time,
+        point: point,
+        directionX: 1,
+        directionY: 0,
+        letter: letter,
+        strokeIndex: stroke
+    )
 }
 
 private func arrival(_ letter: String, x: CGFloat, y: CGFloat = 0) -> KeyArrival {

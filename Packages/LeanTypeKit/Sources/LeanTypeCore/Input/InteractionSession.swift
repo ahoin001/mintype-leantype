@@ -97,6 +97,10 @@ struct SessionArbiter {
             TapActionSession(key: key, intent: .returnKey, track: track, context: context)
         case .nextKeyboard:
             TapActionSession(key: key, intent: .nextKeyboard, track: track, context: context)
+        case .emoji:
+            TapActionSession(key: key, intent: .switchLayer(.emoji), track: track, context: context)
+        case let .emojiCategory(page):
+            TapActionSession(key: key, intent: .showEmojiPage(page), track: track, context: context)
         }
     }
 }

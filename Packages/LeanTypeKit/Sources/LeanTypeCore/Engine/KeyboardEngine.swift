@@ -8,6 +8,7 @@ public struct KeyboardViewState: Hashable, Sendable {
     public var returnKey: ReturnKeyKind
     public var isReturnKeyEnabled: Bool
     public var candidates: CandidateState
+    public var emojiPage: EmojiCategory
 }
 
 @MainActor
@@ -41,6 +42,7 @@ public final class KeyboardEngine {
     private let shift = ShiftController()
     private let words: WordAssistant
     private var layer: KeyboardLayer
+    private var emojiPage = EmojiCategory.smileys
     private var showsNextKeyboardKey: Bool
     private var insertionCount = 0
     private var lastSpaceTime: TimeInterval?
@@ -112,7 +114,7 @@ public final class KeyboardEngine {
         self.layer = layer
         let layout = LayoutProvider.layout(
             for: layer,
-            context: LayoutContext(variant: traits.variant, showsNextKeyboardKey: showsNextKeyboardKey)
+            context: LayoutContext(variant: traits.variant, showsNextKeyboardKey: showsNextKeyboardKey, emojiPage: emojiPage)
         )
         geometry = KeyboardGeometry(layout: layout, size: .zero, metrics: metrics)
         state = KeyboardViewState(
@@ -121,7 +123,8 @@ public final class KeyboardEngine {
             interaction: .idle,
             returnKey: traits.returnKey,
             isReturnKeyEnabled: true,
-            candidates: .empty
+            candidates: .empty,
+            emojiPage: emojiPage
         )
         applySettings()
         refreshTextState()
@@ -292,6 +295,10 @@ public final class KeyboardEngine {
             if isReturnKeyEnabled { perform(.returnKey) }
         case .nextKeyboard:
             perform(.nextKeyboard)
+        case .emoji:
+            perform(.switchLayer(.emoji))
+        case let .emojiCategory(page):
+            perform(.showEmojiPage(page))
         }
     }
 
@@ -389,8 +396,15 @@ public final class KeyboardEngine {
         case let .commitSwipe(readings, unsure, strokes, observations):
             changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations)
         case let .acceptCandidate(index):
-            closeOpenWord()
-            changed = acceptCandidate(at: index)
+            if words.isPreviewing {
+                changed = words.promotePreview(at: index)
+                changesText = false
+            } else {
+                closeOpenWord()
+                let effect = acceptCandidate(at: index)
+                changed = effect.changed
+                changesText = effect.changesText
+            }
         case .shiftPressBegan:
             if shift.pressBegan(at: scheduler.now, insertionCount: insertionCount) {
                 emit(.capsLockEngaged)
@@ -403,6 +417,9 @@ public final class KeyboardEngine {
             changesText = false
         case let .switchLayer(target):
             changed = setLayer(target)
+            changesText = false
+        case let .showEmojiPage(page):
+            changed = showEmojiPage(page)
             changesText = false
         case .nextKeyboard:
             delegate?.keyboardEngineDidRequestNextKeyboard(self)
@@ -428,7 +445,15 @@ public final class KeyboardEngine {
     private func insertCharacter(_ character: String, at point: CGPoint?, time: Double) -> Bool {
         consumePickedUpWord()
         let text = displayText(for: character)
-        if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
+        if EmojiCatalog.contains(text) {
+            closeOpenWord()
+            let hadWord = !editor.currentWord.isEmpty
+            if hadWord, !finishWord(trailing: " ") {
+                editor.insertSpace()
+            }
+            editor.insert(text)
+            if hadWord { completeWord(.tap) }
+        } else if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
             closeOpenWord()
             let hadWord = !editor.currentWord.isEmpty
             let smart = settings.smartPunctuationEnabled && traits.variant == .standard
@@ -756,7 +781,8 @@ public final class KeyboardEngine {
         let score = result.readings[0].score
         let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
         editor.commitWord(cased[0])
-        words.swipeCommitted(cased, unsure: tentative)
+        let literal = BeatChooser.collapse((priorChunks.flatMap(\.events) + events).map(\.letter).joined())
+        words.swipeCommitted(cased, unsure: tentative, literal: literal)
         var chunks = priorChunks
         chunks.append(OpenChunk(events: events, readings: cased, score: score))
         openWord = OpenWord(chunks: chunks)
@@ -774,9 +800,10 @@ public final class KeyboardEngine {
         guard editor.replaceRecentCommitWord(with: cased[0]) else { return false }
         let score = result.readings[0].score
         let tentative = result.isUnsure || score <= WordJoiner.provisionalScore
-        words.swipeCommitted(cased, unsure: tentative)
         var open = open
         open.chunks.append(OpenChunk(events: batch, readings: cased, score: score))
+        let literal = BeatChooser.collapse(open.chunks.flatMap(\.events).map(\.letter).joined())
+        words.swipeCommitted(cased, unsure: tentative, literal: literal)
         openWord = open
         noteWordOpened()
         if strokes > 0 {
@@ -845,31 +872,33 @@ public final class KeyboardEngine {
         return reading.score <= WordJoiner.provisionalScore
     }
 
-    private func acceptCandidate(at index: Int) -> Bool {
-        guard let acceptance = words.accept(index, from: state.candidates) else { return false }
+    private func acceptCandidate(at index: Int) -> (changed: Bool, changesText: Bool) {
+        guard let acceptance = words.accept(index, from: state.candidates) else { return (false, true) }
         switch acceptance {
         case let .keep(word):
             words.keep(word)
-            return insertSpace()
+            return (insertSpace(), true)
         case let .replace(word):
-            guard editor.replaceCurrentWord(with: word, kind: .completed) else { return false }
+            guard editor.replaceCurrentWord(with: word, kind: .completed) else { return (false, true) }
             words.noteSettled(word)
             lastSpaceTime = nil
             completeWord(.suggestion)
-            return true
+            return (true, true)
         case let .insert(word):
             consumePickedUpWord()
             editor.insert(word)
-            return true
+            return (true, true)
         case let .swap(word):
             words.noteSwap(preferred: word, rejected: editor.recentCommit?.word)
-            return editor.replaceRecentCommitWord(with: word)
+            return (editor.replaceRecentCommitWord(with: word), true)
         case .revert:
-            guard let commit = editor.undoRecentCommit() else { return false }
+            guard let commit = editor.undoRecentCommit() else { return (false, true) }
             emit(.correctionReverted)
             words.rememberRejection(preferred: commit.original, rejected: commit.word)
             words.keep(commit.original)
-            return insertSpace()
+            return (insertSpace(), true)
+        case .settle:
+            return (true, false)
         }
     }
 
@@ -946,7 +975,8 @@ public final class KeyboardEngine {
         open.chunks.removeLast()
         guard let chunk = open.chunks.last, let word = chunk.readings.first else { return false }
         guard editor.replaceRecentCommitWord(with: word) else { return false }
-        words.swipeCommitted(chunk.readings, unsure: chunk.score <= WordJoiner.provisionalScore)
+        let literal = BeatChooser.collapse(open.chunks.flatMap(\.events).map(\.letter).joined())
+        words.swipeCommitted(chunk.readings, unsure: chunk.score <= WordJoiner.provisionalScore, literal: literal)
         openWord = open
         flow.noteDeletion()
         return true
@@ -962,6 +992,16 @@ public final class KeyboardEngine {
         return true
     }
 
+    /// Shows another emoji page. Opens the emoji keyboard if it isn't already up.
+    private func showEmojiPage(_ page: EmojiCategory) -> Bool {
+        let opens = layer != .emoji
+        guard page != emojiPage || opens else { return false }
+        emojiPage = page
+        layer = .emoji
+        rebuildGeometry()
+        return true
+    }
+
     private func applySettings() {
         flow.celebratesMilestones = settings.effects.celebrateMilestones
         let swipes = settings.typingMode == .swipe && words.language != nil && traits.supportsSwipe
@@ -972,13 +1012,20 @@ public final class KeyboardEngine {
         guard let language = words.language, let layout = words.letterLayout else { return .empty }
         let path = await language.decode(gesture, layout: layout)
         let sequence = language.sequenceDecode(gesture.observations, layout: layout)
+        let fitted = ThumbFit.adjust(
+            sequence.result,
+            observations: gesture.observations,
+            strokePaths: gesture.strokePaths,
+            layout: layout
+        )
         let chosen = BeatChooser.reading(
             path: path,
-            sequence: sequence,
+            sequence: SequenceOutcome(result: fitted, traced: sequence.traced),
             strokes: gesture.strokeCount,
             observations: gesture.observations
         )
-        return ContractionPreference.apply(chosen, prefersContraction: gesture.prefersContraction)
+        let preferred = words.placingChoice(on: chosen)
+        return ContractionPreference.apply(preferred, prefersContraction: gesture.prefersContraction)
     }
 
     // MARK: - Derived state
@@ -1025,7 +1072,8 @@ public final class KeyboardEngine {
             candidates: words.candidates(
                 suggests: settings.suggestionsEnabled && traits.supportsLanguageFeatures,
                 autocorrects: autocorrects
-            )
+            ),
+            emojiPage: emojiPage
         )
         guard next != state else { return }
         state = next
@@ -1038,7 +1086,11 @@ public final class KeyboardEngine {
 
         let layout = LayoutProvider.layout(
             for: layer,
-            context: LayoutContext(variant: traits.variant, showsNextKeyboardKey: showsNextKeyboardKey)
+            context: LayoutContext(
+                variant: traits.variant,
+                showsNextKeyboardKey: showsNextKeyboardKey,
+                emojiPage: emojiPage
+            )
         )
         geometry = KeyboardGeometry(
             layout: layout,

@@ -34,5 +34,6 @@ public enum KeyboardIntent: Hashable, Sendable {
     case shiftPressBegan
     case shiftPressEnded
     case switchLayer(KeyboardLayer)
+    case showEmojiPage(EmojiCategory)
     case nextKeyboard
 }

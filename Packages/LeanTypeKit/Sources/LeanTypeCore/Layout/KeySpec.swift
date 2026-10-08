@@ -5,6 +5,7 @@ public enum KeyboardLayer: String, Hashable, Sendable, CaseIterable {
     case letters
     case numbers
     case symbols
+    case emoji
 }
 
 /// Stable identity for a key within a layout, used to diff rendering and track presses.
@@ -28,6 +29,10 @@ public enum KeyKind: Hashable, Sendable {
     case returnKey
     case layerSwitch(KeyboardLayer)
     case nextKeyboard
+    /// Opens the emoji page.
+    case emoji
+    /// Switches which set of emoji is showing.
+    case emojiCategory(EmojiCategory)
 
     public var isCharacter: Bool {
         if case .character = self { return true }

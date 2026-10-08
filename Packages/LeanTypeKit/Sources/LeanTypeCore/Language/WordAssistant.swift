@@ -17,6 +17,8 @@ final class WordAssistant {
         case revert
         /// Type a word that was lifted off the page.
         case insert(String)
+        /// The landed word was confirmed. The document stays as it is.
+        case settle
     }
 
     var language: LanguageModel?
@@ -33,8 +35,12 @@ final class WordAssistant {
     /// edits it, so "com" at the end of an email is not autocorrected or offered as a fix.
     private var literalWord: String?
     private var swipeReadings: [String] = []
+    /// Aimed letters from the swipe, kept on the strip when they are not the committed word.
+    private var tracedLiteral: String?
     /// Set while a finger is still drawing; cleared when the swipe commits or is cancelled.
     private var preview: DecodeResult?
+    /// A preview word the user tapped, kept at the front until the fingers lift.
+    private var chosenPreview: String?
     /// The word that just ended. Stays on the strip, unhighlighted, until the next letter.
     private var settledWord: String?
     /// A word lifted off the page, shown until it is replaced or put back.
@@ -50,6 +56,7 @@ final class WordAssistant {
         let readings: [String]
         let autocorrects: Bool
         let settled: String?
+        let literal: String?
     }
 
     init(editor: TextEditor) {
@@ -197,12 +204,18 @@ final class WordAssistant {
         cached = nil
     }
 
-    func swipeCommitted(_ readings: [String], unsure _: Bool) {
+    func swipeCommitted(_ readings: [String], unsure _: Bool, literal: String? = nil) {
         if let word = readings.first {
             language?.noteCommitted(word)
         }
         swipeReadings = readings
+        tracedLiteral = readings.first { reading in
+            guard let literal else { return false }
+            return reading.compare(literal, options: .caseInsensitive) == .orderedSame
+                && reading.compare(readings[0], options: .caseInsensitive) != .orderedSame
+        }
         preview = nil
+        chosenPreview = nil
         touches = []
         touchTimes = []
         settledWord = nil
@@ -229,19 +242,50 @@ final class WordAssistant {
 
     /// Shows `result` in the suggestion strip without touching the document. An empty result
     /// leaves the previous preview up, so a momentary miss doesn't flash the wordmark.
+    /// A word the user already tapped stays in front when it is still in the result.
     /// Returns whether the leading word changed.
     @discardableResult
     func showPreview(_ result: DecodeResult) -> Bool {
         guard !result.isEmpty else { return false }
+        let ordered = placingChoice(on: result)
         let previous = preview?.readings.first?.word
-        preview = result
+        preview = ordered
         cached = nil
-        return result.readings.first?.word != previous
+        return ordered.readings.first?.word != previous
     }
 
+    /// Moves a preview reading to the front. The callout and the lit keys follow it,
+    /// and the lift commits it when the word is still in the result.
+    @discardableResult
+    func promotePreview(at index: Int) -> Bool {
+        guard let preview, preview.readings.indices.contains(index) else { return false }
+        chosenPreview = preview.readings[index].word
+        self.preview = placingChoice(on: preview)
+        cached = nil
+        return true
+    }
+
+    /// The user's preview choice, applied to a decode that still contains that word.
+    func placingChoice(on result: DecodeResult) -> DecodeResult {
+        guard let chosenPreview,
+              let index = result.readings.firstIndex(where: {
+                  $0.word.compare(chosenPreview, options: .caseInsensitive) == .orderedSame
+              }),
+              index != 0
+        else { return result }
+        var readings = result.readings
+        let chosen = readings.remove(at: index)
+        let top = result.readings[0].score
+        readings.insert(DecodeResult.Reading(word: chosen.word, score: top + 0.01), at: 0)
+        return DecodeResult(readings: readings)
+    }
+
+    var isPreviewing: Bool { preview != nil }
+
     func clearPreview() {
-        guard preview != nil else { return }
+        guard preview != nil || chosenPreview != nil else { return }
         preview = nil
+        chosenPreview = nil
         cached = nil
     }
 
@@ -259,8 +303,7 @@ final class WordAssistant {
         // Search and URL fields hide suggestions, but a finished swipe still offers its other readings.
         if !suggests, let commit = editor.recentCommit, commit.kind == .swiped,
            !TextBoundary.continuesWord(after: editor.contextAfter) {
-            let alternatives = swipeReadings.filter { $0 != commit.word }.map { Candidate($0, role: .alternative) }
-            return CandidateState(alternatives)
+            return swipeStrip(word: commit.word, readings: swipeReadings, settled: settledWord, literal: tracedLiteral)
         }
         guard suggests, let language, !TextBoundary.continuesWord(after: editor.contextAfter) else { return .empty }
         releaseLiteralIfStale()
@@ -274,7 +317,8 @@ final class WordAssistant {
             commit: editor.recentCommit,
             readings: swipeReadings,
             autocorrects: autocorrects,
-            settled: settledWord
+            settled: settledWord,
+            literal: tracedLiteral
         )
         if let cached, cached.key == key { return cached.state }
         let state = makeCandidates(key, language: language)
@@ -303,7 +347,10 @@ final class WordAssistant {
         case .revert:
             return .revert
         case .settled:
-            return nil
+            swipeReadings = []
+            tracedLiteral = nil
+            settle(candidate.text)
+            return .settle
         case .picked:
             return .insert(candidate.text)
         }
@@ -321,8 +368,7 @@ final class WordAssistant {
         if let commit = key.commit {
             switch commit.kind {
             case .swiped:
-                let alternatives = key.readings.filter { $0 != commit.word }.map { Candidate($0, role: .alternative) }
-                return CandidateState(alternatives)
+                return swipeStrip(word: commit.word, readings: key.readings, settled: key.settled, literal: key.literal)
             case .corrected:
                 return CandidateState([Candidate(commit.original, role: .revert)])
             case .completed:
@@ -341,6 +387,34 @@ final class WordAssistant {
         }
         candidates += analysis.completions.map { Candidate($0, role: .completion) }
         return CandidateState(candidates, highlightedIndex: highlighted)
+    }
+
+    /// One alternative, the word that just landed, one alternative. The landed word is the
+    /// highlighted center. The traced letters keep a side slot when they are not that word.
+    /// Confirming the center leaves a single settled word.
+    private func swipeStrip(word: String, readings: [String], settled: String?, literal: String?) -> CandidateState {
+        if settled == word, readings.isEmpty || readings == [word] {
+            return CandidateState([Candidate(word, role: .settled)])
+        }
+        var others = readings.filter { $0.compare(word, options: .caseInsensitive) != .orderedSame }
+        let literalSlot = literal.flatMap { literal in
+            others.first { $0.compare(literal, options: .caseInsensitive) == .orderedSame }
+        }
+        if let literalSlot {
+            others.removeAll { $0.compare(literalSlot, options: .caseInsensitive) == .orderedSame }
+        }
+        var slots: [Candidate] = []
+        if let left = others.first {
+            slots.append(Candidate(left, role: .alternative))
+        }
+        let center = slots.count
+        slots.append(Candidate(word, role: .settled))
+        if let literalSlot {
+            slots.append(Candidate(literalSlot, role: .alternative))
+        } else if others.count > 1 {
+            slots.append(Candidate(others[1], role: .alternative))
+        }
+        return CandidateState(slots, highlightedIndex: center)
     }
 
     private func settle(_ word: String) {

@@ -76,11 +76,24 @@ enum KeyPresentationProvider {
             case .letters: ("ABC", "letters")
             case .numbers: ("123", "numbers")
             case .symbols: ("#+=", "symbols")
+            case .emoji: ("😀", "emoji")
             }
             return KeyPresentation(label: .text(title, .function), family: .function, isEnabled: true, accessibilityLabel: spoken)
 
         case .nextKeyboard:
             return KeyPresentation(label: .symbol("globe"), family: .function, isEnabled: true, accessibilityLabel: "next keyboard")
+
+        case .emoji:
+            return KeyPresentation(label: .symbol("face.smiling"), family: .function, isEnabled: true, accessibilityLabel: "emoji")
+
+        case let .emojiCategory(category):
+            let selected = state.layer == .emoji && state.emojiPage == category
+            return KeyPresentation(
+                label: .text(category.symbol, .symbol),
+                family: selected ? .accent : .function,
+                isEnabled: true,
+                accessibilityLabel: category.spokenName
+            )
         }
     }
 

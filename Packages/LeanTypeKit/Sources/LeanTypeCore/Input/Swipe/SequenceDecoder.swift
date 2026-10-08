@@ -9,6 +9,8 @@ public struct StrokeObservation: Hashable, Sendable {
     public var letter: String
     /// A thumb that tapped this letter rather than swiping through it.
     public var isTap: Bool
+    /// Which moving stroke aimed at this letter. Taps use `-1`.
+    public var strokeIndex: Int
 
     public init(
         time: Double,
@@ -16,7 +18,8 @@ public struct StrokeObservation: Hashable, Sendable {
         directionX: CGFloat,
         directionY: CGFloat,
         letter: String,
-        isTap: Bool = false
+        isTap: Bool = false,
+        strokeIndex: Int = -1
     ) {
         self.time = time
         self.point = point
@@ -24,6 +27,7 @@ public struct StrokeObservation: Hashable, Sendable {
         self.directionY = directionY
         self.letter = letter
         self.isTap = isTap
+        self.strokeIndex = strokeIndex
     }
 
     var directionLength: CGFloat {
@@ -397,7 +401,15 @@ enum SequenceDecoder {
             }
             if readings.count == 4 { break }
         }
-        return SequenceOutcome(result: DecodeResult(readings: readings), traced: traced)
+        let ordered = mergingStrokeOrder(
+            into: readings,
+            observations: observations,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personal,
+            bigram: bigram
+        )
+        return SequenceOutcome(result: DecodeResult(readings: ordered), traced: traced)
     }
 
     // MARK: - Beam
@@ -420,7 +432,8 @@ enum SequenceDecoder {
         layout: LetterLayout,
         lexicon: MappedLexicon,
         personal: [PersonalLexicon.Entry],
-        bigram: LetterBigram
+        bigram: LetterBigram,
+        scoresMotion: Bool = true
     ) -> Hypothesis? {
         var letters = hypothesis.letters
         letters.reserveCapacity(letters.count + times)
@@ -439,7 +452,7 @@ enum SequenceDecoder {
             if times == 2 {
                 score += bigramWeight * bigram.logProbability(from: letter, to: letter)
             }
-            if observation.directionLength > 0.5 {
+            if scoresMotion, observation.directionLength > 0.5 {
                 let stepX = center.x - hypothesis.lastX
                 let stepY = center.y - hypothesis.lastY
                 let length = hypot(stepX, stepY)
@@ -506,5 +519,192 @@ enum SequenceDecoder {
                 score: hypothesis.score + frequencyWeight * entry.logCount
             ))
         }
+    }
+
+    // MARK: - Stroke order
+
+    /// How many aimed letters a two-thumb shuffle will search. Longer scribbles stay on the
+    /// time-ordered beam.
+    private static let strokeOrderLimit = 10
+    private static let strokeBeamWidth = 36
+
+    /// Words spelled by shuffling the thumbs, each thumb's letters staying in order.
+    /// A word that skips a thumb never enters this list. When the time-ordered beam's first
+    /// word skips one, a shuffle that uses every thumb leads instead.
+    private static func mergingStrokeOrder(
+        into readings: [DecodeResult.Reading],
+        observations: [StrokeObservation],
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram
+    ) -> [DecodeResult.Reading] {
+        let strokes = strokeGroups(observations)
+        let total = strokes.reduce(0) { $0 + $1.count }
+        guard strokes.count > 1, total >= 2, total <= strokeOrderLimit else { return readings }
+
+        let aimed = strokes.map { stroke in
+            stroke.compactMap { LexiconKey.make($0.letter).first }
+        }
+        let shuffled = strokeReadings(
+            strokes,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personal,
+            bigram: bigram
+        )
+        guard let leader = shuffled.first else { return readings }
+        if let current = readings.first, containsInOrder(aimed, word: current.word) {
+            return merge(readings, with: shuffled)
+        }
+        var combined = shuffled
+        for reading in readings where containsInOrder(aimed, word: reading.word)
+            && !combined.contains(where: { $0.word.compare(reading.word, options: .caseInsensitive) == .orderedSame }) {
+            combined.append(reading)
+        }
+        if let top = readings.first, leader.score <= top.score, !combined.isEmpty {
+            combined[0] = DecodeResult.Reading(word: combined[0].word, score: top.score + 0.01)
+        }
+        return Array(combined.prefix(4))
+    }
+
+    private static func strokeGroups(_ observations: [StrokeObservation]) -> [[StrokeObservation]] {
+        var order: [Int] = []
+        var groups: [Int: [StrokeObservation]] = [:]
+        for observation in observations where !observation.isTap && observation.strokeIndex >= 0 {
+            if groups[observation.strokeIndex] == nil {
+                order.append(observation.strokeIndex)
+                groups[observation.strokeIndex] = []
+            }
+            groups[observation.strokeIndex]?.append(observation)
+        }
+        return order.compactMap { groups[$0] }.filter { !$0.isEmpty }
+    }
+
+    private struct StrokeHypothesis {
+        var letters: [UInt8]
+        var score: Double
+        var lastX: CGFloat
+        var lastY: CGFloat
+        var placed: Bool
+        var cursors: [Int]
+        var lastStroke: Int?
+
+        var base: Hypothesis {
+            Hypothesis(letters: letters, score: score, skips: 0, lastX: lastX, lastY: lastY, placed: placed)
+        }
+    }
+
+    private static func strokeReadings(
+        _ strokes: [[StrokeObservation]],
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram
+    ) -> [DecodeResult.Reading] {
+        let total = strokes.reduce(0) { $0 + $1.count }
+        var beam = [StrokeHypothesis(
+            letters: [],
+            score: 0,
+            lastX: 0,
+            lastY: 0,
+            placed: false,
+            cursors: Array(repeating: 0, count: strokes.count),
+            lastStroke: nil
+        )]
+        for _ in 0..<total {
+            var next: [StrokeHypothesis] = []
+            for state in beam {
+                for index in strokes.indices where state.cursors[index] < strokes[index].count {
+                    let observation = strokes[index][state.cursors[index]]
+                    let sameStroke = state.lastStroke == index
+                    for letter in candidates(for: observation, layout: layout) {
+                        for times in 1...2 {
+                            guard let grown = extend(
+                                state.base,
+                                with: letter,
+                                times: times,
+                                observation: observation,
+                                layout: layout,
+                                lexicon: lexicon,
+                                personal: personal,
+                                bigram: bigram,
+                                scoresMotion: sameStroke
+                            ) else { continue }
+                            var advanced = state
+                            advanced.letters = grown.letters
+                            advanced.score = grown.score
+                            advanced.lastX = grown.lastX
+                            advanced.lastY = grown.lastY
+                            advanced.placed = true
+                            advanced.cursors[index] += 1
+                            advanced.lastStroke = index
+                            next.append(advanced)
+                        }
+                    }
+                }
+            }
+            beam = pruneStrokes(next)
+            if beam.isEmpty { break }
+        }
+
+        let finished = beam.filter { state in
+            zip(state.cursors, strokes).allSatisfy { $0 == $1.count }
+        }
+        var scored: [Scored] = []
+        for state in finished {
+            consider(state.base, lexicon: lexicon, personal: personal, into: &scored)
+        }
+        scored.sort { $0.score > $1.score }
+        var seen = Set<String>()
+        var readings: [DecodeResult.Reading] = []
+        for entry in scored {
+            let word: String = switch entry.source {
+            case let .dictionary(index): lexicon.display(at: index)
+            case let .personal(offset): personal[offset].display
+            }
+            if seen.insert(word.lowercased()).inserted {
+                readings.append(DecodeResult.Reading(word: word, score: entry.score))
+            }
+            if readings.count == 4 { break }
+        }
+        return readings
+    }
+
+    private static func pruneStrokes(_ hypotheses: [StrokeHypothesis]) -> [StrokeHypothesis] {
+        var best: [String: StrokeHypothesis] = [:]
+        best.reserveCapacity(hypotheses.count)
+        for hypothesis in hypotheses {
+            let letters = String(decoding: hypothesis.letters, as: UTF8.self)
+            let cursors = hypothesis.cursors.map(String.init).joined(separator: ",")
+            let key = letters + "|" + cursors
+            if let existing = best[key], existing.score >= hypothesis.score { continue }
+            best[key] = hypothesis
+        }
+        return best.values.sorted { $0.score > $1.score }.prefix(strokeBeamWidth).map { $0 }
+    }
+
+    private static func containsInOrder(_ strokes: [[UInt8]], word: String) -> Bool {
+        let letters = LexiconKey.make(word)
+        return strokes.allSatisfy { containsInOrder($0, in: letters) }
+    }
+
+    private static func containsInOrder(_ needle: [UInt8], in word: [UInt8]) -> Bool {
+        var cursor = 0
+        for letter in needle {
+            guard cursor < word.count, let found = word[cursor...].firstIndex(of: letter) else { return false }
+            cursor = found + 1
+        }
+        return true
+    }
+
+    private static func merge(_ primary: [DecodeResult.Reading], with extra: [DecodeResult.Reading]) -> [DecodeResult.Reading] {
+        var combined = primary
+        for reading in extra where !combined.contains(where: {
+            $0.word.compare(reading.word, options: .caseInsensitive) == .orderedSame
+        }) {
+            combined.append(reading)
+        }
+        return Array(combined.prefix(4))
     }
 }

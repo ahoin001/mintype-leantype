@@ -196,6 +196,15 @@ struct GestureTip: Identifiable {
             poses: poses([(0, false, 0.45), (0, true, 0.12), (-36, true, 0.35), (-36, false, 0.35)])
         ),
         GestureTip(
+            id: "emoji",
+            title: "Emoji",
+            detail: "Tap the smiley to open emoji. Tap one to type it, then ABC to come back to letters.",
+            keyLabel: "😀",
+            keySymbol: nil,
+            keyWidth: 52,
+            poses: poses([(0, false, 0.45), (0, true, 0.14), (0, false, 0.5)])
+        ),
+        GestureTip(
             id: "pickUp",
             title: "Pick up a word",
             detail: "Flick up on the space bar to lift the word at the cursor. Type to replace it, or tap delete to put it back.",
