@@ -23,6 +23,7 @@ public enum WordMemory: Equatable, Sendable {
 public final class LanguageModel {
     public let lexicon: MappedLexicon
     let decoder: PathDecoder
+    let aligner: AlignmentDecoder
 
     /// Learning only happens when this is on (the setting plus Full Access).
     public var isLearningEnabled = false
@@ -52,6 +53,7 @@ public final class LanguageModel {
         blocklist = Blocklist(store: blocklistStore)
         context = WordContext(store: contextStore)
         decoder = PathDecoder(lexicon: lexicon)
+        aligner = AlignmentDecoder()
         personal = PersonalLexicon(learned: store?.load() ?? [])
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
     }
@@ -95,22 +97,53 @@ public final class LanguageModel {
         return blocklist.applying(to: rejections.applying(to: context.applying(to: result)))
     }
 
-    /// Words for a sequence of taps and swipe arrivals, best first. Used when several thumb
-    /// actions are still one word. A single continuous swipe keeps using `decode`.
-    func sequenceDecode(_ observations: [StrokeObservation], layout: LetterLayout) -> SequenceOutcome {
+    /// One alignment of a whole gesture: taps, anchors, and the keys a stroke only crossed.
+    func align(_ gesture: SwipeGesture, layout: LetterLayout, costs: AlignmentCosts = .standard) async -> DecodeResult {
+        let result = await aligner.decode(
+            gesture,
+            layout: layout,
+            personal: personalEntries,
+            bigram: preparedBigram(),
+            lexicon: lexicon,
+            costs: costs
+        )
+        return blocklist.applying(to: rejections.applying(to: context.applying(to: result)))
+    }
+
+    /// Words for a sequence of taps and swipe arrivals, best first. Used when a later beat
+    /// joins an open word and the original polylines are no longer the thing being scored.
+    func sequenceDecode(_ observations: [StrokeObservation], layout: LetterLayout, costs: AlignmentCosts = .standard) -> SequenceOutcome {
         guard !observations.isEmpty else { return .empty }
-        if letterBigram == nil {
-            letterBigram = LetterBigram(lexicon: lexicon)
-        }
-        guard let letterBigram else { return .empty }
-        let outcome = SequenceDecoder.decode(
-            observations,
+        let evidence = SwipeEvidence.fromObservations(observations)
+        let strokes = Set(observations.filter { !$0.isTap && $0.strokeIndex >= 0 }.map(\.strokeIndex))
+        let gesture = SwipeGesture(
+            path: [],
+            strokeCount: max(strokes.count, 1),
+            tracedLetters: evidence.aimedLetters,
+            observations: observations,
+            evidence: evidence
+        )
+        var pathScore = PathScore()
+        let result = AlignmentSearch.decode(
+            gesture,
             layout: layout,
             lexicon: lexicon,
             personal: personalEntries,
-            bigram: letterBigram
+            bigram: preparedBigram(),
+            costs: costs,
+            pathScore: &pathScore
         )
-        return SequenceOutcome(result: blocklist.applying(to: rejections.applying(to: context.applying(to: outcome.result))), traced: outcome.traced)
+        return SequenceOutcome(
+            result: blocklist.applying(to: rejections.applying(to: context.applying(to: result))),
+            traced: evidence.aimedLetters
+        )
+    }
+
+    private func preparedBigram() -> LetterBigram {
+        if letterBigram == nil {
+            letterBigram = LetterBigram(lexicon: lexicon)
+        }
+        return letterBigram ?? LetterBigram(lexicon: lexicon)
     }
 
     /// The word that just landed, so the next swipe can prefer what usually follows it.

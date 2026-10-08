@@ -142,7 +142,7 @@ public final class KeyboardView: UIView {
         }
 
         engine.delegate = self
-        keysView.apply(geometry: engine.geometry)
+        keysView.apply(geometry: engine.geometry, travels: effects.level == .full)
         keysView.apply(state: engine.state)
         applySettings(engine.settings)
         applyTheme()
@@ -188,6 +188,10 @@ public final class KeyboardView: UIView {
 
     public func keyboardWillAppear() {
         effects.keyboardWillAppear()
+        if let hint = coach.appearanceHint(flicksEnabled: engine.settings.flickForSecondaryEnabled) {
+            pendingHint = hint
+            flushHint()
+        }
     }
 
     public func keyboardDidDisappear() {
@@ -322,7 +326,7 @@ public final class KeyboardView: UIView {
 
 extension KeyboardView: KeyboardEngineDelegate {
     public func keyboardEngine(_: KeyboardEngine, didUpdateGeometry geometry: KeyboardGeometry) {
-        keysView.apply(geometry: geometry)
+        keysView.apply(geometry: geometry, travels: effects.level == .full)
         effects.apply(geometry: geometry)
     }
 
@@ -333,6 +337,7 @@ extension KeyboardView: KeyboardEngineDelegate {
     }
 
     public func keyboardEngine(_: KeyboardEngine, didEmit event: KeyboardEvent) {
+        dock.note(event)
         noteCoach(event)
         for observer in observers {
             observer.handle(event)

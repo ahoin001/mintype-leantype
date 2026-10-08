@@ -93,7 +93,7 @@ final class Blocklist {
         guard !entries.isEmpty else { return result }
         let kept = result.readings.filter { !contains($0.word) }
         guard kept.count != result.readings.count else { return result }
-        return DecodeResult(readings: kept)
+        return result.replacingReadings(kept)
     }
 
     private func trim() {

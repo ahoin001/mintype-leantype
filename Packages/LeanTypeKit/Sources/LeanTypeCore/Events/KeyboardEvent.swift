@@ -28,7 +28,8 @@ public enum KeyboardEvent: Hashable, Sendable {
     /// One step of a backspace scrub or repeat.
     case deleteStep
     /// Holding backspace moved up a gear (characters to words, or words to sentences).
-    case deleteEscalated
+    /// One event per gear, never per deleted character.
+    case deleteEscalated(DeleteGear)
     /// A double-space period ended a sentence. `at` is the space bar's center.
     case sentenceEnded(at: CGPoint)
     /// The space-bar trackpad engaged; `bar` is the space key's frame.
@@ -37,6 +38,10 @@ public enum KeyboardEvent: Hashable, Sendable {
     /// The trackpad moved the cursor. `byWord` steps jump a whole word.
     case cursorStep(direction: Int, byWord: Bool)
     case alternatesPresented
+    /// A hold row started its wait. `key` is that key's frame, in key-area coordinates.
+    case holdArmed(CGRect)
+    /// The hold ended, or the finger moved onto a key with no row.
+    case holdEnded
     case capsLockEngaged
     /// A word was finished (by space, punctuation, swipe, or accepting a suggestion).
     case wordCommitted(WordSource)
@@ -46,10 +51,20 @@ public enum KeyboardEvent: Hashable, Sendable {
     case swipePreviewChanged
     case correctionApplied
     case correctionReverted
+    /// Return inserted a newline. `title` is the key's label; `key` is its frame.
+    case returnSent(String, from: CGRect)
     /// Typing rhythm changed noticeably.
     case flowChanged(FlowLevel)
     /// The user hit a streak milestone of clean words (25, 50, ...).
     case flowMilestone(Int)
+}
+
+/// The gear hold-to-delete just entered. A tap's starting gear is not announced;
+/// only the step up from it is.
+public enum DeleteGear: Hashable, Sendable {
+    case character
+    case word
+    case sentence
 }
 
 /// Anything that reacts to keyboard events: feedback, effects, statistics.

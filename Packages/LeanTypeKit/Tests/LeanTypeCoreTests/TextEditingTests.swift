@@ -229,7 +229,16 @@ struct SettingsTests {
         let json = #"{"effects":{"intensity":"party","trailStyle":"unknownStyle"}}"#
         let settings = try JSONDecoder().decode(KeyboardSettings.self, from: Data(json.utf8))
         #expect(settings.effects.intensity == .party)
-        #expect(settings.effects.trailStyle == EffectsSettings.default.trailStyle)
+        #expect(settings.effects.trailStyle == .lantern)
         #expect(settings.effects.celebrateMilestones)
+    }
+
+    @Test func savedTrailNamesLoadAsTheNewLooks() throws {
+        let theme = #"{"effects":{"trailStyle":"theme"}}"#
+        let brush = #"{"effects":{"trailStyle":"brush"}}"#
+        let prism = #"{"effects":{"trailStyle":"prism"}}"#
+        #expect(try JSONDecoder().decode(KeyboardSettings.self, from: Data(theme.utf8)).effects.trailStyle == .lantern)
+        #expect(try JSONDecoder().decode(KeyboardSettings.self, from: Data(brush.utf8)).effects.trailStyle == .silk)
+        #expect(try JSONDecoder().decode(KeyboardSettings.self, from: Data(prism.utf8)).effects.trailStyle == .prism)
     }
 }

@@ -22,7 +22,7 @@ protocol SessionContext: AnyObject {
 }
 
 extension SessionContext {
-    func previewCallout(for key: KeyFrame, showing text: String? = nil) -> CalloutState? {
+    func previewCallout(for key: KeyFrame, showing text: String? = nil, growsFromKey: Bool = false) -> CalloutState? {
         guard settings.keyPreviewsEnabled, let character = text ?? key.key.kind.character else { return nil }
         let layout = CalloutGeometry.layout(
             anchor: key.visualFrame,
@@ -30,7 +30,12 @@ extension SessionContext {
             metrics: geometry.metrics,
             bounds: calloutBounds
         )
-        return CalloutState(keyID: key.id, layout: layout, content: .preview(displayText(for: character)))
+        return CalloutState(
+            keyID: key.id,
+            layout: layout,
+            content: .preview(displayText(for: character)),
+            growsFromKey: growsFromKey
+        )
     }
 }
 

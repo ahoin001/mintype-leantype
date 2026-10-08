@@ -3,7 +3,8 @@ import LeanTypeDesign
 import UIKit
 
 /// The balloon that rises out of a pressed key: a letter preview, or the long-press
-/// alternates row with a selection pill. Shown instantly; dismissed with a quick fade.
+/// alternates row with a selection pill. A letter preview appears at once. A digit flick
+/// or a hold row grows out of its key, then fades away on dismiss.
 final class CalloutView: UIView {
     private static let maxOptions = KeyShortcuts.maxCount
 
@@ -27,6 +28,7 @@ final class CalloutView: UIView {
         layer.addSublayer(shape)
 
         selection.cornerCurve = .continuous
+        selection.isHidden = true
         layer.addSublayer(selection)
     }
 
@@ -47,24 +49,54 @@ final class CalloutView: UIView {
     func show(_ callout: CalloutState?, fades: Bool = false) {
         guard callout != current else { return }
         let wasHidden = current == nil || alpha < 0.5
+        let wasGrowing = current?.growsFromKey == true
         current = callout
 
         guard let callout else {
             UIView.animate(withDuration: Motion.calloutDismiss, delay: 0, options: [.beginFromCurrentState]) {
                 self.alpha = 0
+                self.transform = .identity
             }
             return
         }
+        if wasHidden { selection.isHidden = true }
         render(callout)
-        if fades, wasHidden {
+        let grow = callout.growsFromKey && !wasGrowing && !UIAccessibility.isReduceMotionEnabled
+        if grow {
+            let origin = CGPoint(x: callout.layout.anchorFrame.midX, y: callout.layout.anchorFrame.minY)
+            setScale(0.9, around: origin)
+            alpha = 0
+            UIView.animate(
+                withDuration: Motion.calloutPresent,
+                delay: 0,
+                options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+            ) {
+                self.setScale(1, around: origin)
+                self.alpha = 1
+            }
+        } else if fades, wasHidden {
+            transform = .identity
             alpha = 0
             UIView.animate(withDuration: Motion.calloutDismiss, delay: 0, options: [.beginFromCurrentState]) {
                 self.alpha = 1
             }
-        } else {
+        } else if !wasGrowing {
             layer.removeAllAnimations()
+            transform = .identity
+            alpha = 1
+        } else {
             alpha = 1
         }
+    }
+
+    /// Scales around a point in this view. The transform's origin is the view's center,
+    /// so the point is measured from there and the balloon stays planted on its key.
+    private func setScale(_ scale: CGFloat, around point: CGPoint) {
+        let dx = point.x - bounds.midX
+        let dy = point.y - bounds.midY
+        transform = CGAffineTransform(translationX: dx, y: dy)
+            .scaledBy(x: scale, y: scale)
+            .translatedBy(x: -dx, y: -dy)
     }
 
     /// Releases label views; they are recreated on demand.
@@ -78,6 +110,15 @@ final class CalloutView: UIView {
 
     private func render(_ callout: CalloutState) {
         guard let theme else { return }
+        let selected = draw(callout, theme: theme)
+        if case .alternates = callout.content {
+            placeSelection(selected, fill: theme.selectionFill.uiColor)
+        }
+    }
+
+    /// Draws the balloon and its labels without implicit animations. Returns the selected
+    /// cell, which is placed afterwards so its stretch is not swallowed by this transaction.
+    private func draw(_ callout: CalloutState, theme: Theme) -> CGRect? {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -98,6 +139,7 @@ final class CalloutView: UIView {
         case let .preview(text):
             selection.isHidden = true
             layoutLabels(texts: [text], frames: layout.optionFrames, selectedIndex: nil, theme: theme, role: .callout)
+            return nil
         case let .alternates(options, selectedIndex):
             let frames = Array(layout.optionFrames.prefix(Self.maxOptions))
             layoutLabels(
@@ -107,13 +149,24 @@ final class CalloutView: UIView {
                 theme: theme,
                 role: .calloutAlternate
             )
-            if frames.indices.contains(selectedIndex) {
-                selection.isHidden = false
-                selection.frame = frames[selectedIndex].insetBy(dx: 3, dy: 5)
-                selection.cornerRadius = style.cornerRadius
-                selection.backgroundColor = theme.selectionFill.cgColor
-            }
+            guard frames.indices.contains(selectedIndex) else { return nil }
+            return frames[selectedIndex].insetBy(dx: 3, dy: 5)
         }
+    }
+
+    /// The selection pill stretches between cells. Its first appearance sits in place,
+    /// because the balloon itself is what grows out of the key.
+    private func placeSelection(_ frame: CGRect?, fill: UIColor) {
+        guard let frame else {
+            selection.isHidden = true
+            return
+        }
+        let wasVisible = !selection.isHidden
+        selection.backgroundColor = fill.cgColor
+        selection.cornerRadius = style.cornerRadius
+        selection.isHidden = false
+        let travels = wasVisible && !UIAccessibility.isReduceMotionEnabled
+        MorphDriver.move(selection, to: frame, kind: .stretch, duration: Motion.pillTravel, travels: travels)
     }
 
     private func layoutLabels(

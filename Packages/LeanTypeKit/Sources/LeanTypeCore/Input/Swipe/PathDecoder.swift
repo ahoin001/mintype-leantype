@@ -12,9 +12,20 @@ public struct DecodeResult: Hashable, Sendable {
     public static let confidenceMargin = 0.35
 
     public let readings: [Reading]
+    /// High means this beat is its own word. Low means it still belongs to the open word.
+    /// Spelling confidence stays on `isUnsure`; the two are not the same decision.
+    public let boundaryConfidence: Double
+    /// The path moved on and this decode should take the previous preview down.
+    public let withdrawsPreview: Bool
 
-    public init(readings: [Reading]) {
+    public init(readings: [Reading], boundaryConfidence: Double = 1, withdrawsPreview: Bool = false) {
         self.readings = readings
+        self.boundaryConfidence = boundaryConfidence
+        self.withdrawsPreview = withdrawsPreview
+    }
+
+    func replacingReadings(_ readings: [Reading]) -> DecodeResult {
+        DecodeResult(readings: readings, boundaryConfidence: boundaryConfidence, withdrawsPreview: withdrawsPreview)
     }
 
     public static let empty = DecodeResult(readings: [])
@@ -41,7 +52,6 @@ public struct DecodeResult: Hashable, Sendable {
 ///
 /// Runs off the main thread; all scratch memory is allocated once per decoder.
 actor PathDecoder {
-    static let sampleCount = 32
     /// Candidates examined per first/last letter pair, most frequent first.
     /// Most-frequent-first. Common words sit at the front, so a shorter scan stays fast as the
     /// list grows; personal words are scored separately.
@@ -51,50 +61,31 @@ actor PathDecoder {
     static let endpointRadius: CGFloat = 1.25
     static let resultLimit = 4
 
-    /// Scoring constants (location, shape, and endpoint spread in key widths; prior weight per
-    /// log unit).
-    static let locationSigma: CGFloat = 0.42
-    static let shapeSigma: CGFloat = 0.3
-    static let endpointSigma: CGFloat = 0.55
+    static let locationSigma: CGFloat = PathScore.locationSigma
+    static let shapeSigma: CGFloat = PathScore.shapeSigma
+    static let endpointSigma: CGFloat = PathScore.endpointSigma
     static let frequencyWeight = 0.22
-    /// Candidates with a mean distance beyond this (key widths) are discarded early.
-    static let locationCutoff: CGFloat = 1.6
+    static let locationCutoff: CGFloat = PathScore.locationCutoff
 
     let lexicon: MappedLexicon
 
     /// Set when the last decode had to look past the most common words in a bucket.
     private(set) var scannedBeyondCommon = false
 
-    private var gesturePoints: [CGPoint]
-    private var gestureShape: [CGPoint]
-    private var idealPath: [CGPoint]
-    private var idealPoints: [CGPoint]
-    private var idealShape: [CGPoint]
+    private var scorer = PathScore()
 
     init(lexicon: MappedLexicon) {
         self.lexicon = lexicon
-        gesturePoints = Array(repeating: .zero, count: Self.sampleCount)
-        gestureShape = Array(repeating: .zero, count: Self.sampleCount)
-        idealPath = []
-        idealPath.reserveCapacity(32)
-        idealPoints = Array(repeating: .zero, count: Self.sampleCount)
-        idealShape = Array(repeating: .zero, count: Self.sampleCount)
     }
 
     /// The most likely words for `gesture`, best first, with the scores that ranked them.
     func decode(_ gesture: SwipeGesture, layout: LetterLayout, personal: [PersonalLexicon.Entry]) -> DecodeResult {
         let state = Signposts.swipe.beginInterval("Decode")
         defer { Signposts.swipe.endInterval("Decode", state) }
-        guard gesture.path.count >= 2 else { return .empty }
+        guard scorer.prepare(gesture.path, layout: layout) else { return .empty }
 
-        gesture.path.withUnsafeBufferPointer { path in
-            gesturePoints.withUnsafeMutableBufferPointer { StrokeAnalyzer.resample(path, into: $0) }
-        }
-        normalize(gesturePoints, into: &gestureShape, layout: layout)
-        let gestureLength = StrokeAnalyzer.length(of: gesture.path) / layout.keyWidth
-
-        let starts = layout.letters(near: gesturePoints[0], within: Self.endpointRadius, limit: Self.endpointLetters)
-        let ends = layout.letters(near: gesturePoints[Self.sampleCount - 1], within: Self.endpointRadius, limit: Self.endpointLetters)
+        let starts = layout.letters(near: scorer.start, within: Self.endpointRadius, limit: Self.endpointLetters)
+        let ends = layout.letters(near: scorer.end, within: Self.endpointRadius, limit: Self.endpointLetters)
         var ranking = Ranking(limit: Self.resultLimit * 2)
         var bestLocation = CGFloat.greatestFiniteMagnitude
         scannedBeyondCommon = false
@@ -106,8 +97,7 @@ actor PathDecoder {
             consider(
                 bucket,
                 through: Self.bucketScanLimit,
-                gestureLength: gestureLength,
-                isMultiStroke: gesture.isMultiStroke,
+                gateLength: !gesture.isMultiStroke,
                 layout: layout,
                 bestLocation: &bestLocation,
                 ranking: &ranking
@@ -120,8 +110,7 @@ actor PathDecoder {
                 consider(
                     bucket,
                     from: Self.bucketScanLimit,
-                    gestureLength: gestureLength,
-                    isMultiStroke: gesture.isMultiStroke,
+                    gateLength: !gesture.isMultiStroke,
                     layout: layout,
                     bestLocation: &bestLocation,
                     ranking: &ranking
@@ -132,9 +121,7 @@ actor PathDecoder {
             guard let first = entry.key.first, let last = entry.key.last,
                   starts.contains(first), ends.contains(last) else { continue }
             let prior = Self.frequencyWeight * entry.logCount
-            let measured = entry.key.withUnsafeBytes {
-                measure($0, mustExceed: ranking.threshold - prior, gestureLength: gestureLength, isMultiStroke: gesture.isMultiStroke, layout: layout)
-            }
+            let measured = scorer.measure(entry.key, mustExceed: ranking.threshold - prior, gateLength: !gesture.isMultiStroke, layout: layout)
             if let location = measured.location {
                 bestLocation = min(bestLocation, location)
             }
@@ -157,75 +144,12 @@ actor PathDecoder {
         return DecodeResult(readings: readings)
     }
 
-    // MARK: - Scoring
-
-    /// Log-likelihood of the gesture given `key`. `location` is the mean distance in key
-    /// widths once the path is long enough to measure, even when that distance is too far to score.
-    private func measure(
-        _ key: UnsafeRawBufferPointer,
-        mustExceed floor: Double,
-        gestureLength: CGFloat,
-        isMultiStroke: Bool,
-        layout: LetterLayout
-    ) -> (score: Double?, location: CGFloat?) {
-        guard key.count >= 2 else { return (nil, nil) }
-
-        // Where the finger lands and lifts is deliberate; a mean over the whole path would let
-        // "help" beat "hello" for a swipe that ends dead on the o.
-        let startMiss = layout.normalizedDistance(gesturePoints[0], layout.center(of: key[0]))
-        let endMiss = layout.normalizedDistance(gesturePoints[Self.sampleCount - 1], layout.center(of: key[key.count - 1]))
-        let endpointTerm = Double((startMiss * startMiss + endMiss * endMiss) / (2 * Self.endpointSigma * Self.endpointSigma))
-        guard -endpointTerm > floor else { return (nil, nil) }
-
-        idealPath.removeAll(keepingCapacity: true)
-        for letter in key {
-            let center = layout.center(of: letter)
-            if idealPath.last != center {
-                idealPath.append(center)
-            }
-        }
-        guard idealPath.count >= 2 else { return (nil, nil) }
-
-        if !isMultiStroke {
-            // A swipe for "dictionary" isn't half a key long, and "on" isn't three rows.
-            let idealLength = StrokeAnalyzer.length(of: idealPath) / layout.keyWidth
-            let ratio = (gestureLength + 0.5) / (idealLength + 0.5)
-            guard ratio > 0.45, ratio < 2.2 else { return (nil, nil) }
-        }
-
-        idealPath.withUnsafeBufferPointer { path in
-            idealPoints.withUnsafeMutableBufferPointer { StrokeAnalyzer.resample(path, into: $0) }
-        }
-
-        var location: CGFloat = 0
-        for index in 0..<Self.sampleCount {
-            location += layout.normalizedDistance(gesturePoints[index], idealPoints[index])
-        }
-        location /= CGFloat(Self.sampleCount)
-        guard location < Self.locationCutoff else { return (nil, location) }
-        let locationTerm = Double(location * location / (2 * Self.locationSigma * Self.locationSigma))
-        guard -(endpointTerm + locationTerm) > floor else { return (nil, location) }
-
-        normalize(idealPoints, into: &idealShape, layout: layout)
-        var shape: CGFloat = 0
-        for index in 0..<Self.sampleCount {
-            let dx = gestureShape[index].x - idealShape[index].x
-            let dy = gestureShape[index].y - idealShape[index].y
-            shape += (dx * dx + dy * dy).squareRoot()
-        }
-        shape /= CGFloat(Self.sampleCount)
-
-        let shapeTerm = Double(shape * shape / (2 * Self.shapeSigma * Self.shapeSigma))
-        return (-(endpointTerm + locationTerm + shapeTerm), location)
-    }
-
     /// Scores `bucket[start..<end]`, keeping the closest location seen.
     private func consider(
         _ bucket: UnsafeBufferPointer<UInt32>,
         from start: Int = 0,
         through end: Int? = nil,
-        gestureLength: CGFloat,
-        isMultiStroke: Bool,
+        gateLength: Bool,
         layout: LetterLayout,
         bestLocation: inout CGFloat,
         ranking: inout Ranking
@@ -235,11 +159,10 @@ actor PathDecoder {
         for offset in start..<last {
             let index = Int(bucket[offset])
             let prior = Self.frequencyWeight * lexicon.logCount(at: index)
-            let measured = measure(
+            let measured = scorer.measure(
                 lexicon.key(at: index),
                 mustExceed: ranking.threshold - prior,
-                gestureLength: gestureLength,
-                isMultiStroke: isMultiStroke,
+                gateLength: gateLength,
                 layout: layout
             )
             if let location = measured.location {
@@ -247,28 +170,6 @@ actor PathDecoder {
             }
             guard let fit = measured.score else { continue }
             ranking.insert(.dictionary(index), score: fit + prior)
-        }
-    }
-
-    /// Centers `points` on their centroid and scales by their larger extent (in key units), so
-    /// only the shape remains. Tiny gestures keep a minimum scale so noise isn't magnified.
-    private func normalize(_ points: [CGPoint], into output: inout [CGPoint], layout: LetterLayout) {
-        var minX = CGFloat.infinity, maxX = -CGFloat.infinity
-        var minY = CGFloat.infinity, maxY = -CGFloat.infinity
-        var sumX: CGFloat = 0, sumY: CGFloat = 0
-        for point in points {
-            let x = point.x / layout.keyWidth
-            let y = point.y / layout.keyHeight
-            minX = min(minX, x); maxX = max(maxX, x)
-            minY = min(minY, y); maxY = max(maxY, y)
-            sumX += x; sumY += y
-        }
-        let count = CGFloat(points.count)
-        let scale = max(maxX - minX, maxY - minY, 1)
-        let centerX = sumX / count
-        let centerY = sumY / count
-        for (index, point) in points.enumerated() {
-            output[index] = CGPoint(x: (point.x / layout.keyWidth - centerX) / scale, y: (point.y / layout.keyHeight - centerY) / scale)
         }
     }
 }

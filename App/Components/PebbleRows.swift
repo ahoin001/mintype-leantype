@@ -61,16 +61,30 @@ struct PebbleOptionTiles<Value: Hashable>: View {
     let title: String
     @Binding var selection: Value
     let options: [Option]
+    /// When set, tiles wrap into this many columns. A single row is the default.
+    var columns: Int? = nil
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(options, id: \.value) { option in
-                tile(option, isSelected: option.value == selection)
+        Group {
+            if let columns {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
+                    tiles
+                }
+            } else {
+                HStack(spacing: 8) {
+                    tiles
+                }
             }
         }
         .sensoryFeedback(.selection, trigger: selection)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
+    }
+
+    @ViewBuilder private var tiles: some View {
+        ForEach(options, id: \.value) { option in
+            tile(option, isSelected: option.value == selection)
+        }
     }
 
     private func tile(_ option: Option, isSelected: Bool) -> some View {

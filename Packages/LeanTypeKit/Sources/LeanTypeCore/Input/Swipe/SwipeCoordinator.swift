@@ -32,6 +32,10 @@ final class SwipeCoordinator {
     private var previewTask: Task<Void, Never>?
     private var previewToken = 0
     private var generation = 0
+    /// How many samples the preview currently on the bar was decoded from.
+    private var previewPointCount = 0
+    /// Dwell and the other aim thresholds. The engine scales these as the typist speeds up.
+    var evidenceTuning = EvidenceTuning.standard
     /// Letter fingers still deciding between a tap and a stroke. Weak, so a session the touch
     /// engine has already dropped cannot keep the coordinator alive.
     private var undecided: [ObjectIdentifier: WeakSession] = [:]
@@ -118,8 +122,8 @@ final class SwipeCoordinator {
         schedulePreview()
     }
 
-    func arrive(_ id: TouchID, letter: String, at center: CGPoint, time: Double) {
-        active[id]?.arrive(letter, at: center, time: time)
+    func arrive(_ id: TouchID, letter: String, at center: CGPoint, touch: CGPoint? = nil, time: Double) {
+        active[id]?.arrive(letter, at: center, touch: touch ?? center, time: time)
     }
 
     func ended(_ track: TouchTrack) {
@@ -179,7 +183,8 @@ final class SwipeCoordinator {
         self.ticket = nil
 
         invalidatePreview()
-        guard let gesture = GestureComposer.compose(strokes, taps: taps), gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
+        guard let gesture = GestureComposer.compose(strokes, taps: taps, tuning: evidenceTuning),
+              gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
             composer.cancel(ticket)
             onPreview?(nil)
             return
@@ -232,9 +237,18 @@ final class SwipeCoordinator {
             previewTask = nil
             guard token == previewToken, expected == generation, isCollecting else { return }
             let strokes = finished + active.values
-            guard let gesture = GestureComposer.compose(strokes, taps: pendingTaps()) else { return }
+            guard let gesture = GestureComposer.compose(strokes, taps: pendingTaps(), tuning: evidenceTuning) else { return }
             let result = await decode(gesture)
-            guard token == previewToken, expected == generation, isCollecting, !result.isEmpty else { return }
+            guard token == previewToken, expected == generation, isCollecting else { return }
+            let grown = gesture.path.count
+            let missed = result.isEmpty || (result.readings.first?.score ?? 0) < AlignmentCosts.previewFloor
+            if missed, grown >= 8, previewPointCount >= 4, grown > previewPointCount {
+                previewPointCount = grown
+                onPreview?(DecodeResult(readings: [], withdrawsPreview: true))
+                return
+            }
+            guard !result.isEmpty else { return }
+            previewPointCount = grown
             onPreview?(result)
         }
     }
@@ -242,6 +256,7 @@ final class SwipeCoordinator {
     private func invalidatePreview() {
         generation += 1
         previewToken += 1
+        previewPointCount = 0
         previewTask?.cancel()
         previewTask = nil
     }

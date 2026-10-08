@@ -48,6 +48,14 @@ final class BackspaceSession: InteractionSession {
 
         var next: Gear? { Gear(rawValue: rawValue + 1) }
 
+        var reported: DeleteGear {
+            switch self {
+            case .character: .character
+            case .word: .word
+            case .sentence: .sentence
+            }
+        }
+
         static func < (lhs: Gear, rhs: Gear) -> Bool { lhs.rawValue < rhs.rawValue }
     }
 
@@ -129,7 +137,7 @@ final class BackspaceSession: InteractionSession {
             gear = higher
             timeInGear = 0
             next = higher.timing.initial
-            context.emit(.deleteEscalated)
+            context.emit(.deleteEscalated(higher.reported))
         }
         timer = context.schedule(after: interval) { [weak self] in
             guard let self, case .holding = phase else { return }

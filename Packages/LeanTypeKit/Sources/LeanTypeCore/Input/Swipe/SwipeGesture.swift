@@ -15,7 +15,16 @@ public struct StrokePoint: Hashable, Sendable {
 struct KeyArrival: Hashable, Sendable {
     var letter: String
     var center: CGPoint
+    /// Where the finger actually was, which can sit off the key center.
+    var touch: CGPoint
     var time: Double
+
+    init(letter: String, center: CGPoint, touch: CGPoint? = nil, time: Double) {
+        self.letter = letter
+        self.center = center
+        self.touch = touch ?? center
+        self.time = time
+    }
 }
 
 /// The path of one finger during a swipe, in a bounded buffer: past `capacity` points it
@@ -67,9 +76,9 @@ struct StrokeBuffer {
     }
 
     /// The first time this stroke enters `letter`. Repeating the current letter does nothing.
-    mutating func arrive(_ letter: String, at center: CGPoint, time: Double) {
+    mutating func arrive(_ letter: String, at center: CGPoint, touch: CGPoint, time: Double) {
         guard arrivals.last?.letter != letter else { return }
-        arrivals.append(KeyArrival(letter: letter, center: center, time: time))
+        arrivals.append(KeyArrival(letter: letter, center: center, touch: touch, time: time))
     }
 
     // MARK: - Private
@@ -150,9 +159,13 @@ public struct SwipeGesture: Hashable, Sendable {
     public let strokePaths: [[CGPoint]]
     /// Letters the thumbs aimed at, in arrival order, with a return trip already removed.
     /// Used when decoding finds nothing, so the gesture still types what was meant.
+    /// Crossed keys stay on `evidence` and are not part of this string.
     public let tracedLetters: String
     /// Each letter a thumb aimed at, with the time and the direction of travel into it.
     public let observations: [StrokeObservation]
+    /// Anchors, crossings, and taps. The alignment decoder reads this; aimed letters stay
+    /// on `observations` for the join rules.
+    public let evidence: SwipeEvidence
     /// A stroke ended on the apostrophe, so the contraction spelling should lead.
     public let prefersContraction: Bool
 
@@ -162,6 +175,7 @@ public struct SwipeGesture: Hashable, Sendable {
         strokePaths: [[CGPoint]] = [],
         tracedLetters: String = "",
         observations: [StrokeObservation] = [],
+        evidence: SwipeEvidence = .empty,
         prefersContraction: Bool = false
     ) {
         self.path = path
@@ -169,6 +183,7 @@ public struct SwipeGesture: Hashable, Sendable {
         self.strokePaths = strokePaths
         self.tracedLetters = tracedLetters
         self.observations = observations
+        self.evidence = evidence
         self.prefersContraction = prefersContraction
     }
 

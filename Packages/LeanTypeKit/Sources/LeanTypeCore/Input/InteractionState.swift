@@ -9,11 +9,14 @@ public struct CalloutState: Hashable, Sendable {
     public let keyID: KeyID
     public let layout: CalloutLayout
     public let content: Content
+    /// The balloon scales up out of its key. Letter previews stay instant.
+    public let growsFromKey: Bool
 
-    public init(keyID: KeyID, layout: CalloutLayout, content: Content) {
+    public init(keyID: KeyID, layout: CalloutLayout, content: Content, growsFromKey: Bool = false) {
         self.keyID = keyID
         self.layout = layout
         self.content = content
+        self.growsFromKey = growsFromKey
     }
 }
 

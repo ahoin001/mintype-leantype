@@ -20,6 +20,8 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     private(set) var state = CandidateState.empty
     private var theme: Theme?
     private var pillFollowsLayout = true
+    /// Set by a commit or a correction, then consumed by the next pill placement.
+    private var emphasis = PillEmphasis.travel
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -51,27 +53,45 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         self.theme = theme
         separators.forEach { $0.backgroundColor = theme.secondaryLabel.uiColor.withAlphaComponent(0.18) }
         render(animated: false)
-        placePill(from: nil, animated: false)
+        placePill(animated: false)
+    }
+
+    /// A commit or a correction the next placement should picture. Ignored once the bar updates.
+    func note(_ event: KeyboardEvent) {
+        switch event {
+        case .wordCommitted(.swipe), .wordCommitted(.suggestion):
+            emphasis = .land
+        case .correctionApplied, .correctionReverted:
+            emphasis = .correct
+        default:
+            break
+        }
+    }
+
+    /// The event arrived but the bar did not change, so the emphasis must not leak onto a later move.
+    func cancelEmphasis() {
+        emphasis = .travel
     }
 
     func show(_ newState: CandidateState) {
-        guard newState != state else { return }
-        let wasShowingPill = state.highlightedIndex != nil && pill.alpha > 0.5
-        let from = pill.frame
+        guard newState != state else {
+            cancelEmphasis()
+            return
+        }
         state = newState
         let animated = !UIAccessibility.isReduceMotionEnabled && window != nil
         render(animated: animated)
         pillFollowsLayout = false
         setNeedsLayout()
         layoutIfNeeded()
-        placePill(from: wasShowingPill ? from : nil, animated: animated)
+        placePill(animated: animated)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         positionSlots()
         if pillFollowsLayout {
-            placePill(from: nil, animated: false)
+            placePill(animated: false)
         }
     }
 
@@ -223,14 +243,21 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         }
     }
 
-    /// Slides the accent pill when it was already on screen; otherwise it appears in place.
-    private func placePill(from previous: CGRect?, animated: Bool) {
+    /// Stretches the accent pill between slots. A landing or a correction squeezes through
+    /// the middle instead. The first appearance is in place.
+    private func placePill(animated: Bool) {
+        let emphasis = self.emphasis
+        self.emphasis = .travel
         guard let theme, let index = state.highlightedIndex, slots.indices.contains(index), !slots[index].isHidden else {
-            let hide = { self.pill.alpha = 0 }
-            if animated {
-                UIView.animate(withDuration: 0.12, animations: hide) { _ in self.pillFollowsLayout = true }
+            if emphasis == .land, animated, pill.alpha > 0.5 {
+                MorphDriver.move(pill, to: pill.frame, kind: .settle, duration: Motion.pillSettle, travels: true) { [weak self] in
+                    self?.pillFollowsLayout = true
+                }
+                UIView.animate(withDuration: Motion.pillSettle, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+                    self.pill.alpha = 0
+                }
             } else {
-                hide()
+                pill.alpha = 0
                 pillFollowsLayout = true
             }
             return
@@ -238,27 +265,31 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         pill.backgroundColor = theme.accentKey.fill.uiColor
         let target = slots[index].frame
         pill.layer.cornerRadius = target.height / 2
-        let slide = animated && previous != nil
-        if slide, let previous {
-            pill.frame = previous
-        }
-        let move = {
-            self.pill.frame = target
-            self.pill.alpha = 1
-        }
-        if slide {
-            UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut, .beginFromCurrentState], animations: move) { _ in
-                self.pillFollowsLayout = true
-            }
-        } else {
-            move()
+        let visible = pill.alpha > 0.5 && pill.frame.width > 1
+        guard animated, visible else {
+            pill.frame = target
+            pill.alpha = 1
             pillFollowsLayout = true
+            return
+        }
+        let kind: Morph = emphasis == .travel ? .stretch : .settle
+        let duration = emphasis == .travel ? Motion.pillTravel : Motion.pillSettle
+        pill.alpha = 1
+        MorphDriver.move(pill, to: target, kind: kind, duration: duration, travels: true) { [weak self] in
+            self?.pillFollowsLayout = true
         }
     }
 
     private static func title(for candidate: Candidate, quoted: Bool) -> String {
         candidate.role == .typed && quoted ? "“\(candidate.text)”" : candidate.text
     }
+}
+
+/// What the next pill placement is answering.
+private enum PillEmphasis {
+    case travel
+    case land
+    case correct
 }
 
 /// One tappable suggestion.

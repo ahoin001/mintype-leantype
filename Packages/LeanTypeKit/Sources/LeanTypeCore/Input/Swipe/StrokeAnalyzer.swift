@@ -144,17 +144,29 @@ enum GestureComposer {
     static let dwellTravel: CGFloat = 12
 
     /// `taps` are thumbs that never left their key. They do not change the moving finger's polyline.
-    static func compose(_ strokes: [StrokeBuffer], taps: [StrokeObservation] = []) -> SwipeGesture? {
+    /// `tuning` decides which mid-stroke keys are anchors. The rest stay on the gesture as crossings.
+    static func compose(
+        _ strokes: [StrokeBuffer],
+        taps: [StrokeObservation] = [],
+        tuning: EvidenceTuning = .standard
+    ) -> SwipeGesture? {
         let strokes = strokes.filter { !$0.points.isEmpty }
         guard !strokes.isEmpty || !taps.isEmpty else { return nil }
         let moving = strokes.max { length($0) < length($1) }
         let path = moving?.points.map(\.location) ?? []
         let strokePaths = strokes.map { $0.points.map(\.location) }
-        let marks = strokes.enumerated().flatMap { index, stroke in
-            aimedMarks(in: stroke, strokeIndex: index)
-        } + taps.map(mark)
-        let observations = observations(from: marks.sorted { $0.time < $1.time })
-        let traced = BeatChooser.collapse(observations.map(\.letter).joined())
+        var events = strokes.enumerated().flatMap { index, stroke in
+            strokeEvents(in: stroke, strokeIndex: index, tuning: tuning)
+        }
+        for (offset, tap) in taps.enumerated() {
+            events.append(event(from: tap, finger: offset))
+        }
+        events.sort { $0.time < $1.time }
+        events = collapsingBounces(events)
+        events = directed(events)
+        let aimed = events.filter(\.isAimed)
+        let observations = observations(from: aimed)
+        let traced = BeatChooser.collapse(aimed.map(\.letter).joined())
         guard path.count >= 2 || !traced.isEmpty else { return nil }
         let prefersContraction = strokes.contains { StrokeLetters.endsOnApostrophe($0.arrivals) }
         return SwipeGesture(
@@ -163,63 +175,60 @@ enum GestureComposer {
             strokePaths: strokePaths,
             tracedLetters: traced,
             observations: observations,
+            evidence: SwipeEvidence(events: events, aimedLetters: traced),
             prefersContraction: prefersContraction
         )
     }
 
     // MARK: - Private
 
-    private struct Mark {
-        var time: Double
-        var point: CGPoint
-        var letter: String
-        var isTap: Bool
-        var strokeIndex: Int
-    }
-
-    /// Start, sharp turns, dwells, and the lift, after a return trip has been removed.
-    /// A key the finger only slid across is not a letter, even when the slide is slow.
-    /// Every remaining corner is kept, so a zigzag is not reduced to its sharpest bend.
-    private static func aimedMarks(in stroke: StrokeBuffer, strokeIndex: Int) -> [Mark] {
+    /// Start, lift, sharp turns, and dwells are anchors. Every other key the finger entered
+    /// stays as a crossing, so a straight run can still offer the letters it passed through.
+    /// A return trip is already gone. Repeating the same letter does not add a second event.
+    private static func strokeEvents(in stroke: StrokeBuffer, strokeIndex: Int, tuning: EvidenceTuning) -> [SwipeEvent] {
         let arrivals = StrokeLetters.aimedArrivals(stroke.arrivals)
-        guard let first = arrivals.first else { return [] }
-        var chosen = [first]
-        if arrivals.count > 2 {
-            for index in 1..<(arrivals.count - 1) {
-                let previous = arrivals[index - 1]
-                let current = arrivals[index]
-                let next = arrivals[index + 1]
-                let turned = turn(previous.center, current.center, next.center) >= aimTurn
-                if turned || dwelled(on: current, until: next.time, in: stroke) {
-                    chosen.append(current)
-                }
+        guard !arrivals.isEmpty else { return [] }
+        var events: [SwipeEvent] = []
+        for (index, arrival) in arrivals.enumerated() {
+            let nextTime = index + 1 < arrivals.count ? arrivals[index + 1].time : (stroke.points.last?.time ?? arrival.time)
+            let turnAngle: CGFloat
+            if index > 0, index + 1 < arrivals.count {
+                turnAngle = turn(arrivals[index - 1].center, arrival.center, arrivals[index + 1].center)
+            } else {
+                turnAngle = 0
             }
-        } else {
-            chosen = arrivals
-        }
-        if let last = arrivals.last, chosen.last?.time != last.time {
-            chosen.append(last)
-        }
-        var marks: [Mark] = []
-        for arrival in chosen where marks.last?.letter != arrival.letter {
-            marks.append(Mark(
+            let dwell = dwellDuration(on: arrival, until: nextTime, in: stroke, tuning: tuning)
+            let endpoint = index == 0 || index == arrivals.count - 1
+            let anchored = endpoint || turnAngle >= tuning.aimTurn || dwell >= tuning.dwellDuration
+            guard events.last?.letter != arrival.letter else { continue }
+            events.append(SwipeEvent(
                 time: arrival.time,
-                point: arrival.center,
+                point: arrival.touch,
                 letter: arrival.letter,
-                isTap: false,
-                strokeIndex: strokeIndex
+                role: anchored ? .anchor : .crossing,
+                strokeIndex: strokeIndex,
+                turn: turnAngle,
+                dwell: dwell,
+                speed: speed(at: arrival.time, in: stroke),
+                distanceToCenter: hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y)
             ))
         }
-        return marks
+        return events
     }
 
-    /// The finger stayed nearly still on this key, rather than passing through it.
-    private static func dwelled(on arrival: KeyArrival, until end: Double, in stroke: StrokeBuffer) -> Bool {
+    /// Longest stretch the finger stayed near this key without wandering off, in seconds.
+    private static func dwellDuration(
+        on arrival: KeyArrival,
+        until end: Double,
+        in stroke: StrokeBuffer,
+        tuning: EvidenceTuning
+    ) -> Double {
         var spanStart: Double?
         var traveled: CGFloat = 0
         var previous: CGPoint?
+        var best = 0.0
         for point in stroke.points where point.time >= arrival.time && point.time <= end {
-            let near = hypot(point.location.x - arrival.center.x, point.location.y - arrival.center.y) <= dwellRadius
+            let near = hypot(point.location.x - arrival.center.x, point.location.y - arrival.center.y) <= tuning.dwellRadius
             if near {
                 if spanStart == nil {
                     spanStart = point.time
@@ -228,8 +237,8 @@ enum GestureComposer {
                     traveled += hypot(point.location.x - previous.x, point.location.y - previous.y)
                 }
                 previous = point.location
-                if let spanStart, point.time - spanStart >= dwellDuration, traveled <= dwellTravel {
-                    return true
+                if let spanStart, traveled <= tuning.dwellTravel {
+                    best = max(best, point.time - spanStart)
                 }
             } else {
                 spanStart = nil
@@ -237,7 +246,75 @@ enum GestureComposer {
                 previous = nil
             }
         }
-        return false
+        return best
+    }
+
+    private static func speed(at time: Double, in stroke: StrokeBuffer) -> Double {
+        let points = stroke.points
+        guard points.count >= 2 else { return 0 }
+        var bestIndex = 0
+        var bestGap = Double.greatestFiniteMagnitude
+        for (index, point) in points.enumerated() {
+            let gap = abs(point.time - time)
+            if gap < bestGap {
+                bestGap = gap
+                bestIndex = index
+            }
+        }
+        let current = points[bestIndex]
+        let other = bestIndex == 0 ? points[1] : points[bestIndex - 1]
+        let elapsed = abs(current.time - other.time)
+        guard elapsed > 0 else { return 0 }
+        return Double(hypot(current.location.x - other.location.x, current.location.y - other.location.y)) / elapsed
+    }
+
+    /// Drops a letter that only bounces back to the one before it ("ghghgh" becomes "gh").
+    /// Crossings collapse with the same rule so a wobble does not flood the beam.
+    private static func collapsingBounces(_ events: [SwipeEvent]) -> [SwipeEvent] {
+        var output: [SwipeEvent] = []
+        for event in events {
+            if output.count >= 2 {
+                let previous = output[output.count - 1].letter
+                let before = output[output.count - 2].letter
+                if event.letter == before, previous != event.letter {
+                    output.removeLast()
+                    continue
+                }
+            }
+            output.append(event)
+        }
+        return output
+    }
+
+    private static func directed(_ events: [SwipeEvent]) -> [SwipeEvent] {
+        var directed: [SwipeEvent] = []
+        directed.reserveCapacity(events.count)
+        var previous: CGPoint?
+        for event in events {
+            var event = event
+            if let previous {
+                let rawX = event.point.x - previous.x
+                let rawY = event.point.y - previous.y
+                let length = hypot(rawX, rawY)
+                if length > 1 {
+                    event.directionX = rawX / length
+                    event.directionY = rawY / length
+                }
+            }
+            directed.append(event)
+            previous = event.point
+        }
+        return directed
+    }
+
+    private static func event(from tap: StrokeObservation, finger: Int) -> SwipeEvent {
+        SwipeEvent(
+            time: tap.time,
+            point: tap.point,
+            letter: tap.letter,
+            role: .tap,
+            strokeIndex: -2 - finger
+        )
     }
 
     private static func turn(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
@@ -248,24 +325,17 @@ enum GestureComposer {
         return delta
     }
 
-    private static func mark(_ tap: StrokeObservation) -> Mark {
-        Mark(time: tap.time, point: tap.point, letter: tap.letter, isTap: true, strokeIndex: -1)
-    }
-
-    private static func observations(from marks: [Mark]) -> [StrokeObservation] {
+    /// Aimed letters only. Their point stays the key center when the event point is the finger,
+    /// so a join still sees where the thumb was aiming. Direction is from the previous aim.
+    private static func observations(from events: [SwipeEvent]) -> [StrokeObservation] {
         var result: [StrokeObservation] = []
         var previous: CGPoint?
-        for mark in marks {
-            if result.last?.letter == mark.letter, result.last?.isTap == mark.isTap,
-               result.last?.strokeIndex == mark.strokeIndex {
-                previous = mark.point
-                continue
-            }
+        for event in events where event.isAimed {
             var directionX: CGFloat = 0
             var directionY: CGFloat = 0
             if let previous {
-                let rawX = mark.point.x - previous.x
-                let rawY = mark.point.y - previous.y
+                let rawX = event.point.x - previous.x
+                let rawY = event.point.y - previous.y
                 let length = hypot(rawX, rawY)
                 if length > 1 {
                     directionX = rawX / length
@@ -273,15 +343,15 @@ enum GestureComposer {
                 }
             }
             result.append(StrokeObservation(
-                time: mark.time,
-                point: mark.point,
+                time: event.time,
+                point: event.point,
                 directionX: directionX,
                 directionY: directionY,
-                letter: mark.letter,
-                isTap: mark.isTap,
-                strokeIndex: mark.strokeIndex
+                letter: event.letter,
+                isTap: event.isTap,
+                strokeIndex: event.isTap ? -1 : event.strokeIndex
             ))
-            previous = mark.point
+            previous = event.point
         }
         return result
     }

@@ -4,9 +4,11 @@ import Foundation
 /// stroke once it travels far enough.
 ///
 /// Two thumbs land together without typing. The gesture starts when one of them travels.
-/// A thumb that never leaves its key is one letter in that word, at the moment it landed,
-/// and the word is committed when the last finger lifts. A thumb that later travels becomes
-/// another stroke. A tap with no swipe in progress types as it always has.
+/// An upward flick on a top-row digit is not that travel: while it is still heading up it
+/// stays a flick even after the finger leaves the key. A thumb that never leaves its key is one letter in
+/// that word, at the moment it landed, and the word is committed when the last finger lifts.
+/// A thumb that later travels becomes another stroke. A tap with no swipe in progress types
+/// as it always has.
 struct SwipeTypingMode: TypingMode {
     let coordinator: SwipeCoordinator
 
@@ -156,8 +158,8 @@ final class SwipeSession: InteractionSession {
 
     // MARK: - Private
 
-    /// A short downward dip on the starting key stays a flick. Anything sideways, off the key,
-    /// or long enough to be a word becomes a stroke immediately.
+    /// A short upward flick on a digit key stays a flick. Anything sideways, off the key
+    /// once that flick window has passed, or long enough to be a word becomes a stroke.
     private func shouldUpgrade(_ tap: CharacterTapSession, track: TouchTrack) -> Bool {
         guard tap.canRelinquish, !tap.isShowingAlternates, Self.canStroke(on: origin, context: context) else { return false }
         return hasBecomeStroke(track)
@@ -166,6 +168,13 @@ final class SwipeSession: InteractionSession {
     private func hasBecomeStroke(_ track: TouchTrack) -> Bool {
         let move = track.translation
         if abs(move.dx) >= Self.sidewaysDistance { return true }
+        if CharacterTapSession.holdsOffSwipe(
+            track,
+            on: origin,
+            enabled: context.settings.flickForSecondaryEnabled
+        ) {
+            return false
+        }
         if !origin.hitFrame.contains(track.current.location) { return true }
         return hypot(move.dx, move.dy) >= Self.strokeDistance
     }
@@ -241,6 +250,6 @@ final class SwipeSession: InteractionSession {
             aimedLetter = letter
             aimedCenter = center
         }
-        coordinator.arrive(id, letter: letter, at: center, time: time)
+        coordinator.arrive(id, letter: letter, at: center, touch: location, time: time)
     }
 }

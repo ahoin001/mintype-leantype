@@ -78,9 +78,7 @@ final class DockView: UIView {
 
     private let wordmark = UIButton(type: .system)
     private let suggestions = SuggestionStrip()
-    private let pill = UIView()
-    private let pillIcon = UIImageView()
-    private let pillLabel = UILabel()
+    private let capsule = StatusCapsule()
     private let dismissButton = DockView.makeButton(symbol: "keyboard.chevron.compact.down", label: "Hide keyboard")
     private let oneHandedButton = DockView.makeButton(symbol: "keyboard.onehanded.right", label: "One-handed keyboard")
     private let deleteMenu = UIStackView()
@@ -115,26 +113,13 @@ final class DockView: UIView {
 
         suggestions.alpha = 0
 
-        pill.layer.cornerCurve = .continuous
-        pill.alpha = 0
-        pill.isUserInteractionEnabled = false
-        pillIcon.contentMode = .center
-        pillIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-        pillLabel.font = Typography.keyFont(.status, compact: false)
-        pillLabel.adjustsFontSizeToFitWidth = true
-        pillLabel.minimumScaleFactor = 0.8
-        pill.addSubview(pillIcon)
-        pill.addSubview(pillLabel)
-        pill.isAccessibilityElement = true
-        pill.accessibilityTraits = .staticText
-
         dismissButton.addAction(UIAction { [weak self] _ in self?.onDismiss?() }, for: .touchUpInside)
         oneHandedButton.addAction(UIAction { [weak self] _ in self?.onOneHanded?() }, for: .touchUpInside)
 
         addSubview(wordmark)
         addSubview(deleteMenu)
         addSubview(suggestions)
-        addSubview(pill)
+        addSubview(capsule)
         addSubview(dismissButton)
         addSubview(oneHandedButton)
     }
@@ -149,21 +134,22 @@ final class DockView: UIView {
         palette = EffectPalette(theme: theme)
         wordmark.setTitleColor(theme.secondaryLabel.uiColor.withAlphaComponent(0.55), for: .normal)
         refreshChoices()
-        pill.backgroundColor = theme.statusPillFill.uiColor
-        pillIcon.tintColor = theme.accentKey.fill.uiColor
-        pillLabel.textColor = theme.letterKey.label.uiColor
+        capsule.apply(theme: theme)
         dismissButton.tintColor = theme.secondaryLabel.uiColor
         oneHandedButton.tintColor = theme.secondaryLabel.uiColor
         suggestions.apply(theme: theme)
+    }
+
+    /// A commit or a correction, forwarded before the candidate bar updates so the pill can answer it.
+    func note(_ event: KeyboardEvent) {
+        suggestions.note(event)
     }
 
     func show(_ newMessage: DockMessage?) {
         guard newMessage != message else { return }
         message = newMessage
         if let newMessage {
-            pillIcon.image = UIImage(systemName: newMessage.symbolName)
-            pillLabel.text = newMessage.text
-            pill.accessibilityLabel = newMessage.text
+            capsule.setMessage(newMessage)
             setNeedsLayout()
             layoutIfNeeded()
         }
@@ -171,7 +157,10 @@ final class DockView: UIView {
     }
 
     func show(_ newCandidates: CandidateState) {
-        guard newCandidates != candidates else { return }
+        guard newCandidates != candidates else {
+            suggestions.cancelEmphasis()
+            return
+        }
         let visibilityChanged = newCandidates.isEmpty != candidates.isEmpty
         candidates = newCandidates
         suggestions.show(newCandidates)
@@ -228,20 +217,8 @@ final class DockView: UIView {
         wordmark.frame = center
         deleteMenu.frame = center.insetBy(dx: 8, dy: 6)
         suggestions.frame = center
-
-        let iconWidth: CGFloat = 16
-        let textWidth = min(pillLabel.intrinsicContentSize.width, center.width - iconWidth - 30)
-        let pillWidth = iconWidth + textWidth + 30
-        let pillHeight = min(26, bounds.height - 8)
-        pill.frame = CGRect(
-            x: center.midX - pillWidth / 2,
-            y: (bounds.height - pillHeight) / 2,
-            width: pillWidth,
-            height: pillHeight
-        )
-        pill.layer.cornerRadius = pillHeight / 2
-        pillIcon.frame = CGRect(x: 12, y: 0, width: iconWidth, height: pillHeight)
-        pillLabel.frame = CGRect(x: 12 + iconWidth + 6, y: 0, width: textWidth, height: pillHeight)
+        capsule.frame = center
+        capsule.layoutIfResting()
     }
 
     // MARK: - Private
@@ -255,12 +232,12 @@ final class DockView: UIView {
         suggestions.isUserInteractionEnabled = showsSuggestions
         wordmark.isUserInteractionEnabled = showsWordmark
         deleteMenu.isUserInteractionEnabled = showsMenu
+        capsule.setShown(showsPill, travels: !UIAccessibility.isReduceMotionEnabled)
         UIView.animate(
             withDuration: Motion.modeChange,
             delay: 0,
             options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
         ) {
-            self.pill.alpha = showsPill ? 1 : 0
             self.suggestions.alpha = showsSuggestions ? 1 : 0
             self.deleteMenu.alpha = showsMenu ? 1 : 0
             self.wordmark.alpha = showsWordmark ? 1 : 0

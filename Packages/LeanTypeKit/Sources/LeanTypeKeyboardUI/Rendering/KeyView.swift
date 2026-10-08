@@ -15,6 +15,8 @@ final class KeyView: UIView {
     private var isCompact = false
     private var isPressed = false
     private var isSuggested = false
+    /// Wider than 1 only while the space bar is a trackpad.
+    private var span: CGFloat = 1
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
@@ -52,7 +54,8 @@ final class KeyView: UIView {
         isSuggested suggested: Bool = false,
         isEnabled: Bool,
         isCompact compact: Bool,
-        hint: String? = nil
+        hint: String? = nil,
+        trackpadOpen: Bool = false
     ) {
         applyHint(hint, color: colors.label)
         if newStyle != style {
@@ -78,7 +81,26 @@ final class KeyView: UIView {
         icon.tintColor = tint
         restingColor = colors.fill.uiColor
         pressedColor = colors.pressedFill.uiColor
-        applyFill(pressed: pressed, suggested: suggested)
+        let open = trackpadOpen && !UIAccessibility.isReduceMotionEnabled
+        let nextSpan: CGFloat = open ? Motion.trackpadSpan : 1
+        let spanChanged = abs(nextSpan - span) > 0.001
+        span = nextSpan
+        applyFill(pressed: pressed, suggested: suggested, animateSpan: spanChanged)
+    }
+
+    /// The new layer's label settles in. The key body stays where layout put it.
+    func arrive(after delay: TimeInterval) {
+        let scale = Motion.rowArrivalScale
+        let shrunk = CGAffineTransform(scaleX: scale, y: scale)
+        let views = labelViews
+        views.forEach { $0.transform = shrunk }
+        UIView.animate(
+            withDuration: Motion.rowArrival,
+            delay: delay,
+            options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+        ) {
+            views.forEach { $0.transform = .identity }
+        }
     }
 
     func setContentHidden(_ hidden: Bool) {
@@ -104,16 +126,24 @@ final class KeyView: UIView {
     /// Presses apply instantly (they happen hundreds of times a day); releases ease back.
     /// A suggested key uses the pressed fill without the press scale, so the preview word
     /// reads as lit letters rather than fingers.
-    private func applyFill(pressed: Bool, suggested: Bool) {
+    private func applyFill(pressed: Bool, suggested: Bool, animateSpan: Bool) {
         let wasLit = isPressed || isSuggested
         isPressed = pressed
         isSuggested = suggested
         let lit = pressed || suggested
         let target = lit ? pressedColor : restingColor
-        let scale = pressed && !UIAccessibility.isReduceMotionEnabled ? style.pressedScale : 1
-        let transform = CGAffineTransform(scaleX: scale, y: scale)
+        let transform = currentTransform()
 
-        if wasLit, !lit {
+        if animateSpan {
+            UIView.animate(
+                withDuration: Motion.modeChange,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
+            ) {
+                self.backgroundColor = target
+                self.transform = transform
+            }
+        } else if wasLit, !lit {
             UIView.animate(
                 withDuration: Motion.keyRelease,
                 delay: 0,
@@ -128,6 +158,15 @@ final class KeyView: UIView {
                 self.transform = transform
             }
         }
+    }
+
+    /// The trackpad opens the bar sideways. A press, on any other key, scales evenly and at once.
+    private func currentTransform() -> CGAffineTransform {
+        if span != 1 {
+            return CGAffineTransform(scaleX: span, y: 1)
+        }
+        let scale = isPressed && !UIAccessibility.isReduceMotionEnabled ? style.pressedScale : 1
+        return CGAffineTransform(scaleX: scale, y: scale)
     }
 
     private func applyHint(_ hint: String?, color: RGBA) {
@@ -150,6 +189,10 @@ final class KeyView: UIView {
         hintLabel = hint
         setNeedsLayout()
         return hint
+    }
+
+    private var labelViews: [UIView] {
+        hintLabel.map { [label, icon, $0] } ?? [label, icon]
     }
 
     private func applyLabel(_ keyLabel: KeyLabel) {

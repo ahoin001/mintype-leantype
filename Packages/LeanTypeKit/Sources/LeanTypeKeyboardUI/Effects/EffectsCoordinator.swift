@@ -19,7 +19,10 @@ final class EffectsCoordinator: KeyboardEventObserver {
     init(stage: EffectsStage, theme: Theme, settings: EffectsSettings) {
         self.stage = stage
         governor = EffectsGovernor(intensity: settings.intensity)
-        effects = [RippleEffect(), GustEffect(), CometEffect(), SparkleEffect(), FlowGlowEffect(), halo]
+        effects = [
+            RippleEffect(), GustEffect(), CometEffect(), SparkleEffect(), FlowGlowEffect(),
+            HoldWindupEffect(), GearMarkEffect(), ReturnLiftEffect(), halo,
+        ]
         context = EffectContext(
             stage: stage,
             palette: EffectPalette(theme: theme),

@@ -23,6 +23,19 @@ struct ShortcutTests {
         #expect(KeyShortcuts.row(for: "0", builtIn: ["°"], overrides: ["0": ["zero"]]) == ["°"])
     }
 
+    @Test func aPeriodOverrideKeepsThePeriodFirst() {
+        let row = KeyShortcuts.row(
+            for: ".",
+            builtIn: [".", "?", "!", "$"],
+            overrides: [".": ["?", "€"]]
+        )
+        #expect(row == [".", "?", "€"])
+    }
+
+    @Test func thePeriodRowDefaultsToTheBuiltInMarks() {
+        #expect(KeyShortcuts.row(for: ".", builtIn: [".", "?", "!", "$"], overrides: [:]) == [".", "?", "!", "$"])
+    }
+
     @Test func normalizationDropsBlanksDuplicatesAndExtras() {
         let extras = (0..<15).map { "item\($0)" }
         let row = KeyShortcuts.normalized(["  hi  ", "", "hi"] + extras)

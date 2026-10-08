@@ -14,6 +14,6 @@ let package = Package(
         .target(name: "LeanTypeCore", resources: [.copy("Resources/lexicon.bin")]),
         .target(name: "LeanTypeDesign", dependencies: ["LeanTypeCore"]),
         .target(name: "LeanTypeKeyboardUI", dependencies: ["LeanTypeCore", "LeanTypeDesign"]),
-        .testTarget(name: "LeanTypeCoreTests", dependencies: ["LeanTypeCore"]),
+        .testTarget(name: "LeanTypeCoreTests", dependencies: ["LeanTypeCore", "LeanTypeDesign"]),
     ]
 )

@@ -25,6 +25,6 @@ enum ContractionPreference {
                 index += 1
             }
         }
-        return DecodeResult(readings: readings)
+        return result.replacingReadings(readings)
     }
 }

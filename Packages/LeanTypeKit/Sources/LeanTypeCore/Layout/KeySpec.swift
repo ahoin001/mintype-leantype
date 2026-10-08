@@ -53,7 +53,7 @@ public struct KeySpec: Hashable, Sendable, Identifiable {
     public let widthUnits: CGFloat
     /// Long-press alternates, ordered from nearest to farthest from the key.
     public let alternates: [String]
-    /// Typed by a short downward flick (digits on the top letter row, common symbols below).
+    /// Typed by a short upward flick. Only the top letter row has one: the digit in its corner.
     public let secondary: String?
 
     public init(id: KeyID, kind: KeyKind, widthUnits: CGFloat = 1, alternates: [String] = [], secondary: String? = nil) {

@@ -34,6 +34,115 @@ enum SwipeSynthesizer {
     }
 }
 
+/// Human-ish gestures for the alignment decoder: corner cutting, overshoot, and two thumbs.
+@MainActor
+enum GestureSampler {
+    static func singleSwipe(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        compose(word: word, layout: layout, seed: seed, cut: 0, overshoot: 0, split: false)
+    }
+
+    static func cutCorners(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        compose(word: word, layout: layout, seed: seed, cut: 0.4, overshoot: 0.2, split: false)
+    }
+
+    static func twoThumbs(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        compose(word: word, layout: layout, seed: seed, cut: 0.15, overshoot: 0, split: true)
+    }
+
+    /// The last letter is a tap just after the stroke, overlapping it by a few dozen milliseconds.
+    static func swipePlusTap(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        let letters = LexiconKey.make(word)
+        guard letters.count >= 3, let tail = letters.last else { return nil }
+        let moving = stroke(Array(letters.dropLast()), layout: layout, seed: seed, cut: 0.1, overshoot: 0, start: 0)
+        let tap = StrokeObservation(
+            time: moving.end.time + 0.03,
+            point: layout.center(of: tail),
+            directionX: 0,
+            directionY: 0,
+            letter: String(UnicodeScalar(tail)),
+            isTap: true
+        )
+        return GestureComposer.compose([moving], taps: [tap])
+    }
+
+    private static func compose(
+        word: String,
+        layout: LetterLayout,
+        seed: UInt64,
+        cut: CGFloat,
+        overshoot: CGFloat,
+        split: Bool
+    ) -> SwipeGesture? {
+        let letters = LexiconKey.make(word)
+        guard letters.count >= 2 else { return nil }
+        if split, letters.count >= 4 {
+            let mid = letters.count / 2
+            let left = stroke(Array(letters[..<mid]), layout: layout, seed: seed, cut: cut, overshoot: 0, start: 0)
+            let right = stroke(Array(letters[mid...]), layout: layout, seed: seed &+ 9, cut: cut, overshoot: 0, start: 0.07)
+            return GestureComposer.compose([left, right])
+        }
+        return GestureComposer.compose([stroke(letters, layout: layout, seed: seed, cut: cut, overshoot: overshoot, start: 0)])
+    }
+
+    private static func stroke(
+        _ letters: [UInt8],
+        layout: LetterLayout,
+        seed: UInt64,
+        cut: CGFloat,
+        overshoot: CGFloat,
+        start: Double
+    ) -> StrokeBuffer {
+        let word = String(decoding: letters, as: UTF8.self)
+        var path = SwipeSynthesizer.path(for: word, layout: layout, jitter: 0.12, seed: seed)
+        if cut > 0, path.count >= 5 {
+            let original = path
+            for index in 2..<(path.count - 2) {
+                let chord = CGPoint(
+                    x: (original[index - 2].x + original[index + 2].x) / 2,
+                    y: (original[index - 2].y + original[index + 2].y) / 2
+                )
+                path[index].x += (chord.x - path[index].x) * cut
+                path[index].y += (chord.y - path[index].y) * cut
+            }
+        }
+        if overshoot > 0, path.count >= 2, let last = path.last {
+            let previous = path[path.count - 2]
+            let dx = last.x - previous.x
+            let dy = last.y - previous.y
+            let length = max(hypot(dx, dy), 1)
+            path.append(CGPoint(
+                x: last.x + dx / length * layout.keyWidth * overshoot,
+                y: last.y + dy / length * layout.keyHeight * overshoot
+            ))
+        }
+        guard let first = path.first else {
+            return StrokeBuffer(start: StrokePoint(location: .zero, time: start))
+        }
+        var time = start
+        var buffer = StrokeBuffer(start: StrokePoint(location: first, time: time))
+        var aimed: UInt8?
+        for point in path.dropFirst() {
+            let pace = 0.008 + 0.010 * abs(sin(time * 18))
+            time += pace
+            buffer.append(StrokePoint(location: point, time: time))
+            guard let letter = layout.letters(near: point, within: 0.65, limit: 1).first else { continue }
+            if let aimed {
+                let old = layout.center(of: aimed)
+                let next = layout.center(of: letter)
+                let towardNew = hypot(point.x - next.x, point.y - next.y)
+                let towardOld = hypot(point.x - old.x, point.y - old.y)
+                guard letter != aimed, towardNew < towardOld else { continue }
+            }
+            aimed = letter
+            buffer.arrive(String(UnicodeScalar(letter)), at: layout.center(of: letter), touch: point, time: time)
+        }
+        if let last = path.last {
+            buffer.finish(at: StrokePoint(location: last, time: time))
+        }
+        return buffer
+    }
+}
+
 /// A tiny deterministic generator so accuracy numbers don't change between runs.
 struct SeededRandom {
     private var state: UInt64
@@ -184,6 +293,42 @@ struct PathDecoderTests {
         // The real budget is 15 ms in release (see docs/PERF.md). Debug builds are much
         // slower, and this wall-clock measurement shares the CPU with the rest of the suite.
         #expect(average < .milliseconds(120), "Average \(average), slowest \(slowest)")
+    }
+
+    @Test func gestureClassesDecodeAboveTheFloor() async {
+        let cases: [(String, (String, LetterLayout, UInt64) -> SwipeGesture?)] = [
+            ("single", GestureSampler.singleSwipe),
+            ("corners", GestureSampler.cutCorners),
+            ("thumbs", GestureSampler.twoThumbs),
+            ("tap", GestureSampler.swipePlusTap),
+        ]
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        for (name, make) in cases {
+            var topOne = 0
+            var topThree = 0
+            var overMerge = 0
+            var underMerge = 0
+            var attempted = 0
+            var misses: [String] = []
+            for (index, word) in Self.words.prefix(40).enumerated() {
+                guard let gesture = make(word, layout, UInt64(index + 1)) else { continue }
+                attempted += 1
+                let result = await language.align(gesture, layout: layout)
+                if isCorrect(result.words.first, for: word) {
+                    topOne += 1
+                } else {
+                    misses.append("\(word)→\(result.words.first ?? "∅")")
+                    let got = result.words.first?.lowercased() ?? ""
+                    if got.count > word.count { overMerge += 1 }
+                    if !got.isEmpty, got.count < word.count { underMerge += 1 }
+                }
+                if result.words.contains(where: { isCorrect($0, for: word) }) { topThree += 1 }
+            }
+            let count = Double(attempted)
+            let report = "\(name) top-1 \(topOne)/\(attempted) top-3 \(topThree) over \(overMerge) under \(underMerge) misses \(misses.prefix(8))"
+            #expect(count > 0 && Double(topOne) / count >= 0.55, report)
+            #expect(count > 0 && Double(topThree) / count >= 0.75, report)
+        }
     }
 
     @Test func salientPointsFindTurns() {
@@ -382,10 +527,10 @@ struct SwipeTypingTests {
         #expect(!harness.state.candidates.isTentative)
     }
 
-    @Test func aShortDownwardFlickStillTypesTheSecondary() {
+    @Test func aShortUpwardFlickStillTypesTheDigit() {
         let harness = makeHarness()
         let id = harness.down(at: harness.point(for: "q"))
-        harness.move(id, by: CGVector(dx: 1, dy: CharacterTapSession.flickDistance + 4), over: 0.06)
+        harness.move(id, by: CGVector(dx: 1, dy: -(CharacterTapSession.flickDistance + 4)), over: 0.06)
         harness.up(id)
         #expect(harness.text == "1")
         #expect(harness.state.interaction.strokes.isEmpty)
@@ -760,6 +905,65 @@ struct SwipeTypingTests {
         #expect(harness.text == "the n")
     }
 
+    @Test func explicitSpaceKeepsTheNextSwipeInTheSameWord() async {
+        var settings = KeyboardSettings()
+        settings.swipeCommitMode = .explicitSpace
+        let harness = makeHarness(settings: settings)
+        swipe("hello", on: harness)
+        await harness.settle()
+        harness.wait(0.6)
+        swipe("in", on: harness)
+        await harness.settle()
+        let letters = harness.text.filter(\.isLetter)
+        #expect(letters.count > 5)
+        #expect(harness.text.split(separator: " ").count == 1)
+    }
+
+    @Test func withdrawingAPreviewClearsTheBar() {
+        let words = WordAssistant(editor: TextEditor(document: InMemoryTextDocument(text: "")))
+        words.showPreview(DecodeResult(readings: [.init(word: "hello", score: -1)]))
+        #expect(words.isPreviewing)
+        #expect(words.showPreview(DecodeResult(readings: [], withdrawsPreview: true)))
+        #expect(!words.isPreviewing)
+    }
+
+    @Test func theLeftSideOfASeamDiscouragesTheRightKey() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let fromTheLeft = AlignmentSearch.seamPenalty(
+            letter: UInt8(ascii: "y"),
+            touchX: harness.point(for: "t").x,
+            layout: layout,
+            bias: 0.35
+        )
+        let fromTheRight = AlignmentSearch.seamPenalty(
+            letter: UInt8(ascii: "y"),
+            touchX: harness.point(for: "y").x,
+            layout: layout,
+            bias: 0.35
+        )
+        #expect(fromTheLeft > fromTheRight)
+    }
+
+    @Test func aStraightRunKeepsCrossedKeysWithoutTypingThem() {
+        let harness = makeHarness()
+        let letters = ["q", "w", "e", "r", "t"]
+        let points = letters.map { harness.point(for: $0) }
+        var buffer = StrokeBuffer(start: StrokePoint(location: points[0], time: 0))
+        for (index, point) in points.enumerated() {
+            let time = Double(index) * 0.04
+            buffer.append(StrokePoint(location: point, time: time))
+            buffer.arrive(letters[index], at: point, touch: point, time: time)
+        }
+        buffer.finish(at: StrokePoint(location: points[points.count - 1], time: 0.2))
+        let gesture = GestureComposer.compose([buffer])
+        #expect((gesture?.tracedLetters.count ?? 9) < 5)
+        #expect(gesture?.evidence.events.contains { $0.role == .crossing } == true)
+    }
+
     @Test func aFingerHeldDownKeepsTheWordOpen() async {
         let harness = makeHarness()
         swipe("the", on: harness)
@@ -970,15 +1174,9 @@ struct SwipeTypingTests {
 
     @Test func aLongMissCommitsTheNearestWord() {
         let traced = "tyghagyts"
-        let sequence = SequenceOutcome(
-            result: DecodeResult(readings: [.init(word: "that's", score: -1)]),
-            traced: traced
-        )
-        let result = BeatChooser.reading(
-            path: .empty,
-            sequence: sequence,
-            strokes: 2,
-            observations: aimed(traced)
+        let result = ReadingPolicy.apply(
+            DecodeResult(readings: [.init(word: "that's", score: -1)]),
+            aimed: traced
         )
         #expect(result.words.first == "that's")
         #expect(result.words.first != traced)
@@ -986,20 +1184,19 @@ struct SwipeTypingTests {
     }
 
     @Test func aimedLettersBeatAShapeThatDoesNotSpellThem() {
-        let corners = SequenceOutcome(
-            result: DecodeResult(readings: [.init(word: "pill", score: -1)]),
-            traced: "pil"
+        let chosen = ReadingPolicy.apply(
+            DecodeResult(readings: [
+                .init(word: "pull", score: -0.2),
+                .init(word: "pill", score: -1),
+            ]),
+            aimed: "pil"
         )
-        let shape = DecodeResult(readings: [.init(word: "pull", score: -0.2)])
-        let chosen = BeatChooser.reading(path: shape, sequence: corners, strokes: 1, observations: aimed("pil"))
         #expect(chosen.words.first == "pill")
 
-        let slide = SequenceOutcome(
-            result: DecodeResult(readings: [.init(word: "help", score: -1)]),
-            traced: "hello"
+        let kept = ReadingPolicy.apply(
+            DecodeResult(readings: [.init(word: "hello", score: -0.2)]),
+            aimed: "hello"
         )
-        let matching = DecodeResult(readings: [.init(word: "hello", score: -0.2)])
-        let kept = BeatChooser.reading(path: matching, sequence: slide, strokes: 1, observations: aimed("hello"))
         #expect(kept.words.first == "hello")
     }
 
@@ -1047,55 +1244,69 @@ struct SwipeTypingTests {
         }
         let observations = [
             aimedStroke("t", stroke: 0, at: harness.point(for: "t"), time: 0),
-            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
             aimedStroke("a", stroke: 1, at: harness.point(for: "a"), time: 0.04),
-            aimedStroke("s", stroke: 1, at: harness.point(for: "s"), time: 0.14),
+            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
+            aimedStroke("t", stroke: 1, at: harness.point(for: "t"), time: 0.12),
+            aimedStroke("s", stroke: 1, at: harness.point(for: "s"), time: 0.16),
         ]
-        let paths = [
-            [harness.point(for: "t"), harness.point(for: "h")],
-            [harness.point(for: "a"), harness.point(for: "s")],
-        ]
-        let ranked = DecodeResult(readings: [
-            .init(word: "these", score: -1),
-            .init(word: "that's", score: -1.5),
-        ])
-        let fitted = ThumbFit.adjust(ranked, observations: observations, strokePaths: paths, layout: layout)
-        let chosen = BeatChooser.reading(
-            path: .empty,
-            sequence: SequenceOutcome(result: fitted, traced: "thas"),
-            strokes: 2,
-            observations: observations
+        let evidence = SwipeEvidence.fromObservations(observations)
+        let gesture = SwipeGesture(
+            path: [harness.point(for: "a"), harness.point(for: "t"), harness.point(for: "s")],
+            strokeCount: 2,
+            strokePaths: [
+                [harness.point(for: "t"), harness.point(for: "h")],
+                [harness.point(for: "a"), harness.point(for: "t"), harness.point(for: "s")],
+            ],
+            tracedLetters: evidence.aimedLetters,
+            observations: observations,
+            evidence: evidence
         )
-        #expect(chosen.words.first == "that's")
+        var score = PathScore()
+        let result = AlignmentSearch.decode(
+            gesture,
+            layout: layout,
+            lexicon: TestLexicon.shared,
+            personal: [],
+            bigram: LetterBigram(lexicon: TestLexicon.shared),
+            costs: .standard,
+            pathScore: &score
+        )
+        #expect(result.words.first?.lowercased() == "that's")
     }
 
-    @Test func aCloserPathBreaksACloseCallAndLeavesAClearOne() {
+    @Test func aStraightFlickPlusATapCanSpellTheCrossedLetter() {
         let harness = makeHarness()
         guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
             Issue.record("Letter layout missing")
             return
         }
-        let observations = [
-            aimedStroke("t", stroke: 0, at: harness.point(for: "t"), time: 0),
-            aimedStroke("h", stroke: 0, at: harness.point(for: "h"), time: 0.08),
-            aimedStroke("e", stroke: 1, at: harness.point(for: "e"), time: 0.12),
+        let events = [
+            SwipeEvent(time: 0, point: harness.point(for: "w"), letter: "w", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.04, point: harness.point(for: "e"), letter: "e", role: .crossing, strokeIndex: 0, distanceToCenter: 2),
+            SwipeEvent(time: 0.08, point: harness.point(for: "r"), letter: "r", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.1, point: harness.point(for: "e"), letter: "e", role: .tap, strokeIndex: -2),
         ]
-        let paths = [
-            [harness.point(for: "t"), harness.point(for: "h")],
-            [harness.point(for: "e"), harness.point(for: "e")],
-        ]
-        let close = DecodeResult(readings: [
-            .init(word: "then", score: -1),
-            .init(word: "the", score: -1.2),
-        ])
-        let fitted = ThumbFit.adjust(close, observations: observations, strokePaths: paths, layout: layout)
-        #expect(fitted.words.first == "the")
-        let clear = DecodeResult(readings: [
-            .init(word: "then", score: -1),
-            .init(word: "the", score: -3),
-        ])
-        let kept = ThumbFit.adjust(clear, observations: observations, strokePaths: paths, layout: layout)
-        #expect(kept.words.first == "then")
+        let gesture = SwipeGesture(
+            path: [harness.point(for: "w"), harness.point(for: "e"), harness.point(for: "r")],
+            strokeCount: 1,
+            strokePaths: [[harness.point(for: "w"), harness.point(for: "e"), harness.point(for: "r")]],
+            tracedLetters: "wre",
+            observations: events.filter(\.isAimed).map { event in
+                StrokeObservation(time: event.time, point: event.point, directionX: 1, directionY: 0, letter: event.letter, isTap: event.isTap, strokeIndex: event.isTap ? -1 : 0)
+            },
+            evidence: SwipeEvidence(events: events, aimedLetters: "wre")
+        )
+        var score = PathScore()
+        let result = AlignmentSearch.decode(
+            gesture,
+            layout: layout,
+            lexicon: TestLexicon.shared,
+            personal: [],
+            bigram: LetterBigram(lexicon: TestLexicon.shared),
+            costs: .standard,
+            pathScore: &score
+        )
+        #expect(result.words.contains { $0.lowercased() == "were" })
     }
 
     @Test func tappingAPreviewReadingCommitsThatWord() async throws {

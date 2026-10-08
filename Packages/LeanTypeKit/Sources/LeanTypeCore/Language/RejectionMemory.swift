@@ -96,7 +96,7 @@ final class RejectionMemory {
         var readings = result.readings
         let chosen = readings.remove(at: index)
         readings.insert(chosen, at: 0)
-        return DecodeResult(readings: readings)
+        return result.replacingReadings(readings)
     }
 
     private func trim() {

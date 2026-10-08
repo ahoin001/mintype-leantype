@@ -13,6 +13,7 @@ final class CoachHints {
     static let swipe = "swipe"
     static let twoThumb = "twoThumb"
     static let correctionUndone = "correctionUndone"
+    static let flickUp = "flickUp"
 
     private var seen: Set<String>
     private var offered: Set<String> = []
@@ -21,6 +22,14 @@ final class CoachHints {
     init(store: CoachHintStore = CoachHintStore()) {
         self.store = store
         seen = store.load()
+    }
+
+    /// Once, when the keyboard appears, if top-row flicks are on.
+    func appearanceHint(flicksEnabled: Bool) -> Hint? {
+        guard flicksEnabled else { return nil }
+        let hint = Hint(id: Self.flickUp, text: "Flick up on the top row for numbers")
+        guard !seen.contains(hint.id), offered.insert(hint.id).inserted else { return nil }
+        return hint
     }
 
     func consider(_ event: KeyboardEvent) -> Hint? {

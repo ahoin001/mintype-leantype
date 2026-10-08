@@ -19,7 +19,7 @@ struct KeyPresentation: Hashable {
     let family: KeyFamily
     let isEnabled: Bool
     let accessibilityLabel: String
-    /// The flick-down character, drawn small in the key's corner.
+    /// The flick-up digit, drawn small in the key's corner.
     var hint: String?
 }
 
@@ -31,7 +31,7 @@ enum KeyPresentationProvider {
             let shown = state.shift == .off ? character : uppercased(character)
             let role: Typography.KeyRole = character.first?.isLetter == true ? .letter : .symbol
             let hint = showsHints ? key.secondary : nil
-            let spoken = key.secondary.map { "\(shown), flick down for \($0)" } ?? shown
+            let spoken = key.secondary.map { "\(shown), flick up for \($0)" } ?? shown
             return KeyPresentation(
                 label: .text(shown, role),
                 family: .letter,

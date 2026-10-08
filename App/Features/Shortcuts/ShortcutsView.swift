@@ -10,6 +10,15 @@ struct ShortcutsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
+                PebbleSectionHeader(title: "Period")
+                PebbleCard(padding: 8) {
+                    NavigationLink {
+                        ShortcutEditorView(letter: KeyShortcuts.period)
+                    } label: {
+                        letterRow(KeyShortcuts.period)
+                    }
+                    .buttonStyle(PebblePressStyle())
+                }
                 PebbleSectionHeader(title: "Letters")
                 PebbleCard(padding: 8) {
                     VStack(spacing: 0) {
@@ -38,7 +47,7 @@ struct ShortcutsView: View {
 
     private func letterRow(_ letter: String) -> some View {
         HStack(spacing: 14) {
-            Text(letter.uppercased())
+            Text(letter == KeyShortcuts.period ? letter : letter.uppercased())
                 .font(.pebble(.headline, weight: .bold))
                 .foregroundStyle(theme.accent)
                 .frame(width: 28)
@@ -79,7 +88,7 @@ struct ShortcutEditorView: View {
         List {
             Section {
                 if items.isEmpty {
-                    Text("Holding \(letter.uppercased()) types the letter, with nothing extra.")
+                    Text(emptyDetail)
                         .font(.pebble(.subheadline))
                         .foregroundStyle(theme.subtleInk)
                         .listRowBackground(theme.surface)
@@ -94,7 +103,7 @@ struct ShortcutEditorView: View {
                     .onMove(perform: move)
                 }
             } footer: {
-                Text("The first one sits closest to the key. Hold \(letter.uppercased()), then slide.")
+                Text(footerDetail)
             }
 
             Section {
@@ -113,26 +122,41 @@ struct ShortcutEditorView: View {
 
             if isCustom {
                 Section {
-                    Button("Reset to the usual accents", role: .destructive, action: reset)
+                    Button(letter == KeyShortcuts.period ? "Reset to ? ! $" : "Reset to the usual accents", role: .destructive, action: reset)
                         .listRowBackground(theme.surface)
                 }
             }
         }
         .scrollContentBackground(.hidden)
         .pebbleScreen()
-        .navigationTitle(letter.uppercased())
+        .navigationTitle(letter == KeyShortcuts.period ? "Period" : letter.uppercased())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             EditButton()
         }
     }
 
+    private var isPeriod: Bool { letter == KeyShortcuts.period }
+
     private var items: [String] {
-        KeyShortcuts.row(
+        let row = KeyShortcuts.row(
             for: letter,
             builtIn: LayoutProvider.builtInAlternates(for: letter),
             overrides: model.settings.keyShortcuts
         )
+        // The period stays pinned nearest the key, so the editor only lists the marks beside it.
+        if isPeriod { return row.filter { $0 != KeyShortcuts.period } }
+        return row
+    }
+
+    private var emptyDetail: String {
+        if isPeriod { return "Holding period types a period, with nothing extra." }
+        return "Holding \(letter.uppercased()) types the letter, with nothing extra."
+    }
+
+    private var footerDetail: String {
+        if isPeriod { return "Period stays under your finger. These sit beside it. Hold, then slide." }
+        return "The first one sits closest to the key. Hold \(letter.uppercased()), then slide."
     }
 
     private var isCustom: Bool {
@@ -165,9 +189,10 @@ struct ShortcutEditorView: View {
         model.settings.keyShortcuts.removeValue(forKey: letter)
     }
 
-    /// Saves the row, or drops the override when it matches the built-in accents again.
+    /// Saves the row, or drops the override when it matches the built-in row again.
+    /// A period edit stores the full row, with the period pinned first.
     private func write(_ row: [String]) {
-        let normalized = KeyShortcuts.normalized(row)
+        let normalized = isPeriod ? KeyShortcuts.pinnedPeriod(row) : KeyShortcuts.normalized(row)
         if normalized == LayoutProvider.builtInAlternates(for: letter) {
             model.settings.keyShortcuts.removeValue(forKey: letter)
         } else {

@@ -251,6 +251,11 @@ final class WordAssistant {
     /// Returns whether the leading word changed.
     @discardableResult
     func showPreview(_ result: DecodeResult) -> Bool {
+        if result.withdrawsPreview {
+            guard preview != nil || chosenPreview != nil else { return false }
+            clearPreview()
+            return true
+        }
         guard !result.isEmpty else { return false }
         let ordered = placingChoice(on: result)
         let previous = preview?.readings.first?.word
@@ -282,7 +287,7 @@ final class WordAssistant {
         let chosen = readings.remove(at: index)
         let top = result.readings[0].score
         readings.insert(DecodeResult.Reading(word: chosen.word, score: top + 0.01), at: 0)
-        return DecodeResult(readings: readings)
+        return result.replacingReadings(readings)
     }
 
     var isPreviewing: Bool { preview != nil }

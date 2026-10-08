@@ -29,22 +29,50 @@ struct QualityOfLifeTests {
         #expect(harness.text == "Hi. A")
     }
 
-    @Test func slidingThePeriodKeyInsertsAComma() throws {
+    @Test func holdingPeriodStartsOnPeriodAndCanInsertDollar() throws {
         let harness = EngineHarness(traits: Self.plain)
         harness.type("hi")
         let origin = harness.point(for: ".")
         let id = harness.down(at: origin)
-        harness.move(id, by: CGVector(dx: -(CharacterTapSession.markSlideDistance + 2), dy: 0), over: 0.06, steps: 2)
-        guard case let .alternates(marks, _) = harness.state.interaction.callout?.content else {
-            Issue.record("Sliding the period key should open marks")
+        harness.wait(CharacterTapSession.longPressDelay + 0.05)
+        guard case let .alternates(marks, selected) = harness.state.interaction.callout?.content else {
+            Issue.record("Holding the period key should open its marks")
             return
         }
-        #expect(marks == [".", ",", "?", "!"])
-        let comma = try #require(marks.firstIndex(of: ","))
-        let frame = try #require(harness.state.interaction.callout?.layout.optionFrames[comma])
+        #expect(marks == [".", "?", "!", "$"])
+        #expect(selected == 0)
+        let dollar = try #require(marks.firstIndex(of: "$"))
+        let frame = try #require(harness.state.interaction.callout?.layout.optionFrames[dollar])
         harness.move(id, to: CGPoint(x: frame.midX, y: origin.y), over: 0.05)
         harness.up(id)
-        #expect(harness.text == "hi, ")
+        #expect(harness.text == "hi$")
+    }
+
+    @Test func holdingArmsTheRowAndReleasingEndsIt() {
+        let harness = EngineHarness(traits: Self.plain)
+        let id = harness.down(at: harness.point(for: "."))
+        #expect(harness.recorder.events.contains { if case .holdArmed = $0 { true } else { false } })
+        harness.wait(CharacterTapSession.longPressDelay + 0.05)
+        #expect(harness.recorder.events.contains(.alternatesPresented))
+        harness.up(id)
+        #expect(harness.recorder.events.contains(.holdEnded))
+    }
+
+    @Test func aKeyWithoutAHoldRowDoesNotArm() {
+        let harness = EngineHarness(traits: Self.plain)
+        let id = harness.down(at: harness.point(for: "q"))
+        harness.up(id)
+        let armed = harness.recorder.events.contains { if case .holdArmed = $0 { true } else { false } }
+        #expect(!armed)
+    }
+
+    @Test func releasingAPeriodHoldTypesPeriod() {
+        let harness = EngineHarness(traits: Self.plain)
+        harness.type("hi")
+        let id = harness.down(at: harness.point(for: "."))
+        harness.wait(CharacterTapSession.longPressDelay + 0.05)
+        harness.up(id)
+        #expect(harness.text == "hi. ")
     }
 
     @Test func apostropheStaysInsideTheWord() {
@@ -93,12 +121,31 @@ struct QualityOfLifeTests {
         #expect(harness.text == " ")
     }
 
-    @Test func flickDownTypesSecondary() {
+    @Test func flickUpTypesTheTopRowDigit() {
         let harness = EngineHarness(traits: Self.plain)
         let id = harness.down(at: harness.point(for: "q"))
-        harness.move(id, by: CGVector(dx: 1, dy: CharacterTapSession.flickDistance + 4), over: 0.06)
+        harness.move(id, by: CGVector(dx: 1, dy: -(CharacterTapSession.flickDistance + 4)), over: 0.06)
         harness.up(id)
         #expect(harness.text == "1")
+    }
+
+    @Test func flickUpPastTheKeyStillTypesTheDigit() {
+        let harness = EngineHarness(traits: Self.plain)
+        let id = harness.down(at: harness.point(for: "q"))
+        harness.move(id, by: CGVector(dx: 1, dy: -40), over: 0.08)
+        #expect(harness.state.interaction.callout?.content == .preview("1"))
+        #expect(harness.state.interaction.callout?.growsFromKey == true)
+        #expect(harness.state.interaction.strokes.isEmpty)
+        harness.up(id)
+        #expect(harness.text == "1")
+    }
+
+    @Test func aLowerRowHasNoFlickCharacter() {
+        let harness = EngineHarness(traits: Self.plain)
+        let id = harness.down(at: harness.point(for: "a"))
+        harness.move(id, by: CGVector(dx: 0, dy: -(CharacterTapSession.flickDistance + 4)), over: 0.06)
+        harness.up(id)
+        #expect(harness.text == "a")
     }
 
     @Test func slowDownwardDragIsNotAFlick() {
@@ -113,7 +160,7 @@ struct QualityOfLifeTests {
     @Test func flickCanBeTurnedOff() {
         let harness = EngineHarness(settings: KeyboardSettings(flickForSecondaryEnabled: false), traits: Self.plain)
         let id = harness.down(at: harness.point(for: "q"))
-        harness.move(id, by: CGVector(dx: 0, dy: CharacterTapSession.flickDistance + 4), over: 0.06)
+        harness.move(id, by: CGVector(dx: 0, dy: -(CharacterTapSession.flickDistance + 4)), over: 0.06)
         harness.up(id)
         #expect(harness.text != "1")
     }
@@ -176,14 +223,30 @@ struct QualityOfLifeTests {
         harness.up(id)
     }
 
+    @Test func returnSendsTheKeyLabel() {
+        let harness = EngineHarness(text: "hi")
+        harness.tap(.returnKey)
+        let sent = harness.recorder.events.contains { event in
+            if case let .returnSent(title, frame) = event {
+                title == "return" && frame.width > 1
+            } else {
+                false
+            }
+        }
+        #expect(sent)
+        #expect(harness.text.hasSuffix("\n"))
+    }
+
     @Test func holdingBackspaceEscalates() {
         let text = String(repeating: "Some words here. ", count: 30)
         let harness = EngineHarness(text: text, settings: KeyboardSettings(backspaceTapAction: .deleteCharacter))
         let id = harness.down(at: harness.point(for: .backspace))
         harness.wait(BackspaceSession.holdDelay + 2 * BackspaceSession.escalationDelay + 1)
         harness.up(id)
-        let escalations = harness.recorder.count { $0 == .deleteEscalated }
-        #expect(escalations == 2, "Characters, then words, then sentences")
+        let escalations = harness.recorder.events.compactMap { event -> DeleteGear? in
+            if case let .deleteEscalated(gear) = event { gear } else { nil }
+        }
+        #expect(escalations == [.word, .sentence])
         #expect(harness.text.count < text.count - 40)
     }
 

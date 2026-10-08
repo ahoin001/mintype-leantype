@@ -346,7 +346,7 @@ final class WordContext {
             DecodeResult.Reading(word: chosen.word, score: top.score + 0.01),
             at: 0
         )
-        return DecodeResult(readings: readings)
+        return result.replacingReadings(readings)
     }
 
     private func rank(of word: String, in followers: [(word: String, rank: (Int, Date), margin: Double)]) -> (Int, Date) {

@@ -35,6 +35,8 @@ final class KeyboardTouchView: UIView {
     private var pressedIDs: Set<KeyID> = []
     private var flowValue = 0.0
     private var flowEffectsEnabled = false
+    /// The layer last laid out, so a switch can bring the new labels in by row.
+    private var shownLayer: KeyboardLayer?
     private let flowRim = CAShapeLayer()
     private let rimHost = UIView()
 
@@ -59,7 +61,9 @@ final class KeyboardTouchView: UIView {
 
     // MARK: - Applying engine output
 
-    func apply(geometry newGeometry: KeyboardGeometry) {
+    func apply(geometry newGeometry: KeyboardGeometry, travels: Bool) {
+        let layerChanged = shownLayer != nil && shownLayer != newGeometry.layout.layer
+        shownLayer = newGeometry.layout.layer
         geometry = newGeometry
         style = newGeometry.metrics.isCompact ? .compactPebble : .pebble
         let ids = newGeometry.keys.map(\.id)
@@ -80,6 +84,20 @@ final class KeyboardTouchView: UIView {
         globeKeyID = newGeometry.keys.first { $0.key.kind == .nextKeyboard }?.id
         rebuildAccessibilityElements()
         render()
+        if layerChanged, travels {
+            arrive(in: newGeometry)
+        }
+    }
+
+    /// New labels settle from a slightly smaller size, one row after another.
+    /// Shift and caps never come through here; they only change a label in place.
+    private func arrive(in geometry: KeyboardGeometry) {
+        for row in geometry.rows.enumerated() {
+            let delay = TimeInterval(row.offset) * Motion.rowStagger
+            for frame in row.element {
+                viewPool[frame.id]?.arrive(after: delay)
+            }
+        }
     }
 
     /// Flow from the engine. The rim only appears once typing has a rhythm and effects are on.
@@ -215,7 +233,8 @@ final class KeyboardTouchView: UIView {
                 isSuggested: suggested.contains(frame.id),
                 isEnabled: presentation.isEnabled,
                 isCompact: compact,
-                hint: presentation.hint
+                hint: presentation.hint,
+                trackpadOpen: frame.key.kind == .space && state.interaction.isTrackpadActive
             )
         }
         calloutView.apply(theme: theme, style: style, isCompact: compact)

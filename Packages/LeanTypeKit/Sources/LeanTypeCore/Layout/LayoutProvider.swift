@@ -170,12 +170,10 @@ public enum LayoutProvider {
 
     // MARK: - Flick secondaries (letters layer)
 
-    /// Digits across the top row, the most common symbols below, in roughly the positions
-    /// they occupy on the numbers page so the two feel related.
+    /// Digits across the top row, in the same order as the numbers page. Lower rows have no
+    /// corner mark: a flick there would travel through other letters and become a swipe.
     static let secondaries: [String: String] = [
         "q": "1", "w": "2", "e": "3", "r": "4", "t": "5", "y": "6", "u": "7", "i": "8", "o": "9", "p": "0",
-        "a": "@", "s": "#", "d": "$", "f": "&", "g": "-", "h": "(", "j": ")", "k": "'", "l": "\"",
-        "z": "%", "x": "*", "c": "+", "v": "=", "b": "/", "n": ";", "m": ":",
     ]
 
     /// Accents and symbols a hold offers before the user edits that key.
@@ -203,7 +201,7 @@ public enum LayoutProvider {
         "$": ["¢", "€", "£", "¥", "₩"],
         "&": ["§"],
         "\"": ["“", "”", "„", "«", "»"],
-        ".": ["…"],
+        ".": [".", "?", "!", "$"],
         "?": ["¿"],
         "!": ["¡"],
         "'": ["‘", "’", "`"],

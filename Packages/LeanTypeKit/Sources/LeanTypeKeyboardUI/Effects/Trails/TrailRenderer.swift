@@ -1,13 +1,14 @@
 import LeanTypeCore
 import UIKit
 
-/// Draws the trail behind each swiping finger.
+/// Draws the ring around each swiping finger and the trail that leaves from behind it.
 ///
+/// The contact itself stays empty: a fingertip would hide anything drawn there. A ring clears
+/// the finger, a bead sits on the trailing rim, and the trail runs backward from that bead.
 /// Every touch keeps its last few dozen points in a fixed ring buffer, so when a finger turns
 /// into a stroke its trail appears with the path it already drew. A display link runs only
-/// while at least one trail is live. Theme and Prism are a tapered ribbon. Comet is a bright
-/// head with a short tail of beads. Brush is a stroke whose width follows how fast the finger
-/// moves. When the finger lifts, the trail collapses into the suggestion bar.
+/// while at least one trail is live. When the finger lifts, the ring and the trail collapse
+/// into the suggestion bar. Reduce Motion draws the ring alone.
 @MainActor
 final class TrailRenderer {
     nonisolated static let pointCapacity = 64
@@ -19,10 +20,29 @@ final class TrailRenderer {
     static let collapseDuration: CFTimeInterval = 0.26
     static let cometBeads = 12
 
+    private struct Glint {
+        var location: CGPoint
+        var birth: CFTimeInterval
+        var spin: CGFloat
+    }
+
+    private struct Spark {
+        var location: CGPoint
+        var birth: CFTimeInterval
+    }
+
     private struct Trail {
         let shape: CAShapeLayer
         let gradient: CAGradientLayer?
         let style: EffectsSettings.TrailStyle
+        var center: CGPoint?
+        var glints: [Glint] = []
+        var sparks: [Spark] = []
+        var lastHeading: CGFloat?
+        var lastSampleTime: Double = 0
+        var arrivals: Int = 0
+        /// 0 on a straight run, 1 through a turn. Prism rings spread with it.
+        var split: CGFloat = 0
         var root: CALayer { gradient ?? shape }
     }
 
@@ -38,12 +58,13 @@ final class TrailRenderer {
     /// Scratch edges for building ribbons, so frames don't allocate.
     private var leftEdge: [CGPoint] = []
     private var rightEdge: [CGPoint] = []
+    private var sampleBuffer: [FingerJewel.Sample] = []
 
     var level: EffectsLevel = .full {
         didSet { if level == .off { endAll(animated: false) } }
     }
 
-    var style: EffectsSettings.TrailStyle = .theme
+    var style: EffectsSettings.TrailStyle = .lantern
     var palette: EffectPalette
     var intensity: CGFloat = 1
 
@@ -110,6 +131,7 @@ final class TrailRenderer {
         shape.shadowRadius = 0
         shape.shadowPath = nil
         shape.fillColor = color.withAlphaComponent(0.85).cgColor
+        shape.fillRule = .evenOdd
 
         var gradient: CAGradientLayer?
         switch style {
@@ -129,13 +151,13 @@ final class TrailRenderer {
             shape.shadowRadius = 12
             shape.shadowOpacity = 0.9
             shape.shadowOffset = .zero
-        case .brush:
+        case .silk:
             shape.fillColor = color.withAlphaComponent(0.78).cgColor
             shape.strokeColor = palette.shifted(by: hueOffset + 0.06).withAlphaComponent(0.5).cgColor
             shape.lineWidth = 1.4
             shape.lineJoin = .round
             shape.lineCap = .round
-        case .theme:
+        case .lantern, .constellation, .ember:
             break
         }
 
@@ -207,32 +229,214 @@ final class TrailRenderer {
     private func render() {
         let interval = Signposts.effects.beginInterval("Trail frame")
         defer { Signposts.effects.endInterval("Trail frame", interval) }
+        guard level > .off else { return }
         let now = CACurrentMediaTime()
-        for (id, trail) in trails {
-            let life = trail.style == .comet ? Self.cometLifetime : Self.lifetime
+        let ringOnly = level < .full
+        for id in Array(trails.keys) {
+            let life = trails[id]?.style == .comet ? Self.cometLifetime : Self.lifetime
             histories[id]?.dropOlder(than: now - life)
-            guard let points = histories[id] else {
-                trail.shape.path = nil
-                trail.shape.shadowPath = nil
+            guard var trail = trails[id], let points = histories[id], points.count > 0 else {
+                trails[id]?.shape.path = nil
+                trails[id]?.shape.shadowPath = nil
                 continue
             }
-            switch trail.style {
-            case .theme, .prism:
-                trail.shape.path = ribbon(through: points, now: now)
-                trail.shape.shadowPath = nil
-            case .comet:
-                let drawn = comet(through: points, now: now)
-                trail.shape.path = drawn.path
-                trail.shape.shadowPath = drawn.head
-            case .brush:
-                trail.shape.path = brush(through: points, now: now)
-                trail.shape.shadowPath = nil
+            let contact = points[points.count - 1].location
+            let velocity = velocity(of: points)
+            let jewel = FingerJewel.place(
+                contact: contact,
+                previousCenter: trail.center,
+                velocity: velocity,
+                intensity: intensity
+            )
+            trail.center = jewel.center
+            let turned = noteHeading(on: &trail, points: points)
+            let visible = visibleSamples(from: points, jewel: jewel)
+            if !ringOnly {
+                noteParticles(on: &trail, points: points, jewel: jewel, turned: turned, now: now)
             }
+
+            let path = CGMutablePath()
+            var head: CGPath?
+            if !ringOnly {
+                switch trail.style {
+                case .lantern:
+                    if let ribbon = ribbon(through: visible, now: now) { path.addPath(ribbon) }
+                case .comet:
+                    let drawn = comet(through: visible, now: now)
+                    if let beads = drawn.path { path.addPath(beads) }
+                    head = drawn.head
+                case .prism:
+                    if let ribbon = ribbon(through: visible, now: now) { path.addPath(ribbon) }
+                case .constellation:
+                    addStars(trail.glints, now: now, to: path)
+                case .ember:
+                    addSparks(trail.sparks, now: now, to: path)
+                case .silk:
+                    if let silk = silkRibbon(through: visible, now: now) { path.addPath(silk) }
+                }
+            }
+            let breath: CGFloat = (!ringOnly && trail.style == .lantern) ? 1.6 * CGFloat(sin(now * 3.2)) : 0
+            addRings(for: trail.style, jewel: jewel, split: trail.split, breath: breath, to: path)
+            if !ringOnly, trail.style != .comet {
+                let bead = beadPath(at: jewel.bead, style: trail.style)
+                path.addPath(bead)
+                head = bead
+            }
+            trail.shape.path = path
+            trail.shape.shadowPath = trail.style == .comet ? head : nil
+            trails[id] = trail
         }
     }
 
-    /// Beads along the recent path, small at the tail and a glowing head under the finger.
-    private func comet(through points: TrailPoints, now: CFTimeInterval) -> (path: CGPath?, head: CGPath?) {
+    private func velocity(of points: TrailPoints) -> CGVector {
+        guard points.count >= 2 else { return .zero }
+        let last = points[points.count - 1]
+        let previous = points[points.count - 2]
+        let elapsed = max(last.time - previous.time, 1.0 / 120)
+        return CGVector(
+            dx: (last.location.x - previous.location.x) / CGFloat(elapsed),
+            dy: (last.location.y - previous.location.y) / CGFloat(elapsed)
+        )
+    }
+
+    private func visibleSamples(from points: TrailPoints, jewel: FingerJewel) -> [FingerJewel.Sample] {
+        sampleBuffer.removeAll(keepingCapacity: true)
+        sampleBuffer.reserveCapacity(points.count)
+        for index in 0..<points.count {
+            let point = points[index]
+            sampleBuffer.append(FingerJewel.Sample(location: point.location, time: point.time))
+        }
+        return FingerJewel.visibleTrail(
+            samples: sampleBuffer,
+            center: jewel.center,
+            radius: jewel.radius,
+            bead: jewel.bead,
+            drawsTrail: jewel.drawsTrail
+        )
+    }
+
+    /// Remembers the heading and eases `split` open through a turn.
+    private func noteHeading(on trail: inout Trail, points: TrailPoints) -> Bool {
+        guard points.count >= 2 else { return false }
+        let latest = points[points.count - 1].location
+        let earlier = points[points.count - 2].location
+        let heading = atan2(latest.y - earlier.y, latest.x - earlier.x)
+        var turned = false
+        if let last = trail.lastHeading {
+            var delta = abs(heading - last)
+            if delta > .pi { delta = 2 * .pi - delta }
+            turned = delta > 0.4
+            let target: CGFloat = delta > 0.25 ? 1 : 0
+            trail.split += (target - trail.split) * 0.35
+        }
+        trail.lastHeading = heading
+        return turned
+    }
+
+    private func noteParticles(
+        on trail: inout Trail,
+        points: TrailPoints,
+        jewel: FingerJewel,
+        turned: Bool,
+        now: CFTimeInterval
+    ) {
+        let life: CFTimeInterval = 0.45
+        trail.glints.removeAll { now - $0.birth > life }
+        trail.sparks.removeAll { now - $0.birth > life }
+        guard jewel.drawsTrail, points.count >= 2 else { return }
+        let newest = points[points.count - 1].time
+        let grew = newest != trail.lastSampleTime
+        if grew {
+            trail.lastSampleTime = newest
+            trail.arrivals += 1
+        }
+        let periodic = grew && trail.arrivals.isMultiple(of: 6)
+        if trail.style == .constellation, grew, (turned || periodic), trail.glints.count < FingerJewel.glintLimit(intensity: intensity) {
+            let spin = trail.lastHeading ?? 0
+            trail.glints.append(Glint(location: jewel.bead, birth: now, spin: spin))
+        }
+        if trail.style == .ember, grew, (turned || trail.arrivals.isMultiple(of: 3)), trail.sparks.count < FingerJewel.sparkLimit(intensity: intensity) {
+            trail.sparks.append(Spark(location: jewel.bead, birth: now))
+        }
+    }
+
+    private func addRings(
+        for style: EffectsSettings.TrailStyle,
+        jewel: FingerJewel,
+        split: CGFloat,
+        breath: CGFloat,
+        to path: CGMutablePath
+    ) {
+        let radius = jewel.radius + breath
+        if style == .prism {
+            let spread = 2.4 * min(max(split, 0), 1)
+            for offset in [-spread, 0, spread] {
+                let center = CGPoint(
+                    x: jewel.center.x + jewel.direction.dx * offset,
+                    y: jewel.center.y + jewel.direction.dy * offset
+                )
+                addRing(center: center, radius: radius, thickness: 1.5, to: path)
+            }
+        } else {
+            let thickness: CGFloat = style == .lantern ? 2.6 : 2.2
+            addRing(center: jewel.center, radius: radius, thickness: thickness, to: path)
+        }
+    }
+
+    /// A filled band, so the center of the ring stays empty under an even-odd fill.
+    private func addRing(center: CGPoint, radius: CGFloat, thickness: CGFloat, to path: CGMutablePath) {
+        let outer = max(radius, thickness + 1)
+        let inner = max(outer - thickness, 1)
+        path.addEllipse(in: CGRect(x: center.x - outer, y: center.y - outer, width: outer * 2, height: outer * 2))
+        path.addEllipse(in: CGRect(x: center.x - inner, y: center.y - inner, width: inner * 2, height: inner * 2))
+    }
+
+    private func beadPath(at point: CGPoint, style: EffectsSettings.TrailStyle) -> CGPath {
+        let scale = min(max(intensity, 0.7), 1.25)
+        let radius: CGFloat
+        switch style {
+        case .ember: radius = 7
+        case .silk, .prism: radius = 4.5
+        case .constellation, .lantern: radius = 5.2
+        case .comet: radius = 8
+        }
+        let size = radius * scale
+        return CGPath(ellipseIn: CGRect(x: point.x - size, y: point.y - size, width: size * 2, height: size * 2), transform: nil)
+    }
+
+    private func addStars(_ glints: [Glint], now: CFTimeInterval, to path: CGMutablePath) {
+        for glint in glints {
+            let age = CGFloat(min(max((now - glint.birth) / 0.45, 0), 1))
+            let radius = (7.5 * (1 - age) + 1.2) * min(max(intensity, 0.7), 1.25)
+            guard radius > 0.8 else { continue }
+            addStar(at: glint.location, radius: radius, rotation: glint.spin + age * 0.6, to: path)
+        }
+    }
+
+    private func addStar(at center: CGPoint, radius: CGFloat, rotation: CGFloat, to path: CGMutablePath) {
+        let inner = radius * 0.38
+        for index in 0..<8 {
+            let angle = rotation + CGFloat(index) * .pi / 4
+            let reach = index.isMultiple(of: 2) ? radius : inner
+            let point = CGPoint(x: center.x + cos(angle) * reach, y: center.y + sin(angle) * reach)
+            if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        path.closeSubpath()
+    }
+
+    private func addSparks(_ sparks: [Spark], now: CFTimeInterval, to path: CGMutablePath) {
+        let scale = min(max(intensity, 0.7), 1.25)
+        for spark in sparks {
+            let age = CGFloat(min(max((now - spark.birth) / 0.45, 0), 1))
+            let radius = (3.4 * (1 - age) + 0.4) * scale
+            guard radius > 0.4 else { continue }
+            let center = CGPoint(x: spark.location.x, y: spark.location.y - age * 36)
+            path.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+        }
+    }
+
+    /// Beads along the path that has already left the ring. The last bead is the rim, not the contact.
+    private func comet(through points: [FingerJewel.Sample], now: CFTimeInterval) -> (path: CGPath?, head: CGPath?) {
         let count = points.count
         guard count >= 1 else { return (nil, nil) }
         let path = CGMutablePath()
@@ -245,7 +449,7 @@ final class TrailRenderer {
             let progress = CGFloat(bead) / CGFloat(max(beads - 1, 1))
             let freshness = CGFloat(max(0, 1 - (now - point.time) / Self.cometLifetime))
             let isHead = bead == beads - 1
-            let radius = (isHead ? 7.5 : 1.4 + 3.6 * progress) * (isHead ? 1 : max(freshness, 0.35)) * scale
+            let radius = (isHead ? 8 : 1.4 + 3.6 * progress) * (isHead ? 1 : max(freshness, 0.35)) * scale
             guard radius > 0.5 else { continue }
             let beadPath = CGPath(ellipseIn: CGRect(
                 x: point.location.x - radius,
@@ -259,10 +463,10 @@ final class TrailRenderer {
         return (path.isEmpty ? nil : path, head)
     }
 
-    /// The ribbon's width follows speed, with a fainter copy lagging a few samples behind.
-    private func brush(through points: TrailPoints, now: CFTimeInterval) -> CGPath? {
-        guard let body = ribbon(through: points, now: now, kind: .brush) else { return nil }
-        guard let echo = ribbon(through: points, now: now, kind: .brush, lag: 3, widthScale: 0.62) else { return body }
+    /// Two copies of the stroke, a few samples apart, so a turn folds behind the finger.
+    private func silkRibbon(through points: [FingerJewel.Sample], now: CFTimeInterval) -> CGPath? {
+        guard let body = ribbon(through: points, now: now, kind: .silk) else { return nil }
+        guard let echo = ribbon(through: points, now: now, kind: .silk, lag: 3, widthScale: 0.62) else { return body }
         let path = CGMutablePath()
         path.addPath(body)
         path.addPath(echo)
@@ -271,11 +475,11 @@ final class TrailRenderer {
 
     private enum RibbonKind {
         case taper
-        case brush
+        case silk
     }
 
     private func ribbon(
-        through points: TrailPoints,
+        through points: [FingerJewel.Sample],
         now: CFTimeInterval,
         kind: RibbonKind = .taper,
         lag: Int = 0,
@@ -305,7 +509,7 @@ final class TrailRenderer {
             switch kind {
             case .taper:
                 half = Self.maximumWidth * 0.5 * scale * pow(progress, 0.7) * (0.35 + 0.65 * freshness) * widthScale
-            case .brush:
+            case .silk:
                 let earlier = points[max(source - 1, 0)]
                 let dt = max(point.time - earlier.time, 1.0 / 90)
                 let speed = hypot(point.location.x - earlier.location.x, point.location.y - earlier.location.y) / CGFloat(dt)

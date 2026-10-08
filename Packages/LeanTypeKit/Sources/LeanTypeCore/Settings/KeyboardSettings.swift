@@ -5,6 +5,14 @@ public enum BackspaceTapAction: String, Codable, Sendable, CaseIterable {
     case deleteCharacter
 }
 
+/// When a swipe becomes a finished word.
+public enum SwipeCommitMode: String, Codable, Sendable, CaseIterable {
+    /// The word lands on lift. A short leash can still absorb the next letter.
+    case lift
+    /// Beats stay one word until space, return, or an edit from outside the keyboard.
+    case explicitSpace
+}
+
 /// How letter keys interpret touches.
 public enum TypingModeSetting: String, Codable, Sendable, CaseIterable {
     /// Every touch is a tap.
@@ -53,22 +61,50 @@ public struct EffectsSettings: Codable, Sendable, Equatable {
         }
     }
 
+    /// A ring around the finger and the trail that leaves from the bead behind it.
     public enum TrailStyle: String, Codable, Sendable, CaseIterable {
-        /// A tapered ribbon in the theme's accent.
-        case theme
-        /// The ribbon, in a rainbow.
+        /// A breathing ring and a short accent ribbon.
+        case lantern
+        /// Three thin rings and a rainbow ribbon.
         case prism
-        /// A bright head with a tail of soft beads.
+        /// A bright bead on the rim and a tail of soft beads.
         case comet
-        /// A stroke that thickens when the finger slows down.
-        case brush
+        /// Glints sparking off the trailing bead.
+        case constellation
+        /// A coal on the rim and sparks that drift upward.
+        case ember
+        /// A pearl on the rim and a ribbon whose edges lag apart.
+        case silk
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            switch raw {
+            case "theme", "lantern": self = .lantern
+            case "brush", "silk": self = .silk
+            case "prism": self = .prism
+            case "comet": self = .comet
+            case "constellation": self = .constellation
+            case "ember": self = .ember
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Unknown swipe look \(raw)"
+                )
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
     }
 
     public var intensity: Intensity
     public var trailStyle: TrailStyle
     public var celebrateMilestones: Bool
 
-    public init(intensity: Intensity = .lively, trailStyle: TrailStyle = .theme, celebrateMilestones: Bool = true) {
+    public init(intensity: Intensity = .lively, trailStyle: TrailStyle = .lantern, celebrateMilestones: Bool = true) {
         self.intensity = intensity
         self.trailStyle = trailStyle
         self.celebrateMilestones = celebrateMilestones
@@ -115,6 +151,8 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     /// A quick tap can still lengthen a word that just landed, when the letters spell a longer word.
     /// A swipe that is already its own word always starts the next word.
     public var extendFinishedWords: Bool
+    /// Lift commits the word and starts a leash. Explicit space keeps one word open until space.
+    public var swipeCommitMode: SwipeCommitMode
     /// Remember words the dictionary doesn't know. Only takes effect with Full Access.
     public var learnWordsEnabled: Bool
     public var height: KeyboardHeight
@@ -139,6 +177,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         suggestionsEnabled: Bool = true,
         autocorrectEnabled: Bool = true,
         extendFinishedWords: Bool = true,
+        swipeCommitMode: SwipeCommitMode = .lift,
         learnWordsEnabled: Bool = true,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
@@ -160,6 +199,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.suggestionsEnabled = suggestionsEnabled
         self.autocorrectEnabled = autocorrectEnabled
         self.extendFinishedWords = extendFinishedWords
+        self.swipeCommitMode = swipeCommitMode
         self.learnWordsEnabled = learnWordsEnabled
         self.height = height
         self.oneHandedMode = oneHandedMode
@@ -185,6 +225,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case suggestionsEnabled
         case autocorrectEnabled
         case extendFinishedWords
+        case swipeCommitMode
         case learnWordsEnabled
         case height
         case oneHandedMode
@@ -214,6 +255,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         suggestionsEnabled = lenient.value(.suggestionsEnabled, defaults.suggestionsEnabled)
         autocorrectEnabled = lenient.value(.autocorrectEnabled, defaults.autocorrectEnabled)
         extendFinishedWords = lenient.value(.extendFinishedWords, defaults.extendFinishedWords)
+        swipeCommitMode = lenient.value(.swipeCommitMode, defaults.swipeCommitMode)
         learnWordsEnabled = lenient.value(.learnWordsEnabled, defaults.learnWordsEnabled)
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)

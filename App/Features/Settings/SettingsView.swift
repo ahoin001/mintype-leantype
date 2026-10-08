@@ -33,9 +33,9 @@ struct SettingsView: View {
                     )
                     PebbleDivider()
                     PebbleToggleRow(
-                        systemImage: "arrow.down.to.line",
+                        systemImage: "arrow.up.to.line",
                         title: "Flick for numbers",
-                        detail: "Flick down on a letter for the character in its corner.",
+                        detail: "Flick up on the top row for the digit in the corner.",
                         isOn: $model.settings.flickForSecondaryEnabled
                     )
                     if model.settings.flickForSecondaryEnabled {
@@ -43,7 +43,7 @@ struct SettingsView: View {
                         PebbleToggleRow(
                             systemImage: "textformat.superscript",
                             title: "Show corner hints",
-                            detail: "The small characters on each key.",
+                            detail: "The small digits on the top row.",
                             isOn: $model.settings.secondaryHintsVisible
                         )
                     }
@@ -102,6 +102,18 @@ struct SettingsView: View {
                         detail: "A quick tap can still turn the into then. A full swipe is always the next word.",
                         isOn: $model.settings.extendFinishedWords
                     )
+                    if model.settings.typingMode == .swipe {
+                        PebbleDivider()
+                        PebblePickerRow(
+                            systemImage: "space",
+                            title: "End a swipe",
+                            detail: model.settings.swipeCommitMode == .lift
+                                ? "The word lands when you lift. A short pause can still add a letter."
+                                : "Several swipes stay one word until you press space.",
+                            selection: $model.settings.swipeCommitMode,
+                            options: [("On lift", .lift), ("On space", .explicitSpace)]
+                        )
+                    }
                     PebbleDivider()
                     PebbleToggleRow(
                         systemImage: "wand.and.sparkles",
@@ -212,9 +224,9 @@ struct SettingsView: View {
     private var shortcutDetail: String {
         let count = model.settings.keyShortcuts.count
         if count == 0 {
-            return "Hold a letter, then slide to an accent or a shortcut you add."
+            return "Hold a letter for accents, or period for ? ! $."
         }
-        return count == 1 ? "1 letter customized." : "\(count) letters customized."
+        return count == 1 ? "1 key customized." : "\(count) keys customized."
     }
 
     private var flairDetail: String {

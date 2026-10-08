@@ -36,22 +36,25 @@ struct FlairView: View {
                     PebbleDivider()
                     VStack(alignment: .leading, spacing: 14) {
                         effect(
-                            "scribble.variable",
-                            title: "Swipe trail",
-                            detail: "A ribbon follows your finger through a word, then folds into the bar above the keys when you lift. Each thumb keeps its own color."
+                            "smallcircle.filled.circle",
+                            title: "Swipe",
+                            detail: "A ring sits around your finger, where the touch itself would hide a glow. The trail leaves from the bright point behind that ring, then folds into the bar when you lift. Each thumb keeps its own color."
                         )
                         PebbleOptionTiles(
-                            title: "Swipe trail color",
+                            title: "Swipe look",
                             selection: $model.settings.effects.trailStyle,
                             options: [
-                                .init(label: "Theme", systemImage: "paintbrush.pointed", value: .theme),
+                                .init(label: "Lantern", systemImage: "circle.circle", value: .lantern),
+                                .init(label: "Comet", systemImage: "sparkle", value: .comet),
                                 .init(label: "Prism", systemImage: "rainbow", value: .prism),
-                            ]
+                                .init(label: "Stars", systemImage: "sparkles", value: .constellation),
+                                .init(label: "Ember", systemImage: "flame", value: .ember),
+                                .init(label: "Silk", systemImage: "scribble.variable", value: .silk),
+                            ],
+                            columns: 3
                         )
                         .disabled(!effectsOn)
-                        note(model.settings.effects.trailStyle == .prism
-                            ? "Prism shifts the ribbon through the rainbow."
-                            : "Theme uses this keyboard’s accent color.")
+                        note(swipeLookDetail)
                     }
                     PebbleDivider()
                     effect(
@@ -95,7 +98,7 @@ struct FlairView: View {
                         title: "Caps lock",
                         detail: "A ring settles around shift and stays until caps lock turns off."
                     )
-                    note("Low Power Mode, Reduce Motion, or a warm phone keep the rhythm glow, the caps-lock ring, and swipe trails. Ripples, bursts, and the space-bar comet pause.")
+                    note("Low Power Mode, Reduce Motion, or a warm phone keep the rhythm glow, the caps-lock ring, and the ring around a swiping finger. The swipe trail, ripples, bursts, and the space-bar comet pause.")
                     note("A very hot phone turns all of it off. After a memory warning, effects return the next time the keyboard opens.")
                 }
             }
@@ -106,6 +109,17 @@ struct FlairView: View {
         .pebbleScreen()
         .navigationTitle("Flair")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var swipeLookDetail: String {
+        switch model.settings.effects.trailStyle {
+        case .lantern: "A quiet ring in this keyboard’s accent, with a short ribbon behind it."
+        case .comet: "A bright bead on the ring, and a tail of soft beads."
+        case .prism: "Three thin rings and a rainbow ribbon. The rings spread when you turn."
+        case .constellation: "Glints spark off the bead behind your finger."
+        case .ember: "A coal on the ring. Sparks drift up off the path."
+        case .silk: "A pearl on the ring, and a ribbon that folds when you turn."
+        }
     }
 
     private var intensityDetail: String {

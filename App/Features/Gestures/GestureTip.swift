@@ -78,16 +78,16 @@ struct GestureTip: Identifiable {
         GestureTip(
             id: "flick",
             title: "Flick for numbers",
-            detail: "Flick down on a letter to type the little character in its corner: digits on the top row, symbols below.",
+            detail: "Flick up on Q through P to type the digit in the corner. The other rows keep their accents on a hold.",
             keyLabel: "q",
             keySymbol: nil,
             keyWidth: 52,
             keyHint: "1",
             poses: poses(fingers: [
-                ([.init(x: 0, y: -6, isDown: false)], 0.4),
-                ([.init(x: 0, y: -6, isDown: true)], 0.1),
-                ([.init(x: 0, y: 22, isDown: true)], 0.14),
-                ([.init(x: 0, y: 22, isDown: false)], 0.5),
+                ([.init(x: 0, y: 8, isDown: false)], 0.4),
+                ([.init(x: 0, y: 8, isDown: true)], 0.1),
+                ([.init(x: 0, y: -22, isDown: true)], 0.14),
+                ([.init(x: 0, y: -22, isDown: false)], 0.5),
             ])
         ),
         GestureTip(
