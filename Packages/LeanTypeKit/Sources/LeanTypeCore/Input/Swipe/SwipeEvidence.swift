@@ -76,12 +76,12 @@ struct SwipeEvent: Hashable, Sendable {
 }
 
 /// Everything one beat can tell the decoder: aimed letters and the keys the path only crossed.
-struct SwipeEvidence: Hashable, Sendable {
+public struct SwipeEvidence: Hashable, Sendable {
     var events: [SwipeEvent]
     /// Anchors and taps, bounce-collapsed. Join rules read this, not the crossings.
     var aimedLetters: String
 
-    static let empty = SwipeEvidence(events: [], aimedLetters: "")
+    public static let empty = SwipeEvidence(events: [], aimedLetters: "")
 
     /// Aimed events in time order, for a beat that was stored as observations.
     static func fromObservations(_ observations: [StrokeObservation]) -> SwipeEvidence {

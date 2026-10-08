@@ -75,10 +75,10 @@ public enum Morph {
     private static func sampleTimes(for kind: Morph, travels: Bool) -> [CGFloat] {
         guard travels else { return [0, 1] }
         switch kind {
-        case .stretch: [0, 0.45, 1]
-        case .settle: [0, 0.5, 1]
-        case .expand: [0, 0.75, 1]
-        case .contract: [0, 0.5, 1]
+        case .stretch: return [0, 0.45, 1]
+        case .settle: return [0, 0.5, 1]
+        case .expand: return [0, 0.75, 1]
+        case .contract: return [0, 0.5, 1]
         }
     }
 
