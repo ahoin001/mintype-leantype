@@ -115,16 +115,24 @@ enum WordJoiner {
 
 /// Picks the word a beat of strokes and taps should commit.
 ///
-/// One moving finger and no extra tap keeps the shape match, including a common neighbor such
-/// as "pull" for a P–I–L swipe. A tap is part of the word only when the dictionary reading uses
-/// that letter and still matches the keys the moving thumb aimed at. Otherwise a tap that lands
-/// after the stroke is the next word, and a tap that lands earlier stays at that moment in time.
+/// One moving finger keeps the shape when that word is what the corners spell, or when the
+/// corners spell nothing. When the corners spell a different dictionary word, that word leads.
+/// A longer miss still commits a dictionary word the decoders found, and keeps the aimed
+/// letters on the bar so a name can be tapped back. Two letters or fewer with no word stay
+/// the letters themselves. A tap is part of the word only when the dictionary reading uses
+/// that letter and still matches the keys the moving thumb aimed at.
 enum BeatChooser {
+    /// A miss this short is a deliberate literal, such as `qw`.
+    static let literalLimit = 2
+
     enum Choice {
         /// The shape match, unchanged.
         case path(DecodeResult)
-        /// A dictionary word that accounts for every aimed letter and tap.
+        /// A dictionary word that accounts for every aimed letter.
         case aligned(DecodeResult)
+        /// A dictionary word for a long miss that is not an exact spelling. An open fragment
+        /// can still absorb the beat; otherwise this word is what gets typed.
+        case nearest(DecodeResult)
         /// The moving thumb's word, then taps that belong to the following word.
         case split(path: DecodeResult, taps: [StrokeObservation])
         /// No dictionary word. The caller types the aimed letters.
@@ -138,28 +146,33 @@ enum BeatChooser {
         observations: [StrokeObservation]
     ) -> Choice {
         let taps = observations.filter(\.isTap)
-        // One moving finger and no extra tap: the shape match wins, even when a common
-        // neighbor ("pull") outranks the keys the finger passed through.
+        let traced = sequence.traced
         if taps.isEmpty, strokes <= 1 {
-            return path.isEmpty ? .traced : .path(path)
+            let shapeFits = path.readings.first.map { WordJoiner.aligns($0.word, traced: traced) } ?? false
+            if !shapeFits, let aligned = WordJoiner.alignedReading(in: sequence) {
+                return .aligned(preferring(aligned, over: path))
+            }
+            if !path.isEmpty {
+                return .path(offering(path, literal: traced))
+            }
+            return miss(sequence: sequence, path: path, traced: traced)
         }
         if let aligned = WordJoiner.alignedReading(in: sequence) {
             return .aligned(preferring(aligned, over: path))
         }
-        if strokes > 1 || path.isEmpty {
-            return .traced
+        if strokes <= 1, !path.isEmpty {
+            let sorted = observations.inReadingOrder()
+            let tapsAreSuffix = sorted.last?.isTap == true && sorted.reversed().prefix(while: \.isTap).count == taps.count
+            let strokeTraced = observations.filter { !$0.isTap }.map(\.letter).joined()
+            if tapsAreSuffix, let word = path.readings.first?.word, WordJoiner.aligns(word, traced: strokeTraced) {
+                return .split(path: path, taps: taps.sorted { $0.time < $1.time })
+            }
         }
-        let sorted = observations.inReadingOrder()
-        let tapsAreSuffix = sorted.last?.isTap == true && sorted.reversed().prefix(while: \.isTap).count == taps.count
-        let strokeTraced = observations.filter { !$0.isTap }.map(\.letter).joined()
-        if tapsAreSuffix, let word = path.readings.first?.word, WordJoiner.aligns(word, traced: strokeTraced) {
-            return .split(path: path, taps: taps.sorted { $0.time < $1.time })
-        }
-        return .traced
+        return miss(sequence: sequence, path: path, traced: traced)
     }
 
     /// What the suggestion bar shows while the fingers are still down. An empty result leaves
-    /// the previous preview up; the commit then types the aimed letters.
+    /// the previous preview up; a short literal still commits from the aimed letters.
     static func reading(
         path: DecodeResult,
         sequence: SequenceOutcome,
@@ -167,7 +180,7 @@ enum BeatChooser {
         observations: [StrokeObservation]
     ) -> DecodeResult {
         switch choose(path: path, sequence: sequence, strokes: strokes, observations: observations) {
-        case let .path(result), let .aligned(result), let .split(result, _):
+        case let .path(result), let .aligned(result), let .nearest(result), let .split(result, _):
             result
         case .traced:
             .empty
@@ -189,6 +202,37 @@ enum BeatChooser {
             output.append(character)
         }
         return String(output)
+    }
+
+    /// A long aim with no exact spelling still commits the nearest word the decoders found.
+    /// The cleaned letters ride along at the end when they are not that word.
+    private static func miss(sequence: SequenceOutcome, path: DecodeResult, traced: String) -> Choice {
+        let letters = collapse(traced)
+        let source = combined(sequence: sequence, path: path)
+        guard letters.count > literalLimit, !source.isEmpty else { return .traced }
+        return .nearest(offering(source, literal: letters))
+    }
+
+    private static func combined(sequence: SequenceOutcome, path: DecodeResult) -> DecodeResult {
+        if sequence.result.isEmpty { return path }
+        var readings = sequence.result.readings
+        for reading in path.readings where !readings.contains(where: { $0.word.lowercased() == reading.word.lowercased() }) {
+            readings.append(reading)
+        }
+        return DecodeResult(readings: readings)
+    }
+
+    /// Puts the aimed letters last, so a name that is not the chosen word can be tapped back.
+    private static func offering(_ result: DecodeResult, literal: String) -> DecodeResult {
+        let letters = collapse(literal)
+        guard letters.count > literalLimit, let top = result.readings.first else { return result }
+        if WordJoiner.aligns(top.word, traced: letters) { return result }
+        if result.readings.contains(where: { $0.word.compare(letters, options: .caseInsensitive) == .orderedSame }) {
+            return result
+        }
+        var readings = result.readings
+        readings.append(DecodeResult.Reading(word: letters, score: top.score - DecodeResult.confidenceMargin - 1))
+        return DecodeResult(readings: readings)
     }
 
     /// The aligned word leads, and the shape match's other readings stay available. The gap is

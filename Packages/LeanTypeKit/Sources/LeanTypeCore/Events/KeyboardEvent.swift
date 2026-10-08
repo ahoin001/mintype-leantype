@@ -42,6 +42,8 @@ public enum KeyboardEvent: Hashable, Sendable {
     case wordCommitted(WordSource)
     /// A swipe landed as a word. `strokes` is how many thumbs drew it.
     case swipeGestureCommitted(strokes: Int)
+    /// The word the swipe is about to commit changed while the fingers are still down.
+    case swipePreviewChanged
     case correctionApplied
     case correctionReverted
     /// Typing rhythm changed noticeably.

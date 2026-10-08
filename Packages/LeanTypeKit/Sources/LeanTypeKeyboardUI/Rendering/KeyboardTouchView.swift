@@ -219,7 +219,10 @@ final class KeyboardTouchView: UIView {
             )
         }
         calloutView.apply(theme: theme, style: style, isCompact: compact)
-        calloutView.show(state.interaction.callout)
+        let fingerCallout = state.interaction.callout
+        let callout = fingerCallout ?? swipeWordCallout(in: state, geometry: geometry)
+        let fades = fingerCallout == nil && callout != nil && UIAccessibility.isReduceMotionEnabled
+        calloutView.show(callout, fades: fades)
         updateAccessibilityLabels()
     }
 
@@ -235,6 +238,29 @@ final class KeyboardTouchView: UIView {
         guard pressed != isGlobePressed else { return }
         isGlobePressed = pressed
         render()
+    }
+
+    /// The word a swipe is about to commit, growing out of the key of its last letter.
+    /// A finger's own callout, when one is up, keeps the balloon.
+    private func swipeWordCallout(in state: KeyboardViewState, geometry: KeyboardGeometry) -> CalloutState? {
+        guard state.candidates.isTentative, state.layer == .letters, !state.interaction.strokes.isEmpty else { return nil }
+        let index = state.candidates.highlightedIndex ?? 0
+        guard state.candidates.candidates.indices.contains(index) else { return nil }
+        let word = state.candidates.candidates[index].text
+        guard let last = word.last(where: \.isLetter) else { return nil }
+        let letter = String(last).lowercased()
+        guard let frame = geometry.keys.first(where: { $0.key.kind.character?.lowercased() == letter }) else { return nil }
+        let dock = geometry.metrics.dockHeight
+        let bounds = CGRect(x: 0, y: -dock, width: geometry.size.width, height: geometry.size.height + dock)
+        let widths = CalloutGeometry.cellWidths(for: [word], keyWidth: frame.visualFrame.width, available: bounds.width)
+        let layout = CalloutGeometry.layout(
+            anchor: frame.visualFrame,
+            optionCount: 1,
+            metrics: geometry.metrics,
+            bounds: bounds,
+            cellWidths: widths
+        )
+        return CalloutState(keyID: frame.id, layout: layout, content: .preview(word))
     }
 
     /// Letter keys that spell the word the swipe preview is about to commit.

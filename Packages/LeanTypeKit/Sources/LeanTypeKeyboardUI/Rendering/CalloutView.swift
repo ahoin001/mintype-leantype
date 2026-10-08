@@ -44,8 +44,9 @@ final class CalloutView: UIView {
         }
     }
 
-    func show(_ callout: CalloutState?) {
+    func show(_ callout: CalloutState?, fades: Bool = false) {
         guard callout != current else { return }
+        let wasHidden = current == nil || alpha < 0.5
         current = callout
 
         guard let callout else {
@@ -54,9 +55,16 @@ final class CalloutView: UIView {
             }
             return
         }
-        layer.removeAllAnimations()
-        alpha = 1
         render(callout)
+        if fades, wasHidden {
+            alpha = 0
+            UIView.animate(withDuration: Motion.calloutDismiss, delay: 0, options: [.beginFromCurrentState]) {
+                self.alpha = 1
+            }
+        } else {
+            layer.removeAllAnimations()
+            alpha = 1
+        }
     }
 
     /// Releases label views; they are recreated on demand.

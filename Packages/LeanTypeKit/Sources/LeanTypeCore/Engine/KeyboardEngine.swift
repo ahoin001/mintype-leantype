@@ -79,7 +79,9 @@ public final class KeyboardEngine {
         coordinator.onPreview = { [weak self] result in
             guard let self else { return }
             if let result {
-                words.showPreview(result)
+                if words.showPreview(result) {
+                    emit(.swipePreviewChanged)
+                }
             } else {
                 words.clearPreview()
             }
@@ -585,6 +587,8 @@ public final class KeyboardEngine {
             return (result.words, unsure, observations, [], !result.words.isEmpty)
         case let .aligned(result):
             return (result.words, result.isUnsure, observations, [], !result.words.isEmpty)
+        case let .nearest(result):
+            return (result.words, result.isUnsure, observations, [], false)
         case let .split(result, taps):
             return (result.words, result.isUnsure, observations.filter { !$0.isTap }, taps, !result.words.isEmpty)
         case .traced:
@@ -858,9 +862,7 @@ public final class KeyboardEngine {
             editor.insert(word)
             return true
         case let .swap(word):
-            if let current = editor.recentCommit?.word {
-                words.rememberRejection(preferred: word, rejected: current)
-            }
+            words.noteSwap(preferred: word, rejected: editor.recentCommit?.word)
             return editor.replaceRecentCommitWord(with: word)
         case .revert:
             guard let commit = editor.undoRecentCommit() else { return false }

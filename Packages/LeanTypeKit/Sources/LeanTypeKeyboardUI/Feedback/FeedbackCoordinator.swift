@@ -38,7 +38,7 @@ public final class FeedbackCoordinator: KeyboardEventObserver {
                 UIDevice.current.playInputClick()
             }
             impact(keyImpact, intensity: 0.5)
-        case .cursorStep, .deleteStep:
+        case .cursorStep, .deleteStep, .swipePreviewChanged:
             guard hapticsEnabled else { return }
             selection.selectionChanged()
             selection.prepare()

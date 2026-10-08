@@ -937,6 +937,98 @@ struct SwipeTypingTests {
         #expect(ContractionPreference.apply(ranked, prefersContraction: false).words == ["thats", "that's"])
         #expect(ContractionPreference.apply(ranked, prefersContraction: true).words == ["that's", "thats"])
     }
+
+    @Test func aLongMissCommitsTheNearestWord() {
+        let traced = "tyghagyts"
+        let sequence = SequenceOutcome(
+            result: DecodeResult(readings: [.init(word: "that's", score: -1)]),
+            traced: traced
+        )
+        let result = BeatChooser.reading(
+            path: .empty,
+            sequence: sequence,
+            strokes: 2,
+            observations: aimed(traced)
+        )
+        #expect(result.words.first == "that's")
+        #expect(result.words.first != traced)
+        #expect(result.words.last == traced)
+    }
+
+    @Test func aimedLettersBeatAShapeThatDoesNotSpellThem() {
+        let corners = SequenceOutcome(
+            result: DecodeResult(readings: [.init(word: "pill", score: -1)]),
+            traced: "pil"
+        )
+        let shape = DecodeResult(readings: [.init(word: "pull", score: -0.2)])
+        let chosen = BeatChooser.reading(path: shape, sequence: corners, strokes: 1, observations: aimed("pil"))
+        #expect(chosen.words.first == "pill")
+
+        let slide = SequenceOutcome(
+            result: DecodeResult(readings: [.init(word: "help", score: -1)]),
+            traced: "hello"
+        )
+        let matching = DecodeResult(readings: [.init(word: "hello", score: -0.2)])
+        let kept = BeatChooser.reading(path: matching, sequence: slide, strokes: 1, observations: aimed("hello"))
+        #expect(kept.words.first == "hello")
+    }
+
+    @Test func aCloseCallPrefersTheWordThatFollowed() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("the")
+        language.noteCommitted("quick")
+        language.noteCommitted("the")
+        let close = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: close).words.first == "quick")
+        let clear = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -3),
+        ])
+        #expect(language.preferringFollowers(in: clear).words.first == "quit")
+    }
+
+    @Test func aSwappedUnknownWordJoinsTheNextDecode() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.isLearningEnabled = true
+        let words = WordAssistant(editor: TextEditor(document: InMemoryTextDocument(text: "")))
+        words.language = language
+        words.noteSwap(preferred: "zorbly", rejected: "hi")
+
+        let harness = EngineHarness(language: language)
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        var time = 0.0
+        let observations = "zorbly".map { character -> StrokeObservation in
+            time += 0.05
+            let letter = String(character)
+            return StrokeObservation(
+                time: time,
+                point: harness.point(for: letter),
+                directionX: 1,
+                directionY: 0,
+                letter: letter
+            )
+        }
+        let outcome = language.sequenceDecode(observations, layout: layout)
+        #expect(outcome.result.words.contains { $0.lowercased() == "zorbly" })
+    }
+}
+
+private func aimed(_ letters: String) -> [StrokeObservation] {
+    letters.enumerated().map { index, character in
+        StrokeObservation(
+            time: Double(index),
+            point: CGPoint(x: CGFloat(index) * 40, y: 0),
+            directionX: 1,
+            directionY: 0,
+            letter: String(character)
+        )
+    }
 }
 
 private func arrival(_ letter: String, x: CGFloat, y: CGFloat = 0) -> KeyArrival {

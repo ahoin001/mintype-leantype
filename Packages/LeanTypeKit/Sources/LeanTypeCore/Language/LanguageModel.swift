@@ -27,6 +27,7 @@ public final class LanguageModel {
 
     private let store: (any LearnedWordsStore)?
     private let rejections: RejectionMemory
+    private let context: WordContext
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
     private var letterBigram: LetterBigram?
@@ -38,11 +39,13 @@ public final class LanguageModel {
     public init(
         lexicon: MappedLexicon,
         store: (any LearnedWordsStore)? = nil,
-        rejections rejectionStore: (any RejectionStore)? = nil
+        rejections rejectionStore: (any RejectionStore)? = nil,
+        wordContext contextStore: (any WordContextStore)? = nil
     ) {
         self.lexicon = lexicon
         self.store = store
         rejections = RejectionMemory(store: rejectionStore)
+        context = WordContext(store: contextStore)
         decoder = PathDecoder(lexicon: lexicon)
         personal = PersonalLexicon(learned: store?.load() ?? [])
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
@@ -51,10 +54,11 @@ public final class LanguageModel {
     /// Loads the bundled dictionary; `nil` if it's missing or unreadable.
     public static func bundled(
         store: (any LearnedWordsStore)? = nil,
-        rejections: (any RejectionStore)? = nil
+        rejections: (any RejectionStore)? = nil,
+        wordContext: (any WordContextStore)? = nil
     ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
-        return LanguageModel(lexicon: lexicon, store: store, rejections: rejections)
+        return LanguageModel(lexicon: lexicon, store: store, rejections: rejections, wordContext: wordContext)
     }
 
     // MARK: - Queries
@@ -73,7 +77,7 @@ public final class LanguageModel {
 
     func decode(_ gesture: SwipeGesture, layout: LetterLayout) async -> DecodeResult {
         let result = await decoder.decode(gesture, layout: layout, personal: personalEntries)
-        return rejections.applying(to: result)
+        return rejections.applying(to: context.applying(to: result))
     }
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when several thumb
@@ -91,7 +95,17 @@ public final class LanguageModel {
             personal: personalEntries,
             bigram: letterBigram
         )
-        return SequenceOutcome(result: rejections.applying(to: outcome.result), traced: outcome.traced)
+        return SequenceOutcome(result: rejections.applying(to: context.applying(to: outcome.result)), traced: outcome.traced)
+    }
+
+    /// The word that just landed, so the next swipe can prefer what usually follows it.
+    func noteCommitted(_ word: String) {
+        context.noteCommitted(word)
+    }
+
+    /// What a swipe would rank once the preceding word is taken into account.
+    func preferringFollowers(in result: DecodeResult) -> DecodeResult {
+        context.applying(to: result)
     }
 
     /// Remembers that the user wanted `preferred` instead of the `rejected` correction.

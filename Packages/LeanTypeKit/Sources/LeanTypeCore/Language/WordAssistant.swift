@@ -150,11 +150,13 @@ final class WordAssistant {
         guard let language, !word.isEmpty, !TextBoundary.continuesWord(after: editor.contextAfter) else { return false }
         if literalWord == word {
             literalWord = nil
+            language.noteCommitted(word)
             return false
         }
         if keptWord == word {
             keptWord = nil
             language.learn(word)
+            language.noteCommitted(word)
             settle(word)
             return false
         }
@@ -162,12 +164,25 @@ final class WordAssistant {
         let analysis = language.analyze(word, touches: touches, layout: letterLayout, completionLimit: 0)
         if autocorrects, let correction = analysis.correction, correction != word {
             let replaced = editor.replaceCurrentWord(with: correction, kind: .corrected, trailing: trailing)
-            if replaced { settle(correction) }
+            if replaced {
+                language.noteCommitted(correction)
+                settle(correction)
+            }
             return replaced
         }
         language.learn(word)
+        language.noteCommitted(word)
         settle(word)
         return false
+    }
+
+    /// The user picked `preferred` instead of the word a swipe just wrote. One choice pins it,
+    /// so the next similar aim can find a spelling the dictionary does not know.
+    func noteSwap(preferred: String, rejected: String?) {
+        if let rejected {
+            language?.noteRejection(preferred: preferred, rejected: rejected)
+        }
+        _ = language?.remember(preferred)
     }
 
     /// The user undid an autocorrection; leave `word` alone when it ends.
@@ -183,6 +198,9 @@ final class WordAssistant {
     }
 
     func swipeCommitted(_ readings: [String], unsure _: Bool) {
+        if let word = readings.first {
+            language?.noteCommitted(word)
+        }
         swipeReadings = readings
         preview = nil
         touches = []
@@ -211,10 +229,14 @@ final class WordAssistant {
 
     /// Shows `result` in the suggestion strip without touching the document. An empty result
     /// leaves the previous preview up, so a momentary miss doesn't flash the wordmark.
-    func showPreview(_ result: DecodeResult) {
-        guard !result.isEmpty else { return }
+    /// Returns whether the leading word changed.
+    @discardableResult
+    func showPreview(_ result: DecodeResult) -> Bool {
+        guard !result.isEmpty else { return false }
+        let previous = preview?.readings.first?.word
         preview = result
         cached = nil
+        return result.readings.first?.word != previous
     }
 
     func clearPreview() {

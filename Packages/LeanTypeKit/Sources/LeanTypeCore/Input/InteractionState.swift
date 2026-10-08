@@ -9,6 +9,12 @@ public struct CalloutState: Hashable, Sendable {
     public let keyID: KeyID
     public let layout: CalloutLayout
     public let content: Content
+
+    public init(keyID: KeyID, layout: CalloutLayout, content: Content) {
+        self.keyID = keyID
+        self.layout = layout
+        self.content = content
+    }
 }
 
 /// What one finger's session wants drawn right now.

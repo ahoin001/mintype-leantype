@@ -18,7 +18,8 @@ final class KeyboardViewController: UIInputViewController {
     /// dictionary is recorded instead of killing the process with an empty log.
     private lazy var language = LanguageModel.bundled(
         store: AppGroupLearnedWordsStore(),
-        rejections: AppGroupRejectionStore()
+        rejections: AppGroupRejectionStore(),
+        wordContext: AppGroupWordContextStore()
     )
     private let crashMonitor = ExtensionCrashMonitor()
 
