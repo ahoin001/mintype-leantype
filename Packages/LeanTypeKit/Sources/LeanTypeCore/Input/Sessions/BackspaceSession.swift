@@ -62,7 +62,7 @@ final class BackspaceSession: InteractionSession {
     private enum Phase {
         case pressed
         case holding(gear: Gear, interval: TimeInterval, timeInGear: TimeInterval)
-        case scrubbing(anchorX: CGFloat, applied: Int, restoredWhole: Bool)
+        case scrubbing(DeletionScrub)
         case finished
     }
 
@@ -94,9 +94,11 @@ final class BackspaceSession: InteractionSession {
         case .pressed:
             guard abs(track.translation.dx) >= Self.activationDistance else { return }
             stopTimer()
-            phase = .scrubbing(anchorX: track.current.location.x, applied: 0, restoredWhole: false)
-        case let .scrubbing(anchorX, applied, restoredWhole):
-            scrub(to: track.current.location.x, anchorX: anchorX, applied: applied, restoredWhole: restoredWhole)
+            phase = .scrubbing(DeletionScrub(anchorX: track.current.location.x, applied: 0, restoredWhole: false))
+        case let .scrubbing(scrub):
+            var scrub = scrub
+            scrub.update(to: track.current.location.x, context: context)
+            phase = .scrubbing(scrub)
         case .holding, .finished:
             break
         }
@@ -145,17 +147,33 @@ final class BackspaceSession: InteractionSession {
         }
     }
 
-    // MARK: - Scrubbing
+    // MARK: - Lifecycle
 
-    private func scrub(to x: CGFloat, anchorX: CGFloat, applied: Int, restoredWhole: Bool) {
-        var anchorX = anchorX
-        var applied = applied
-        var restoredWhole = restoredWhole
-        let target = Int(((anchorX - x) / Self.scrubStep).rounded(.towardZero))
+    private func stopTimer() {
+        timer?.cancel()
+        timer = nil
+    }
+
+    private func finish() {
+        stopTimer()
+        phase = .finished
+    }
+}
+
+/// Left deletes one character per step. Right puts those characters back. A rightward move
+/// before any of them were deleted restores the whole previous deletion.
+@MainActor
+struct DeletionScrub {
+    var anchorX: CGFloat
+    var applied: Int
+    var restoredWhole: Bool
+
+    mutating func update(to x: CGFloat, context: any SessionContext) {
+        let target = Int(((anchorX - x) / BackspaceSession.scrubStep).rounded(.towardZero))
 
         while applied < target {
             guard context.perform(.deleteCharacter) else {
-                anchorX = x + CGFloat(applied) * Self.scrubStep
+                anchorX = x + CGFloat(applied) * BackspaceSession.scrubStep
                 break
             }
             applied += 1
@@ -178,19 +196,5 @@ final class BackspaceSession: InteractionSession {
                 context.emit(.deleteStep)
             }
         }
-
-        phase = .scrubbing(anchorX: anchorX, applied: applied, restoredWhole: restoredWhole)
-    }
-
-    // MARK: - Lifecycle
-
-    private func stopTimer() {
-        timer?.cancel()
-        timer = nil
-    }
-
-    private func finish() {
-        stopTimer()
-        phase = .finished
     }
 }

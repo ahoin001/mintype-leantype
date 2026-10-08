@@ -33,6 +33,8 @@ final class TrailRenderer {
 
     private struct Trail {
         let shape: CAShapeLayer
+        /// Soft disc behind a comet's head. A painted glow, so the bloom does not need a live shadow.
+        let glow: CAShapeLayer?
         let gradient: CAGradientLayer?
         let style: EffectsSettings.TrailStyle
         var center: CGPoint?
@@ -134,23 +136,27 @@ final class TrailRenderer {
         shape.fillRule = .evenOdd
 
         var gradient: CAGradientLayer?
+        var glow: CAShapeLayer?
         switch style {
         case .prism:
             let wash = spareGradients.popLast() ?? CAGradientLayer()
             wash.actions = LayerPool.noActions
+            wash.contentsScale = shape.contentsScale
             wash.frame = stage.bounds
             wash.startPoint = CGPoint(x: 0, y: 0.5)
             wash.endPoint = CGPoint(x: 1, y: 0.5)
-            wash.colors = palette.prism(count: 5, offset: hueOffset)
+            wash.colors = palette.prism(count: 7, offset: hueOffset)
             shape.fillColor = UIColor.white.cgColor
             wash.mask = shape
             gradient = wash
         case .comet:
             shape.fillColor = color.withAlphaComponent(0.95).cgColor
-            shape.shadowColor = color.cgColor
-            shape.shadowRadius = 12
-            shape.shadowOpacity = 0.9
-            shape.shadowOffset = .zero
+            if let halo = stage.pool.shape() {
+                halo.frame = shape.frame
+                halo.fillColor = color.withAlphaComponent(0.28).cgColor
+                halo.shadowOpacity = 0
+                glow = halo
+            }
         case .silk:
             shape.fillColor = color.withAlphaComponent(0.78).cgColor
             shape.strokeColor = palette.shifted(by: hueOffset + 0.06).withAlphaComponent(0.5).cgColor
@@ -161,8 +167,13 @@ final class TrailRenderer {
             break
         }
 
-        let trail = Trail(shape: shape, gradient: gradient, style: style)
-        trail.root.opacity = Float(min(0.6 + 0.35 * intensity, 1))
+        let trail = Trail(shape: shape, glow: glow, gradient: gradient, style: style)
+        let opacity = Float(min(0.6 + 0.35 * intensity, 1))
+        trail.root.opacity = opacity
+        trail.glow?.opacity = opacity
+        if let glow = trail.glow {
+            stage.present(glow)
+        }
         stage.present(trail.root)
         trails[id] = trail
         startDisplayLink()
@@ -182,7 +193,13 @@ final class TrailRenderer {
                 gradient.removeFromSuperlayer()
                 spareGradients.append(gradient)
             }
+            if let glow = trail.glow {
+                stage.pool.recycle(glow)
+            }
             stage.pool.recycle(trail.shape)
+        }
+        if animated, trail.style == .prism {
+            restorePrismFrame(trail)
         }
         guard animated, let bounds = trail.shape.path?.boundingBoxOfPath, !bounds.isNull else {
             finish()
@@ -200,6 +217,17 @@ final class TrailRenderer {
             y: target.y - anchor.y - scale * (center.y - anchor.y)
         )
         let collapse = CATransform3DScale(CATransform3DMakeTranslation(offset.x, offset.y, 0), scale, scale, 1)
+        if let glow = trail.glow {
+            EffectAnimation.play(
+                [
+                    EffectAnimation.basic("transform", from: NSValue(caTransform3D: CATransform3DIdentity), to: NSValue(caTransform3D: collapse)),
+                    EffectAnimation.basic("opacity", from: glow.opacity, to: 0),
+                ],
+                on: glow,
+                duration: Self.collapseDuration,
+                timing: EffectAnimation.easeIn
+            )
+        }
         EffectAnimation.play(
             [
                 EffectAnimation.basic("transform", from: NSValue(caTransform3D: CATransform3DIdentity), to: NSValue(caTransform3D: collapse)),
@@ -216,7 +244,9 @@ final class TrailRenderer {
     private func startDisplayLink() {
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: DisplayLinkTarget { [weak self] in self?.render() }, selector: #selector(DisplayLinkTarget.tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+        // 60 is enough for a dozen beads or stars. 120 would redraw the trail twice as often
+        // on the same thread that has to take the next tap.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -238,6 +268,7 @@ final class TrailRenderer {
             guard var trail = trails[id], let points = histories[id], points.count > 0 else {
                 trails[id]?.shape.path = nil
                 trails[id]?.shape.shadowPath = nil
+                trails[id]?.glow?.path = nil
                 continue
             }
             let contact = points[points.count - 1].location
@@ -256,7 +287,7 @@ final class TrailRenderer {
             }
 
             let path = CGMutablePath()
-            var head: CGPath?
+            var cometGlow: CGPath?
             if !ringOnly {
                 switch trail.style {
                 case .lantern:
@@ -264,9 +295,9 @@ final class TrailRenderer {
                 case .comet:
                     let drawn = comet(through: visible, now: now)
                     if let beads = drawn.path { path.addPath(beads) }
-                    head = drawn.head
+                    cometGlow = drawn.glow
                 case .prism:
-                    if let ribbon = ribbon(through: visible, now: now) { path.addPath(ribbon) }
+                    if let ribbon = ribbon(through: visible, now: now, widthScale: 1.45) { path.addPath(ribbon) }
                 case .constellation:
                     addStars(trail.glints, now: now, to: path)
                 case .ember:
@@ -278,12 +309,16 @@ final class TrailRenderer {
             let breath: CGFloat = (!ringOnly && trail.style == .lantern) ? 1.6 * CGFloat(sin(now * 3.2)) : 0
             addRings(for: trail.style, jewel: jewel, split: trail.split, breath: breath, to: path)
             if !ringOnly, trail.style != .comet {
-                let bead = beadPath(at: jewel.bead, style: trail.style)
-                path.addPath(bead)
-                head = bead
+                path.addPath(beadPath(at: jewel.bead, style: trail.style))
             }
-            trail.shape.path = path
-            trail.shape.shadowPath = trail.style == .comet ? head : nil
+            if trail.style == .prism {
+                let tail = visible.first?.location ?? jewel.bead
+                let head = visible.last?.location ?? jewel.bead
+                placePrism(trail, path: path, from: tail, to: head)
+            } else {
+                trail.shape.path = path
+                trail.glow?.path = cometGlow
+            }
             trails[id] = trail
         }
     }
@@ -404,12 +439,65 @@ final class TrailRenderer {
         return CGPath(ellipseIn: CGRect(x: point.x - size, y: point.y - size, width: size * 2, height: size * 2), transform: nil)
     }
 
+    /// Fits the rainbow to the ribbon and runs it from the tail to the head, so a short swipe
+    /// still shifts color and the gradient is only as large as the stroke.
+    private func placePrism(_ trail: Trail, path: CGPath, from tail: CGPoint, to head: CGPoint) {
+        guard let wash = trail.gradient else {
+            trail.shape.path = path
+            return
+        }
+        var box = path.boundingBoxOfPath
+        guard !box.isNull, !box.isEmpty else {
+            trail.shape.path = nil
+            return
+        }
+        box = box.insetBy(dx: -12, dy: -12)
+        if box.width < 1 { box.size.width = 1 }
+        if box.height < 1 { box.size.height = 1 }
+        var shift = CGAffineTransform(translationX: -box.minX, y: -box.minY)
+        trail.shape.frame = CGRect(origin: .zero, size: box.size)
+        trail.shape.path = path.copy(using: &shift)
+        wash.frame = box
+        var tip = head
+        if hypot(head.x - tail.x, head.y - tail.y) < 4 {
+            tip = CGPoint(x: tail.x + 12, y: tail.y)
+        }
+        wash.startPoint = unit(tail, in: box)
+        wash.endPoint = unit(tip, in: box)
+    }
+
+    private func unit(_ point: CGPoint, in box: CGRect) -> CGPoint {
+        CGPoint(
+            x: min(max((point.x - box.minX) / box.width, 0), 1),
+            y: min(max((point.y - box.minY) / box.height, 0), 1)
+        )
+    }
+
+    /// Puts a prism trail back in stage coordinates so the lift animation can find its center.
+    private func restorePrismFrame(_ trail: Trail) {
+        guard let wash = trail.gradient else { return }
+        let box = wash.frame
+        guard box.width > 1, box.height > 1 else { return }
+        if let path = trail.shape.path {
+            var shift = CGAffineTransform(translationX: box.minX, y: box.minY)
+            trail.shape.path = path.copy(using: &shift)
+        }
+        trail.shape.frame = stage.bounds
+        wash.frame = stage.bounds
+    }
+
     private func addStars(_ glints: [Glint], now: CFTimeInterval, to path: CGMutablePath) {
         for glint in glints {
             let age = CGFloat(min(max((now - glint.birth) / 0.45, 0), 1))
-            let radius = (7.5 * (1 - age) + 1.2) * min(max(intensity, 0.7), 1.25)
+            let twinkle = 0.86 + 0.14 * CGFloat(sin(now * 10 + Double(glint.spin) * 3))
+            let radius = (7.5 * (1 - age) + 1.2) * twinkle * min(max(intensity, 0.7), 1.25)
             guard radius > 0.8 else { continue }
-            addStar(at: glint.location, radius: radius, rotation: glint.spin + age * 0.6, to: path)
+            let drift = age * 8
+            let center = CGPoint(
+                x: glint.location.x + cos(glint.spin) * drift,
+                y: glint.location.y + sin(glint.spin) * drift
+            )
+            addStar(at: center, radius: radius, rotation: glint.spin + age * 0.6, to: path)
         }
     }
 
@@ -436,13 +524,14 @@ final class TrailRenderer {
     }
 
     /// Beads along the path that has already left the ring. The last bead is the rim, not the contact.
-    private func comet(through points: [FingerJewel.Sample], now: CFTimeInterval) -> (path: CGPath?, head: CGPath?) {
+    /// `glow` is a wider disc at that rim, painted faint on its own layer.
+    private func comet(through points: [FingerJewel.Sample], now: CFTimeInterval) -> (path: CGPath?, glow: CGPath?) {
         let count = points.count
         guard count >= 1 else { return (nil, nil) }
         let path = CGMutablePath()
         let beads = min(Self.cometBeads, count)
         let scale = min(max(intensity, 0.7), 1.25)
-        var head: CGPath?
+        var glow: CGPath?
         for bead in 0..<beads {
             let index = beads == 1 ? count - 1 : Int((CGFloat(bead) / CGFloat(beads - 1) * CGFloat(count - 1)).rounded())
             let point = points[index]
@@ -451,16 +540,23 @@ final class TrailRenderer {
             let isHead = bead == beads - 1
             let radius = (isHead ? 8 : 1.4 + 3.6 * progress) * (isHead ? 1 : max(freshness, 0.35)) * scale
             guard radius > 0.5 else { continue }
-            let beadPath = CGPath(ellipseIn: CGRect(
+            path.addEllipse(in: CGRect(
                 x: point.location.x - radius,
                 y: point.location.y - radius,
                 width: radius * 2,
                 height: radius * 2
-            ), transform: nil)
-            path.addPath(beadPath)
-            if isHead { head = beadPath }
+            ))
+            if isHead {
+                let halo = radius * 2.6
+                glow = CGPath(ellipseIn: CGRect(
+                    x: point.location.x - halo,
+                    y: point.location.y - halo,
+                    width: halo * 2,
+                    height: halo * 2
+                ), transform: nil)
+            }
         }
-        return (path.isEmpty ? nil : path, head)
+        return (path.isEmpty ? nil : path, glow)
     }
 
     /// Two copies of the stroke, a few samples apart, so a turn folds behind the finger.

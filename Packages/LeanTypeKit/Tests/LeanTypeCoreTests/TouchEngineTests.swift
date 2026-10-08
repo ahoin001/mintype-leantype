@@ -166,6 +166,52 @@ struct BackspaceGestureTests {
 @MainActor
 @Suite("Shift and layers")
 struct ShiftAndLayerTests {
+    @Test func slideFromShiftOntoZTypesOneCapital() {
+        let harness = EngineHarness(traits: InputTraits(autocapitalization: .none))
+        let id = harness.down(at: harness.point(for: .shift))
+        harness.move(id, to: harness.point(for: "z"), over: 0.08)
+        harness.up(id)
+        #expect(harness.text == "Z")
+        #expect(harness.state.shift == .off)
+    }
+
+    @Test func scrubbingShiftDeletesAndRestoresWithoutTogglingShift() {
+        let harness = EngineHarness(text: "typing", traits: InputTraits(autocapitalization: .none))
+        let id = harness.down(at: harness.point(for: .shift))
+        harness.move(id, by: CGVector(dx: -BackspaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep * 3, dy: 0), steps: 3)
+        #expect(harness.text == "typ")
+
+        harness.move(id, by: CGVector(dx: BackspaceSession.scrubStep * 2, dy: 0), steps: 2)
+        #expect(harness.text == "typin")
+        harness.up(id)
+        #expect(harness.text == "typin")
+        #expect(harness.state.shift == .off)
+    }
+
+    @Test func aRightFlickOnShiftRestoresTheLastDeletion() {
+        let harness = EngineHarness(text: "hello world", traits: InputTraits(autocapitalization: .none))
+        harness.tap(.backspace)
+        #expect(harness.text == "hello ")
+
+        let id = harness.down(at: harness.point(for: .shift))
+        harness.move(id, by: CGVector(dx: BackspaceSession.activationDistance + 2, dy: 0))
+        harness.up(id)
+        #expect(harness.text == "hello world")
+        #expect(harness.state.shift == .off)
+    }
+
+    @Test func scrubbingShiftDoesNotCountAsAShiftTap() {
+        let harness = EngineHarness(text: "typing", traits: InputTraits(autocapitalization: .none))
+        let id = harness.down(at: harness.point(for: .shift))
+        harness.move(id, by: CGVector(dx: -BackspaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep, dy: 0))
+        harness.up(id)
+
+        harness.tap(.shift, gap: 0.05)
+        #expect(harness.state.shift == .once)
+    }
+
     @Test func slideFromShiftTypesOneCapital() {
         let harness = EngineHarness(text: "hey ", traits: InputTraits(autocapitalization: .none))
         let id = harness.down(at: harness.point(for: .shift))

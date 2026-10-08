@@ -82,13 +82,37 @@ actor PathDecoder {
     func decode(_ gesture: SwipeGesture, layout: LetterLayout, personal: [PersonalLexicon.Entry]) -> DecodeResult {
         let state = Signposts.swipe.beginInterval("Decode")
         defer { Signposts.swipe.endInterval("Decode", state) }
-        guard scorer.prepare(gesture.path, layout: layout) else { return .empty }
+        let nomination = Self.nominate(
+            path: gesture.path,
+            gateLength: !gesture.isMultiStroke,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personal,
+            pathScore: &scorer
+        )
+        scannedBeyondCommon = nomination.scannedBeyondCommon
+        return nomination.result
+    }
 
-        let starts = layout.letters(near: scorer.start, within: Self.endpointRadius, limit: Self.endpointLetters)
-        let ends = layout.letters(near: scorer.end, within: Self.endpointRadius, limit: Self.endpointLetters)
-        var ranking = Ranking(limit: Self.resultLimit * 2)
+    /// Shape matches for one polyline. The alignment search uses the same buckets, so a long
+    /// diagonal can nominate a word the beam never kept. Location misses stay out.
+    static func nominate(
+        path: [CGPoint],
+        gateLength: Bool,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        pathScore: inout PathScore
+    ) -> ShapeNomination {
+        guard pathScore.prepare(path, layout: layout) else {
+            return ShapeNomination(result: .empty, scannedBeyondCommon: false)
+        }
+
+        let starts = layout.letters(near: pathScore.start, within: endpointRadius, limit: endpointLetters)
+        let ends = layout.letters(near: pathScore.end, within: endpointRadius, limit: endpointLetters)
+        var ranking = Ranking(limit: resultLimit * 2)
         var bestLocation = CGFloat.greatestFiniteMagnitude
-        scannedBeyondCommon = false
+        var scannedBeyondCommon = false
 
         let buckets = starts.flatMap { first in
             ends.map { last in lexicon.bucket(first: first, last: last) }
@@ -96,22 +120,25 @@ actor PathDecoder {
         for bucket in buckets {
             consider(
                 bucket,
-                through: Self.bucketScanLimit,
-                gateLength: !gesture.isMultiStroke,
+                through: bucketScanLimit,
+                gateLength: gateLength,
                 layout: layout,
+                lexicon: lexicon,
+                pathScore: &pathScore,
                 bestLocation: &bestLocation,
                 ranking: &ranking
             )
         }
-        // The common slice missed the finger. The rest of those buckets still gets a look.
-        if bestLocation >= Self.locationCutoff {
+        if bestLocation >= locationCutoff {
             scannedBeyondCommon = true
             for bucket in buckets {
                 consider(
                     bucket,
-                    from: Self.bucketScanLimit,
-                    gateLength: !gesture.isMultiStroke,
+                    from: bucketScanLimit,
+                    gateLength: gateLength,
                     layout: layout,
+                    lexicon: lexicon,
+                    pathScore: &pathScore,
                     bestLocation: &bestLocation,
                     ranking: &ranking
                 )
@@ -120,8 +147,8 @@ actor PathDecoder {
         for (offset, entry) in personal.enumerated() {
             guard let first = entry.key.first, let last = entry.key.last,
                   starts.contains(first), ends.contains(last) else { continue }
-            let prior = Self.frequencyWeight * entry.logCount
-            let measured = scorer.measure(entry.key, mustExceed: ranking.threshold - prior, gateLength: !gesture.isMultiStroke, layout: layout)
+            let prior = frequencyWeight * entry.logCount
+            let measured = pathScore.measure(entry.key, mustExceed: ranking.threshold - prior, gateLength: gateLength, layout: layout)
             if let location = measured.location {
                 bestLocation = min(bestLocation, location)
             }
@@ -139,18 +166,20 @@ actor PathDecoder {
             if seen.insert(word.lowercased()).inserted {
                 readings.append(DecodeResult.Reading(word: word, score: entry.score))
             }
-            if readings.count == Self.resultLimit { break }
+            if readings.count == resultLimit { break }
         }
-        return DecodeResult(readings: readings)
+        return ShapeNomination(result: DecodeResult(readings: readings), scannedBeyondCommon: scannedBeyondCommon)
     }
 
     /// Scores `bucket[start..<end]`, keeping the closest location seen.
-    private func consider(
+    private static func consider(
         _ bucket: UnsafeBufferPointer<UInt32>,
         from start: Int = 0,
         through end: Int? = nil,
         gateLength: Bool,
         layout: LetterLayout,
+        lexicon: MappedLexicon,
+        pathScore: inout PathScore,
         bestLocation: inout CGFloat,
         ranking: inout Ranking
     ) {
@@ -158,8 +187,8 @@ actor PathDecoder {
         guard start < last else { return }
         for offset in start..<last {
             let index = Int(bucket[offset])
-            let prior = Self.frequencyWeight * lexicon.logCount(at: index)
-            let measured = scorer.measure(
+            let prior = frequencyWeight * lexicon.logCount(at: index)
+            let measured = pathScore.measure(
                 lexicon.key(at: index),
                 mustExceed: ranking.threshold - prior,
                 gateLength: gateLength,
@@ -172,6 +201,12 @@ actor PathDecoder {
             ranking.insert(.dictionary(index), score: fit + prior)
         }
     }
+}
+
+/// A curve match, and whether the common slice of the buckets was not enough.
+struct ShapeNomination: Sendable {
+    var result: DecodeResult
+    var scannedBeyondCommon: Bool
 }
 
 /// A fixed-size list of the best-scoring candidates.

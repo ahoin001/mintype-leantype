@@ -33,6 +33,8 @@ public enum KeyboardIntent: Hashable, Sendable {
     case acceptCandidate(Int)
     case shiftPressBegan
     case shiftPressEnded
+    /// The finger on shift slid sideways to delete, so the press should not change shift.
+    case shiftPressCancelled
     case switchLayer(KeyboardLayer)
     case showEmojiPage(EmojiCategory)
     case nextKeyboard

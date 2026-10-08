@@ -169,6 +169,15 @@ struct GestureTip: Identifiable {
             poses: poses([(0, false, 0.4), (0, true, 0.15), (70, true, 0.5), (70, false, 0.25)])
         ),
         GestureTip(
+            id: "shiftDelete",
+            title: "Delete from the left",
+            detail: "Slide left on shift to erase one letter at a time, and back right to bring them back. A short slide right, lifted before a letter, restores the last word. Either thumb can correct.",
+            keyLabel: "shift",
+            keySymbol: "shift",
+            keyWidth: 72,
+            poses: poses([(0, false, 0.4), (0, true, 0.15), (-70, true, 0.7), (-20, true, 0.5), (-20, false, 0.2)])
+        ),
+        GestureTip(
             id: "symbols",
             title: "Symbols in one move",
             detail: "Slide from 123 to any number or symbol and let go. You land right back on letters.",

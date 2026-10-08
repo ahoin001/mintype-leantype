@@ -35,6 +35,8 @@ final class WordAssistant {
     /// edits it, so "com" at the end of an email is not autocorrected or offered as a fix.
     private var literalWord: String?
     private var swipeReadings: [String] = []
+    /// Letters the last swipe aimed at, so deleting that word can refuse it for a similar stroke.
+    private var swipeTrace: String?
     /// Aimed letters from the swipe, kept on the strip when they are not the committed word.
     private var tracedLiteral: String?
     /// Set while a finger is still drawing; cleared when the swipe commits or is cancelled.
@@ -183,6 +185,16 @@ final class WordAssistant {
         return false
     }
 
+    /// The user deleted a swipe the moment it landed. The next similar stroke tries another word.
+    func noteSwipedWordRefused(_ word: String) {
+        language?.noteSwipeRefusal(word: word, trace: swipeTrace ?? word)
+    }
+
+    /// Backspace brought a deleted swipe back, so that guess is welcome again.
+    func noteSwipedWordRestored(_ word: String) {
+        language?.forgetSwipeRefusal(word: word)
+    }
+
     /// The user picked `preferred` instead of the word a swipe just wrote. One choice pins it,
     /// so the next similar aim can find a spelling the dictionary does not know.
     func noteSwap(preferred: String, rejected: String?) {
@@ -209,11 +221,15 @@ final class WordAssistant {
         language?.noteSentenceEnded()
     }
 
-    func swipeCommitted(_ readings: [String], unsure _: Bool, literal: String? = nil) {
+    func swipeCommitted(_ readings: [String], unsure _: Bool, literal: String? = nil, advancesRefusalClock: Bool = false) {
+        if advancesRefusalClock {
+            language?.noteSwipeLanded()
+        }
         if let word = readings.first {
             language?.noteCommitted(word)
         }
         swipeReadings = readings
+        swipeTrace = literal
         tracedLiteral = readings.first { reading in
             guard let literal else { return false }
             return reading.compare(literal, options: .caseInsensitive) == .orderedSame

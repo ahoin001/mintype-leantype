@@ -76,9 +76,9 @@ struct StrokeBuffer {
     }
 
     /// The first time this stroke enters `letter`. Repeating the current letter does nothing.
-    mutating func arrive(_ letter: String, at center: CGPoint, touch: CGPoint, time: Double) {
+    mutating func arrive(_ letter: String, at center: CGPoint, touch: CGPoint? = nil, time: Double) {
         guard arrivals.last?.letter != letter else { return }
-        arrivals.append(KeyArrival(letter: letter, center: center, touch: touch, time: time))
+        arrivals.append(KeyArrival(letter: letter, center: center, touch: touch ?? center, time: time))
     }
 
     // MARK: - Private

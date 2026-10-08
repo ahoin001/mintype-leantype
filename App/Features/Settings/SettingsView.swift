@@ -27,7 +27,7 @@ struct SettingsView: View {
                     PebblePickerRow(
                         systemImage: "delete.left",
                         title: "A tap on delete removes",
-                        detail: "Swipe left on delete to erase letters, right to bring them back.",
+                        detail: "Swipe left on delete or shift to erase letters, right to bring them back.",
                         selection: $model.settings.backspaceTapAction,
                         options: [("A whole word", .deleteWord), ("One letter", .deleteCharacter)]
                     )
@@ -217,8 +217,8 @@ struct SettingsView: View {
             return count == 1 ? "1 spelling hidden." : "\(count) spellings hidden."
         }
         return data.learnedWordCount == 1
-            ? "1 word. Swipe it to forget just that one."
-            : "\(data.learnedWordCount) words. Swipe one to forget just that word."
+            ? "1 word."
+            : "\(data.learnedWordCount) words. Search, or jump by letter."
     }
 
     private var shortcutDetail: String {

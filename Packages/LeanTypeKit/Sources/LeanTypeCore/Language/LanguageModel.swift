@@ -30,6 +30,7 @@ public final class LanguageModel {
 
     private let store: (any LearnedWordsStore)?
     private let rejections: RejectionMemory
+    private let swipeRefusals = SwipeRefusalMemory()
     private let blocklist: Blocklist
     private let context: WordContext
     private var personal: PersonalLexicon
@@ -94,7 +95,7 @@ public final class LanguageModel {
 
     func decode(_ gesture: SwipeGesture, layout: LetterLayout) async -> DecodeResult {
         let result = await decoder.decode(gesture, layout: layout, personal: personalEntries)
-        return blocklist.applying(to: rejections.applying(to: context.applying(to: result)))
+        return finish(result, trace: Self.strokeTrace(of: gesture))
     }
 
     /// One alignment of a whole gesture: taps, anchors, and the keys a stroke only crossed.
@@ -107,7 +108,7 @@ public final class LanguageModel {
             lexicon: lexicon,
             costs: costs
         )
-        return blocklist.applying(to: rejections.applying(to: context.applying(to: result)))
+        return finish(result, trace: Self.strokeTrace(of: gesture))
     }
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when a later beat
@@ -134,9 +135,22 @@ public final class LanguageModel {
             pathScore: &pathScore
         )
         return SequenceOutcome(
-            result: blocklist.applying(to: rejections.applying(to: context.applying(to: result))),
+            result: finish(result, trace: evidence.aimedLetters),
             traced: evidence.aimedLetters
         )
+    }
+
+    /// Saved corrections first, then a swipe the user just deleted. The deletion only changes
+    /// the order when that same word would have led a similar stroke.
+    private func finish(_ result: DecodeResult, trace: String) -> DecodeResult {
+        swipeRefusals.applying(
+            to: blocklist.applying(to: rejections.applying(to: context.applying(to: result))),
+            trace: trace
+        )
+    }
+
+    private static func strokeTrace(of gesture: SwipeGesture) -> String {
+        gesture.tracedLetters.isEmpty ? gesture.evidence.aimedLetters : gesture.tracedLetters
     }
 
     private func preparedBigram() -> LetterBigram {
@@ -164,6 +178,25 @@ public final class LanguageModel {
     /// Remembers that the user wanted `preferred` instead of the `rejected` correction.
     func noteRejection(preferred: String, rejected: String) {
         rejections.note(preferred: preferred, rejected: rejected)
+    }
+
+    /// The user deleted this swipe the moment it landed. The next similar stroke tries another word.
+    func noteSwipeRefusal(word: String, trace: String) {
+        swipeRefusals.note(word: word, trace: trace)
+    }
+
+    /// A right-swipe on backspace put the deleted word back.
+    func forgetSwipeRefusal(word: String) {
+        swipeRefusals.forget(word: word)
+    }
+
+    /// A new swiped word landed, so older refusals step closer to being forgotten.
+    func noteSwipeLanded() {
+        swipeRefusals.noteSwipeLanded()
+    }
+
+    func applyingSwipeRefusals(to result: DecodeResult, trace: String) -> DecodeResult {
+        swipeRefusals.applying(to: result, trace: trace)
     }
 
     func applyingRejections(to result: DecodeResult) -> DecodeResult {

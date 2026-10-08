@@ -131,10 +131,11 @@ enum StrokeAnalyzer {
 
 /// Merges the strokes of one gesture into the path the decoder reads.
 enum GestureComposer {
-    /// A bend shallower than this, in radians, is the finger sliding on. About twenty-five
-    /// degrees: enough to drop a straight run of keys, and shallow enough to keep a corner
-    /// like R between T and A.
-    static let aimTurn: CGFloat = 0.45
+    /// A bend shallower than this, in radians, is the finger sliding on. A row change such as
+    /// R between T and A is about thirty-five degrees, so the bar sits just under that. A wobble
+    /// stays a crossing. `StrokeAnalyzer.turnAngle` is a sharper test for the raw polyline,
+    /// and it would drop those real corners.
+    static let aimTurn: CGFloat = 0.50
     /// How long a finger must sit on one key before that key is a letter. Travel, however
     /// slow, is not a pause.
     static let dwellDuration: Double = 0.18
@@ -188,19 +189,40 @@ enum GestureComposer {
     private static func strokeEvents(in stroke: StrokeBuffer, strokeIndex: Int, tuning: EvidenceTuning) -> [SwipeEvent] {
         let arrivals = StrokeLetters.aimedArrivals(stroke.arrivals)
         guard !arrivals.isEmpty else { return [] }
+        var turns: [CGFloat] = []
+        turns.reserveCapacity(arrivals.count)
+        for (index, _) in arrivals.enumerated() {
+            if index > 0, index + 1 < arrivals.count {
+                // The finger's path, not the key centers. Centers zigzag across rows even when
+                // the stroke is straight, and that was promoting every graze to a corner.
+                turns.append(turn(arrivals[index - 1].touch, arrivals[index].touch, arrivals[index + 1].touch))
+            } else {
+                turns.append(0)
+            }
+        }
         var events: [SwipeEvent] = []
         for (index, arrival) in arrivals.enumerated() {
             let nextTime = index + 1 < arrivals.count ? arrivals[index + 1].time : (stroke.points.last?.time ?? arrival.time)
-            let turnAngle: CGFloat
-            if index > 0, index + 1 < arrivals.count {
-                turnAngle = turn(arrivals[index - 1].center, arrival.center, arrivals[index + 1].center)
-            } else {
-                turnAngle = 0
-            }
+            let turnAngle = turns[index]
             let dwell = dwellDuration(on: arrival, until: nextTime, in: stroke, tuning: tuning)
             let endpoint = index == 0 || index == arrivals.count - 1
-            let anchored = endpoint || turnAngle >= tuning.aimTurn || dwell >= tuning.dwellDuration
-            guard events.last?.letter != arrival.letter else { continue }
+            // One corner, one anchor, unless the finger actually landed on this key. A graze
+            // on the shoulder of a sharper bend stays a crossing. A second press of the same
+            // key, such as the last L in "pill", keeps the key and makes it the endpoint.
+            let previousTurn = index > 0 ? turns[index - 1] : 0
+            let nextTurn = index + 1 < turns.count ? turns[index + 1] : 0
+            let peaked = turnAngle >= tuning.aimTurn && turnAngle >= previousTurn && turnAngle >= nextTurn
+            let onCenter = hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y) <= 8
+            let aimedCorner = turnAngle >= tuning.aimTurn && onCenter
+            let anchored = endpoint || peaked || aimedCorner || dwell >= tuning.dwellDuration
+            if events.last?.letter == arrival.letter {
+                if anchored, let last = events.indices.last {
+                    events[last].role = .anchor
+                    events[last].time = arrival.time
+                    events[last].point = arrival.touch
+                }
+                continue
+            }
             events.append(SwipeEvent(
                 time: arrival.time,
                 point: arrival.touch,

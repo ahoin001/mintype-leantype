@@ -428,6 +428,10 @@ public final class KeyboardEngine {
             shift.pressEnded(at: scheduler.now, insertionCount: insertionCount)
             changed = true
             changesText = false
+        case .shiftPressCancelled:
+            shift.cancelPress()
+            changed = true
+            changesText = false
         case let .switchLayer(target):
             changed = setLayer(target)
             changesText = false
@@ -832,7 +836,7 @@ public final class KeyboardEngine {
         editor.commitWord(cased[0])
         noteRhythm(priorChunks.flatMap(\.events) + events)
         let literal = BeatChooser.collapse((priorChunks.flatMap(\.events) + events).map(\.letter).joined())
-        words.swipeCommitted(cased, unsure: tentative, literal: literal)
+        words.swipeCommitted(cased, unsure: tentative, literal: literal, advancesRefusalClock: countsAsNewWord)
         var chunks = priorChunks
         chunks.append(OpenChunk(events: events, readings: cased, score: score))
         openWord = OpenWord(chunks: chunks)
@@ -980,6 +984,7 @@ public final class KeyboardEngine {
         guard let restored = editor.restoreLastDeletion() else { return false }
         let visible = restored.trimmingCharacters(in: .whitespacesAndNewlines)
         if !visible.isEmpty {
+            words.noteSwipedWordRestored(visible)
             emit(.deletionRestored(visible, origin: center(of: .backspace)))
         }
         return true
@@ -999,6 +1004,7 @@ public final class KeyboardEngine {
         case .completed:
             words.keep(commit.original)
         case .swiped:
+            words.noteSwipedWordRefused(commit.word)
             emit(.wordDeleted(commit.word, origin: center(of: .backspace)))
         }
         flow.noteDeletion()
