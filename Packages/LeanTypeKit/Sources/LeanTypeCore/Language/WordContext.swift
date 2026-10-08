@@ -273,6 +273,40 @@ final class WordContext {
         recent.removeAll()
     }
 
+    /// Up to three words the next stroke is likely to be. Personal memory wins over the
+    /// static lists, and a sentence start only offers sentence openers. The decoder scores
+    /// these; it does not promote them on its own.
+    func expectedWords() -> [String] {
+        guard let immediate = recent.last else {
+            return Array(Self.sentenceStarters.prefix(3))
+        }
+        let tripleKey = recent.count >= 2 ? recent.suffix(2).joined(separator: " ") : nil
+        if let tripleKey {
+            let personal = pairs.filter { $0.previous == tripleKey }
+            if !personal.isEmpty {
+                return Self.leading(personal, limit: 3)
+            }
+        }
+        let personalPair = pairs.filter { $0.previous == immediate }
+        if !personalPair.isEmpty {
+            return Self.leading(personalPair, limit: 3)
+        }
+        if let tripleKey, let common = Self.commonTriples[tripleKey] {
+            return Array(common.prefix(3))
+        }
+        guard let common = Self.commonFollowers[immediate] else { return [] }
+        return Array(common.prefix(3))
+    }
+
+    private static func leading(_ pairs: [WordPair], limit: Int) -> [String] {
+        pairs.sorted { lhs, rhs in
+            if lhs.uses != rhs.uses { return lhs.uses > rhs.uses }
+            return lhs.lastUsed > rhs.lastUsed
+        }
+        .prefix(limit)
+        .map(\.next)
+    }
+
     /// Moves a remembered follower ahead of the top word when the two were already close.
     /// A triple this user has written wins over a pair. A personal pair wins over the static
     /// list. With no personal memory, a common triple, then a common pair, can break the tie.

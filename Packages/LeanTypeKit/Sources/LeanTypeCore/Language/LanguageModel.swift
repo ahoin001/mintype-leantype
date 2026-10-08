@@ -33,6 +33,8 @@ public final class LanguageModel {
     private let swipeRefusals = SwipeRefusalMemory()
     private let blocklist: Blocklist
     private let context: WordContext
+    private let habits: HabitMemory
+    private var habitBonuses: [String: Double]
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
     private var letterBigram: LetterBigram?
@@ -46,6 +48,7 @@ public final class LanguageModel {
         store: (any LearnedWordsStore)? = nil,
         rejections rejectionStore: (any RejectionStore)? = nil,
         wordContext contextStore: (any WordContextStore)? = nil,
+        habits habitStore: (any HabitStore)? = nil,
         blocklist blocklistStore: (any BlocklistStore)? = nil
     ) {
         self.lexicon = lexicon
@@ -53,6 +56,9 @@ public final class LanguageModel {
         rejections = RejectionMemory(store: rejectionStore)
         blocklist = Blocklist(store: blocklistStore)
         context = WordContext(store: contextStore)
+        let memory = HabitMemory(store: habitStore)
+        habits = memory
+        habitBonuses = memory.bonuses()
         decoder = PathDecoder(lexicon: lexicon)
         aligner = AlignmentDecoder()
         personal = PersonalLexicon(learned: store?.load() ?? [])
@@ -64,6 +70,7 @@ public final class LanguageModel {
         store: (any LearnedWordsStore)? = nil,
         rejections: (any RejectionStore)? = nil,
         wordContext: (any WordContextStore)? = nil,
+        habits: (any HabitStore)? = nil,
         blocklist: (any BlocklistStore)? = nil
     ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
@@ -72,6 +79,7 @@ public final class LanguageModel {
             store: store,
             rejections: rejections,
             wordContext: wordContext,
+            habits: habits,
             blocklist: blocklist
         )
     }
@@ -100,13 +108,17 @@ public final class LanguageModel {
 
     /// One alignment of a whole gesture: taps, anchors, and the keys a stroke only crossed.
     func align(_ gesture: SwipeGesture, layout: LetterLayout, costs: AlignmentCosts = .standard) async -> DecodeResult {
+        let expected = context.expectedWords()
+        let bonuses = habitBonuses
         let result = await aligner.decode(
             gesture,
             layout: layout,
             personal: personalEntries,
             bigram: preparedBigram(),
             lexicon: lexicon,
-            costs: costs
+            costs: costs,
+            expected: expected,
+            habits: bonuses
         )
         return finish(result, trace: Self.strokeTrace(of: gesture))
     }
@@ -132,6 +144,8 @@ public final class LanguageModel {
             personal: personalEntries,
             bigram: preparedBigram(),
             costs: costs,
+            expected: context.expectedWords(),
+            habits: habitBonuses,
             pathScore: &pathScore
         )
         return SequenceOutcome(
@@ -163,6 +177,18 @@ public final class LanguageModel {
     /// The word that just landed, so the next swipe can prefer what usually follows it.
     func noteCommitted(_ word: String) {
         context.noteCommitted(word)
+        habits.note(word)
+        habitBonuses = habits.bonuses()
+    }
+
+    /// Words the next stroke is likely to be, from the words just written.
+    func expectedWords() -> [String] {
+        context.expectedWords()
+    }
+
+    /// The ranking bump earned by committing `word`. Zero until the second commit.
+    func habitBonus(of word: String) -> Double {
+        habitBonuses[word.lowercased()] ?? 0
     }
 
     /// A period, question mark, exclamation, or new line. The next word is a new sentence.

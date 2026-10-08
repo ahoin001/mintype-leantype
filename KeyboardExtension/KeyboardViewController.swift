@@ -20,6 +20,7 @@ final class KeyboardViewController: UIInputViewController {
         store: AppGroupLearnedWordsStore(),
         rejections: AppGroupRejectionStore(),
         wordContext: AppGroupWordContextStore(),
+        habits: AppGroupHabitStore(),
         blocklist: AppGroupBlocklistStore()
     )
     private let crashMonitor = ExtensionCrashMonitor()

@@ -89,7 +89,18 @@ public final class MappedLexicon: Sendable {
         guard bucketEntries + wordCount * 4 <= bytes.count else {
             throw LexiconFormat.Error.corrupt("sections exceed file size")
         }
+        twoLetterPeak = Self.twoLetterPeaks(
+            bytes: bytes,
+            wordCount: wordCount,
+            frequencies: frequencies,
+            keyOffsets: keyOffsets,
+            keyBlob: keyBlob
+        )
     }
+
+    /// Best frequency of any word with this two-letter prefix, packed as `frequency + 1`.
+    /// Zero means no word starts that way. Used only to keep a common stem in the beam.
+    private let twoLetterPeak: [UInt16]
 
     // MARK: - Per-word access
 
@@ -115,7 +126,23 @@ public final class MappedLexicon: Sendable {
 
     /// Natural log of the word's occurrence count, reconstructed from its frequency byte.
     public func logCount(at index: Int) -> Double {
-        logCountRange.lowerBound + Double(frequency(at: index)) / 255 * (logCountRange.upperBound - logCountRange.lowerBound)
+        logCount(forFrequency: frequency(at: index))
+    }
+
+    /// Log count of the most common word whose key starts with these two letters.
+    /// Shorter prefixes, and pairs no word uses, have no prior.
+    func prefixLogCount(_ letters: [UInt8]) -> Double? {
+        guard letters.count >= 2 else { return nil }
+        let first = LexiconKey.index(of: letters[0])
+        let second = LexiconKey.index(of: letters[1])
+        guard (0..<LexiconKey.letterCount).contains(first), (0..<LexiconKey.letterCount).contains(second) else { return nil }
+        let packed = twoLetterPeak[first * LexiconKey.letterCount + second]
+        guard packed > 0 else { return nil }
+        return logCount(forFrequency: UInt8(packed - 1))
+    }
+
+    private func logCount(forFrequency frequency: UInt8) -> Double {
+        logCountRange.lowerBound + Double(frequency) / 255 * (logCountRange.upperBound - logCountRange.lowerBound)
     }
 
     // MARK: - Searching
@@ -173,6 +200,32 @@ public final class MappedLexicon: Sendable {
     }
 
     // MARK: - Private
+
+    /// One pass over the word list. The beam reads this instead of scanning every prefix.
+    private static func twoLetterPeaks(
+        bytes: UnsafeRawBufferPointer,
+        wordCount: Int,
+        frequencies: Int,
+        keyOffsets: Int,
+        keyBlob: Int
+    ) -> [UInt16] {
+        var peaks = [UInt16](repeating: 0, count: LexiconKey.letterCount * LexiconKey.letterCount)
+        func offset(_ section: Int, _ index: Int) -> Int {
+            Int(bytes.loadUnaligned(fromByteOffset: section + index * 4, as: UInt32.self).littleEndian)
+        }
+        for index in 0..<wordCount {
+            let start = offset(keyOffsets, index)
+            let end = offset(keyOffsets, index + 1)
+            guard end - start >= 2 else { continue }
+            let first = LexiconKey.index(of: bytes[keyBlob + start])
+            let second = LexiconKey.index(of: bytes[keyBlob + start + 1])
+            guard (0..<LexiconKey.letterCount).contains(first), (0..<LexiconKey.letterCount).contains(second) else { continue }
+            let slot = first * LexiconKey.letterCount + second
+            let packed = UInt16(bytes[frequencies + index]) + 1
+            if packed > peaks[slot] { peaks[slot] = packed }
+        }
+        return peaks
+    }
 
     @inline(__always)
     private func u32(_ section: Int, _ index: Int) -> Int {

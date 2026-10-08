@@ -1083,6 +1083,125 @@ struct SwipeTypingTests {
         #expect(result.words.first?.lowercased() == "live")
     }
 
+    @Test func anInterleavedTwoThumbWordDecodes() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let l = layout.center(of: UInt8(ascii: "l"))
+        let v = layout.center(of: UInt8(ascii: "v"))
+        let i = layout.center(of: UInt8(ascii: "i"))
+        let e = layout.center(of: UInt8(ascii: "e"))
+        let events = [
+            SwipeEvent(time: 0, point: l, letter: "l", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.05, point: v, letter: "v", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.2, point: i, letter: "i", role: .anchor, strokeIndex: 1),
+            SwipeEvent(time: 0.25, point: e, letter: "e", role: .anchor, strokeIndex: 1),
+        ]
+        let gesture = SwipeGesture(
+            path: [l, v, i, e],
+            strokeCount: 2,
+            strokePaths: [[l, v], [i, e]],
+            tracedLetters: "lvie",
+            observations: [],
+            evidence: SwipeEvidence(events: events, aimedLetters: "lvie")
+        )
+        let result = decode(gesture, layout: layout)
+        #expect(result.words.contains { $0.lowercased() == "live" })
+        #expect(result.words.first?.lowercased() == "live")
+    }
+
+    @Test func aCommonPrefixOutranksARarerOne() {
+        let lexicon = TestLexicon.shared
+        let common = lexicon.prefixLogCount([UInt8(ascii: "t"), UInt8(ascii: "h")])
+        let rare = lexicon.prefixLogCount([UInt8(ascii: "q"), UInt8(ascii: "q")])
+        #expect(common != nil)
+        #expect((common ?? 0) > (rare ?? -.greatestFiniteMagnitude))
+        #expect(lexicon.prefixLogCount([UInt8(ascii: "t")]) == nil)
+    }
+
+    @Test func aFollowerThePathFitsJoinsTheListAndAMissStaysOut() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("of")
+        #expect(language.expectedWords().first == "the")
+        guard let fitting = exactSwipe("the", layout: layout), let other = exactSwipe("quick", layout: layout) else {
+            Issue.record("Gesture missing")
+            return
+        }
+        let found = decode(fitting, layout: layout, expected: language.expectedWords())
+        #expect(found.words.contains { $0.lowercased() == "the" })
+        let missed = decode(other, layout: layout, expected: ["the"])
+        #expect(missed.words.first?.lowercased() != "the")
+    }
+
+    @Test func aRepeatedWordBeatsAnEqualShapeAndOneUseDoesNot() {
+        #expect(HabitMemory.bonus(uses: 1) == 0)
+        #expect(HabitMemory.bonus(uses: 2) > 0)
+        #expect(HabitMemory.bonus(uses: 2) < DecodeResult.confidenceMargin)
+        #expect(HabitMemory.bonus(uses: 10_000) == 0.45)
+
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("live")
+        #expect(language.habitBonus(of: "live") == 0)
+        language.noteCommitted("live")
+        #expect(language.habitBonus(of: "live") > 0)
+
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry),
+              let gesture = exactSwipe("live", layout: layout) else {
+            Issue.record("Gesture missing")
+            return
+        }
+        let plain = decode(gesture, layout: layout)
+        guard let leader = plain.readings.first, plain.readings.count > 1 else {
+            Issue.record("Need a runner-up")
+            return
+        }
+        let rival = plain.readings[1]
+        let once = decode(gesture, layout: layout, habits: [rival.word.lowercased(): HabitMemory.bonus(uses: 1)])
+        #expect(once.words.first?.lowercased() == leader.word.lowercased())
+        let repeated = decode(gesture, layout: layout, habits: [rival.word.lowercased(): 0.45])
+        let plainScore = plain.readings.first { $0.word.lowercased() == rival.word.lowercased() }?.score
+        let boostedScore = repeated.readings.first { $0.word.lowercased() == rival.word.lowercased() }?.score
+        #expect((boostedScore ?? 0) > (plainScore ?? 0) + 0.4)
+        // The keys still spelled the leader. A habit inside the exact-lead window does not
+        // replace that spelling; it does move an equal, unaligned shape.
+        #expect(repeated.words.first?.lowercased() == leader.word.lowercased())
+        let tied = DecodeResult(readings: [
+            .init(word: "live", score: -1),
+            .init(word: "love", score: -1),
+        ])
+        let broken = tied.readings.map { reading -> DecodeResult.Reading in
+            let bonus = reading.word == "love" ? HabitMemory.bonus(uses: 32) : 0
+            return .init(word: reading.word, score: reading.score + bonus)
+        }.sorted { $0.score > $1.score }
+        #expect(broken.first?.word == "love")
+        #expect(HabitMemory.bonus(uses: 1) == 0)
+    }
+
+    @Test func aRejectedWordYieldsWhenThePreferredSpellingIsMissing() {
+        let model = LanguageModel(lexicon: TestLexicon.shared)
+        model.noteRejection(preferred: "teh", rejected: "the")
+        let yielded = model.applyingRejections(to: DecodeResult(readings: [
+            .init(word: "the", score: -0.1),
+            .init(word: "three", score: -0.4),
+        ]))
+        #expect(yielded.words.first == "three")
+
+        model.noteRejection(preferred: "other", rejected: "three")
+        let stuck = model.applyingRejections(to: DecodeResult(readings: [
+            .init(word: "the", score: -0.1),
+            .init(word: "three", score: -0.4),
+        ]))
+        #expect(stuck.words == ["the", "three"])
+    }
+
     /// A path through the word's key centers, also entering whatever keys that line crosses.
     private func exactSwipe(_ word: String, layout: LetterLayout, split: Bool = false) -> SwipeGesture? {
         let letters = LexiconKey.make(word)
@@ -1139,7 +1258,12 @@ struct SwipeTypingTests {
         return GestureComposer.compose([buffer])
     }
 
-    private func decode(_ gesture: SwipeGesture, layout: LetterLayout) -> DecodeResult {
+    private func decode(
+        _ gesture: SwipeGesture,
+        layout: LetterLayout,
+        expected: [String] = [],
+        habits: [String: Double] = [:]
+    ) -> DecodeResult {
         var score = PathScore()
         return AlignmentSearch.decode(
             gesture,
@@ -1148,6 +1272,8 @@ struct SwipeTypingTests {
             personal: [],
             bigram: LetterBigram(lexicon: TestLexicon.shared),
             costs: .standard,
+            expected: expected,
+            habits: habits,
             pathScore: &score
         )
     }

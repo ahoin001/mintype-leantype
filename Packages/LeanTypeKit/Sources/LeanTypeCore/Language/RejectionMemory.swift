@@ -83,16 +83,27 @@ final class RejectionMemory {
     }
 
     /// If the top reading is a word the user already rejected, a stored preference in the
-    /// same result moves ahead of it. The most recently used preference wins.
+    /// same result moves ahead of it. When that preference is not in the list, the next
+    /// reading that was not rejected leads. If every reading was rejected, the order stays.
     func applying(to result: DecodeResult) -> DecodeResult {
         guard let top = result.readings.first else { return result }
         let topKey = top.word.lowercased()
-        guard let match = entries.reversed().first(where: { entry in
+        if let match = entries.reversed().first(where: { entry in
             entry.rejected == topKey && result.readings.contains { $0.word.lowercased() == entry.preferred }
-        }) else { return result }
-        guard let index = result.readings.firstIndex(where: { $0.word.lowercased() == match.preferred }), index != 0 else {
-            return result
+        }),
+           let index = result.readings.firstIndex(where: { $0.word.lowercased() == match.preferred }),
+           index != 0 {
+            return moved(result, at: index)
         }
+        let refused = Set(entries.map(\.rejected))
+        guard refused.contains(topKey),
+              let index = result.readings.firstIndex(where: { !refused.contains($0.word.lowercased()) }),
+              index != 0
+        else { return result }
+        return moved(result, at: index)
+    }
+
+    private func moved(_ result: DecodeResult, at index: Int) -> DecodeResult {
         var readings = result.readings
         let chosen = readings.remove(at: index)
         readings.insert(chosen, at: 0)

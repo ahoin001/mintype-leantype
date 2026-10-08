@@ -44,6 +44,8 @@ enum AlignmentSearch {
         personal: [PersonalLexicon.Entry],
         bigram: LetterBigram,
         costs: AlignmentCosts,
+        expected: [String] = [],
+        habits: [String: Double] = [:],
         pathScore: inout PathScore
     ) -> DecodeResult {
         let raw = gesture.evidence.events.isEmpty
@@ -56,11 +58,22 @@ enum AlignmentSearch {
         var readings: [DecodeResult.Reading] = []
         for order in orders(of: steps, costs: costs) {
             let penalty = orderPenalty(order, costs: costs)
-            let ranked = beam(order, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs)
+            let ranked = beam(order, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs, habits: habits)
                 .map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
             readings = merge(readings, ranked)
         }
         readings = rescore(readings, gesture: gesture, layout: layout, costs: costs, pathScore: &pathScore)
+        readings = addingExpected(
+            readings,
+            words: expected,
+            gesture: gesture,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personal,
+            costs: costs,
+            habits: habits,
+            pathScore: &pathScore
+        )
         readings = addingShape(
             readings,
             gesture: gesture,
@@ -68,6 +81,7 @@ enum AlignmentSearch {
             lexicon: lexicon,
             personal: personal,
             costs: costs,
+            habits: habits,
             pathScore: &pathScore
         )
         let aimed = gesture.evidence.aimedLetters.isEmpty ? gesture.tracedLetters : gesture.evidence.aimedLetters
@@ -151,7 +165,8 @@ enum AlignmentSearch {
         lexicon: MappedLexicon,
         personal: [PersonalLexicon.Entry],
         bigram: LetterBigram,
-        costs: AlignmentCosts
+        costs: AlignmentCosts,
+        habits: [String: Double]
     ) -> [DecodeResult.Reading] {
         var beam = [Hypothesis(letters: [], score: 0, anchorSkips: 0, lastX: 0, lastY: 0, placed: false, lastStroke: nil)]
         for step in steps {
@@ -186,13 +201,13 @@ enum AlignmentSearch {
                     }
                 }
             }
-            beam = prune(next, width: costs.beamWidth)
+            beam = prune(next, lexicon: lexicon, costs: costs)
             if beam.isEmpty { return [] }
         }
 
         var scored: [Scored] = []
         for hypothesis in beam {
-            consider(hypothesis, lexicon: lexicon, personal: personal, costs: costs, into: &scored)
+            consider(hypothesis, lexicon: lexicon, personal: personal, costs: costs, habits: habits, into: &scored)
         }
         scored.sort { $0.score > $1.score }
         var seen = Set<String>()
@@ -341,7 +356,14 @@ enum AlignmentSearch {
         }
     }
 
-    private static func prune(_ hypotheses: [Hypothesis], width: Int) -> [Hypothesis] {
+    /// Keeps the best spatial score for each prefix, then the widest beam.
+    /// The two-letter frequency prior only decides who survives. It is not stored on the
+    /// hypothesis, so the final word frequency is added once, in `consider`.
+    private static func prune(
+        _ hypotheses: [Hypothesis],
+        lexicon: MappedLexicon,
+        costs: AlignmentCosts
+    ) -> [Hypothesis] {
         var best: [String: Hypothesis] = [:]
         best.reserveCapacity(hypotheses.count)
         for hypothesis in hypotheses {
@@ -349,7 +371,25 @@ enum AlignmentSearch {
             if let existing = best[key], existing.score >= hypothesis.score { continue }
             best[key] = hypothesis
         }
-        return best.values.sorted { $0.score > $1.score }.prefix(width).map { $0 }
+        return best.values.sorted { lhs, rhs in
+            survival(lhs, lexicon: lexicon, costs: costs) > survival(rhs, lexicon: lexicon, costs: costs)
+        }.prefix(costs.beamWidth).map { $0 }
+    }
+
+    private static func survival(
+        _ hypothesis: Hypothesis,
+        lexicon: MappedLexicon,
+        costs: AlignmentCosts
+    ) -> Double {
+        guard let prior = lexicon.prefixLogCount(hypothesis.letters) else { return hypothesis.score }
+        let lower = lexicon.logCountRange.lowerBound
+        let span = lexicon.logCountRange.upperBound - lower
+        guard span > 0 else { return hypothesis.score }
+        // The table stores a raw log count. Using it whole outweighs the path, so a common
+        // stem such as "ve" can crowd out the letters the finger actually drew. The byte's
+        // place in the frequency range keeps the nudge inside one frequency weight.
+        let fraction = min(1, max(0, (prior - lower) / span))
+        return hypothesis.score + costs.frequencyWeight * fraction
     }
 
     private static func consider(
@@ -357,15 +397,17 @@ enum AlignmentSearch {
         lexicon: MappedLexicon,
         personal: [PersonalLexicon.Entry],
         costs: AlignmentCosts,
+        habits: [String: Double],
         into scored: inout [Scored]
     ) {
         guard hypothesis.letters.count >= 2 else { return }
         let matches = lexicon.indices(ofKey: hypothesis.letters)
         if !matches.isEmpty {
             for index in matches {
+                let display = lexicon.display(at: index)
                 scored.append(Scored(
                     source: .dictionary(index),
-                    score: hypothesis.score + costs.frequencyWeight * lexicon.logCount(at: index)
+                    score: hypothesis.score + costs.frequencyWeight * lexicon.logCount(at: index) + habitBonus(display, habits: habits)
                 ))
             }
             return
@@ -373,9 +415,16 @@ enum AlignmentSearch {
         for (offset, entry) in personal.enumerated() where entry.key == hypothesis.letters {
             scored.append(Scored(
                 source: .personal(offset),
-                score: hypothesis.score + costs.frequencyWeight * entry.logCount
+                score: hypothesis.score + costs.frequencyWeight * entry.logCount + habitBonus(entry.display, habits: habits)
             ))
         }
+    }
+
+    /// A small bump for a word this user actually commits. Zero until the second use, and
+    /// never larger than one close call, so a bad shape still loses.
+    private static func habitBonus(_ word: String, habits: [String: Double]) -> Double {
+        guard !habits.isEmpty else { return 0 }
+        return habits[word.lowercased()] ?? 0
     }
 
     // MARK: - Shape
@@ -521,6 +570,68 @@ enum AlignmentSearch {
         return -8
     }
 
+    /// How far `word` sits from `path`, in key widths. Nil when the word is too short to measure.
+    private static func location(
+        of word: String,
+        path: [CGPoint],
+        layout: LetterLayout,
+        pathScore: inout PathScore
+    ) -> CGFloat? {
+        let key = LexiconKey.make(word)
+        guard key.count >= 2, pathScore.prepare(path, layout: layout) else { return nil }
+        return pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout).location
+    }
+
+    // MARK: - Expected words
+
+    /// Scores the few words the previous word suggests. A word already on the list keeps its
+    /// beam score. A new word is inserted only when this stroke actually fits it, at that fit,
+    /// so a later close-call can promote it and a miss stays out.
+    private static func addingExpected(
+        _ readings: [DecodeResult.Reading],
+        words: [String],
+        gesture: SwipeGesture,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        costs: AlignmentCosts,
+        habits: [String: Double],
+        pathScore: inout PathScore
+    ) -> [DecodeResult.Reading] {
+        guard !words.isEmpty else { return readings }
+        var best: [String: DecodeResult.Reading] = [:]
+        for reading in readings {
+            best[reading.word.lowercased()] = reading
+        }
+        for word in words.prefix(3) {
+            let key = word.lowercased()
+            if best[key] != nil { continue }
+            guard let known = knownWord(word, lexicon: lexicon, personal: personal) else { continue }
+            let letters = LexiconKey.make(known.display)
+            let fit = gestureFit(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
+            guard fit < 0, fit > -8 else { continue }
+            let score = fit + costs.frequencyWeight * known.logCount + habitBonus(known.display, habits: habits)
+            best[key] = DecodeResult.Reading(word: known.display, score: score)
+        }
+        return best.values.sorted { $0.score > $1.score }
+    }
+
+    /// The same path term `rescore` adds: one stroke against the whole word, two strokes
+    /// against the slices those thumbs explain.
+    private static func gestureFit(
+        _ letters: [UInt8],
+        gesture: SwipeGesture,
+        layout: LetterLayout,
+        pathScore: inout PathScore
+    ) -> Double {
+        let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
+        guard !paths.isEmpty else { return 0 }
+        if paths.count == 1 {
+            return pathFit(letters, path: paths[0], layout: layout, pathScore: &pathScore)
+        }
+        return wordOnStrokes(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
+    }
+
     // MARK: - Shape nominations
 
     /// How many curve matches from each thumb may be joined into a two-stroke word.
@@ -528,6 +639,8 @@ enum AlignmentSearch {
 
     /// Words the curve found that the beam did not. A word already on the list keeps the
     /// beam's score. A new word is inserted with its path fit and the frequency prior.
+    /// A one-stroke curve stays just outside the tie margin, unless the finger is clearly
+    /// closer to that word than to the beam's leader and no tap is holding a letter down.
     private static func addingShape(
         _ readings: [DecodeResult.Reading],
         gesture: SwipeGesture,
@@ -535,20 +648,34 @@ enum AlignmentSearch {
         lexicon: MappedLexicon,
         personal: [PersonalLexicon.Entry],
         costs: AlignmentCosts,
+        habits: [String: Double],
         pathScore: inout PathScore
     ) -> [DecodeResult.Reading] {
         let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
         let extra: [DecodeResult.Reading]
         if paths.count == 2 {
-            extra = joinedNominations(paths, gesture: gesture, layout: layout, lexicon: lexicon, personal: personal, costs: costs, pathScore: &pathScore)
+            let joined = joinedNominations(paths, gesture: gesture, layout: layout, lexicon: lexicon, personal: personal, costs: costs, pathScore: &pathScore)
+            let merged = mergedNominations(
+                readings,
+                gesture: gesture,
+                layout: layout,
+                lexicon: lexicon,
+                personal: personal,
+                costs: costs,
+                pathScore: &pathScore
+            )
+            extra = joined + merged
         } else {
             extra = singleStrokeNominations(paths, layout: layout, lexicon: lexicon, personal: personal, pathScore: &pathScore)
         }
         guard !extra.isEmpty else { return readings }
-        // A one-stroke curve word the beam missed can fill the strip. It stays just outside
-        // the tie margin, so it cannot outrank the beam or win a sentence-start coin-flip.
-        // Two thumbs keep their own scores: the join is often the word the beam did not spell.
+        let tapped = gesture.evidence.events.contains { $0.role == .tap }
         let cap = paths.count == 1 ? readings.map(\.score).max().map { $0 - DecodeResult.confidenceMargin - 0.01 } : nil
+        let leaderLocation: CGFloat? = {
+            guard paths.count == 1, !tapped, let path = paths.first,
+                  let leader = readings.max(by: { $0.score < $1.score }) else { return nil }
+            return location(of: leader.word, path: path, layout: layout, pathScore: &pathScore)
+        }()
         var best: [String: DecodeResult.Reading] = [:]
         for reading in readings {
             best[reading.word.lowercased()] = reading
@@ -557,10 +684,28 @@ enum AlignmentSearch {
             let key = reading.word.lowercased()
             // The beam already explained this word. Its score stands. The two scores are not added.
             if best[key] != nil { continue }
-            let score = cap.map { min(reading.score, $0) } ?? reading.score
+            var score = reading.score + habitBonus(reading.word, habits: habits)
+            if let cap {
+                let clearlyCloser = !tapped && paths.count == 1 && paths.first.map { path in
+                    isClearlyCloser(reading.word, than: leaderLocation, path: path, layout: layout, pathScore: &pathScore)
+                } == true
+                if !clearlyCloser { score = min(score, cap) }
+            }
             best[key] = DecodeResult.Reading(word: reading.word, score: score)
         }
         return best.values.sorted { $0.score > $1.score }
+    }
+
+    /// The shape word leads only when its path sits at least 0.35 key widths closer than the beam leader.
+    private static func isClearlyCloser(
+        _ word: String,
+        than leader: CGFloat?,
+        path: [CGPoint],
+        layout: LetterLayout,
+        pathScore: inout PathScore
+    ) -> Bool {
+        guard let leader, let shape = location(of: word, path: path, layout: layout, pathScore: &pathScore) else { return false }
+        return leader - shape >= 0.35
     }
 
     private static func singleStrokeNominations(
@@ -682,6 +827,95 @@ enum AlignmentSearch {
         return nil
     }
 
+    /// Words both thumbs' anchors sit inside, including an interleaving the left-plus-right
+    /// join never spells. Each thumb is scored on its own path. `wordOnStrokes` would require
+    /// the thumbs to own sequential slices, so "l v" plus "i e" could not be "live".
+    private static func mergedNominations(
+        _ readings: [DecodeResult.Reading],
+        gesture: SwipeGesture,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        costs: AlignmentCosts,
+        pathScore: inout PathScore
+    ) -> [DecodeResult.Reading] {
+        let thumbs = thumbs(in: gesture)
+        guard thumbs.count == 2 else { return [] }
+        let left = thumbs[0].letters
+        let right = thumbs[1].letters
+        guard let leftFirst = left.first, let leftLast = left.last,
+              let rightFirst = right.first, let rightLast = right.last else { return [] }
+        let maxLength = left.count + right.count + 2
+        let fit = thumbFit(thumbs, layout: layout, pathScore: &pathScore)
+        guard fit < 0, fit > -8 else { return [] }
+        let beamCoversBoth = readings.contains { reading in
+            let key = LexiconKey.make(reading.word)
+            return key.withUnsafeBytes { raw in
+                isSubsequence(left, of: raw) && isSubsequence(right, of: raw)
+            }
+        }
+        let ceiling = beamCoversBoth ? readings.map(\.score).max() : nil
+
+        var pairs: [(UInt8, UInt8)] = []
+        for first in [leftFirst, rightFirst] {
+            for last in [leftLast, rightLast] where !pairs.contains(where: { $0.0 == first && $0.1 == last }) {
+                pairs.append((first, last))
+            }
+        }
+        var best: [(word: String, score: Double)] = []
+        func keep(_ display: String, logCount: Double, key: UnsafeRawBufferPointer) {
+            guard key.count >= 2, key.count <= maxLength else { return }
+            guard isSubsequence(left, of: key), isSubsequence(right, of: key) else { return }
+            let spare = max(0, key.count - left.count - right.count)
+            guard spare <= 2 else { return }
+            var score = fit + costs.frequencyWeight * logCount - costs.lengthWeight * Double(spare)
+            if let ceiling { score = min(score, ceiling - 0.01) }
+            if best.contains(where: { $0.word.compare(display, options: .caseInsensitive) == .orderedSame }) { return }
+            let position = best.firstIndex { $0.score < score } ?? best.count
+            best.insert((display, score), at: position)
+            if best.count > 8 { best.removeLast() }
+        }
+        for (first, last) in pairs {
+            let bucket = lexicon.bucket(first: first, last: last)
+            let limit = min(PathDecoder.bucketScanLimit, bucket.count)
+            for offset in 0..<limit {
+                let index = Int(bucket[offset])
+                keep(lexicon.display(at: index), logCount: lexicon.logCount(at: index), key: lexicon.key(at: index))
+            }
+        }
+        for entry in personal {
+            guard let first = entry.key.first, let last = entry.key.last,
+                  pairs.contains(where: { $0.0 == first && $0.1 == last }) else { continue }
+            entry.key.withUnsafeBytes { raw in
+                keep(entry.display, logCount: entry.logCount, key: raw)
+            }
+        }
+        return best.map { DecodeResult.Reading(word: $0.word, score: $0.score) }
+    }
+
+    /// Both thumbs followed their own letters. One unscored thumb rejects the merge.
+    private static func thumbFit(
+        _ thumbs: [ThumbSlice],
+        layout: LetterLayout,
+        pathScore: inout PathScore
+    ) -> Double {
+        var total = 0.0
+        for thumb in thumbs {
+            let fit = pathFit(thumb.letters, path: thumb.path, layout: layout, pathScore: &pathScore)
+            guard fit < 0, fit > -8 else { return -8 }
+            total += fit
+        }
+        return total / Double(thumbs.count)
+    }
+
+    private static func isSubsequence(_ needle: [UInt8], of word: UnsafeRawBufferPointer) -> Bool {
+        var index = 0
+        for byte in word where index < needle.count && byte == needle[index] {
+            index += 1
+        }
+        return index == needle.count
+    }
+
     private static func merge(_ primary: [DecodeResult.Reading], _ extra: [DecodeResult.Reading]) -> [DecodeResult.Reading] {
         var best: [String: DecodeResult.Reading] = [:]
         for reading in primary + extra {
@@ -742,7 +976,9 @@ actor AlignmentDecoder {
         personal: [PersonalLexicon.Entry],
         bigram: LetterBigram,
         lexicon: MappedLexicon,
-        costs: AlignmentCosts
+        costs: AlignmentCosts,
+        expected: [String] = [],
+        habits: [String: Double] = [:]
     ) -> DecodeResult {
         AlignmentSearch.decode(
             gesture,
@@ -751,6 +987,8 @@ actor AlignmentDecoder {
             personal: personal,
             bigram: bigram,
             costs: costs,
+            expected: expected,
+            habits: habits,
             pathScore: &pathScore
         )
     }
