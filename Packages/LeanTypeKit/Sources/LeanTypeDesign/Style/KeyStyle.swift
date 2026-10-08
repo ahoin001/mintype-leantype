@@ -28,8 +28,8 @@ public struct KeyStyle: Hashable, Sendable {
     }
 
     public static let pebble = KeyStyle(
-        cornerRadius: 10,
-        calloutCornerRadius: 14,
+        cornerRadius: 12,
+        calloutCornerRadius: 16,
         shadowOffset: CGSize(width: 0, height: 1.5),
         shadowRadius: 1.5,
         rimWidth: 0.75,
@@ -37,8 +37,8 @@ public struct KeyStyle: Hashable, Sendable {
     )
 
     public static let compactPebble = KeyStyle(
-        cornerRadius: 8,
-        calloutCornerRadius: 12,
+        cornerRadius: 10,
+        calloutCornerRadius: 14,
         shadowOffset: CGSize(width: 0, height: 1),
         shadowRadius: 1,
         rimWidth: 0.75,

@@ -34,10 +34,12 @@ public struct KeyboardMetrics: Hashable, Sendable {
         self.isCompact = isCompact
     }
 
+    /// The drawn face fills most of the cell a finger already hits. Row pitch stays just
+    /// wider than the face, so a swipe can still tell one row from the next without a tall gutter.
     public static let portrait = KeyboardMetrics(
-        keyHeight: 43,
-        rowSpacing: 11,
-        keySpacing: 6,
+        keyHeight: 50,
+        rowSpacing: 6,
+        keySpacing: 4,
         sideInset: 3,
         topInset: 8,
         bottomInset: 4,
@@ -46,9 +48,9 @@ public struct KeyboardMetrics: Hashable, Sendable {
     )
 
     public static let landscape = KeyboardMetrics(
-        keyHeight: 33,
-        rowSpacing: 6,
-        keySpacing: 6,
+        keyHeight: 36,
+        rowSpacing: 4,
+        keySpacing: 4,
         sideInset: 3,
         topInset: 6,
         bottomInset: 3,
