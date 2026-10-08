@@ -275,7 +275,7 @@ struct PathDecoderTests {
         }
     }
 
-    @Test func decodesFastEnough() async {
+    @Test(.serialized) func decodesFastEnough() async {
         let paths = Self.words.prefix(40).enumerated().map { index, word in
             SwipeSynthesizer.path(for: word, layout: layout, jitter: 0.15, seed: UInt64(index))
         }

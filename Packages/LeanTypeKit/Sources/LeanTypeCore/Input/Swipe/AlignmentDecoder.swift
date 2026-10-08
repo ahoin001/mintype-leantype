@@ -538,14 +538,9 @@ enum AlignmentSearch {
         pathScore: inout PathScore
     ) -> [DecodeResult.Reading] {
         let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
-        let tapped = gesture.evidence.events.contains { $0.role == .tap }
         let extra: [DecodeResult.Reading]
         if paths.count == 2 {
             extra = joinedNominations(paths, gesture: gesture, layout: layout, lexicon: lexicon, personal: personal, costs: costs, pathScore: &pathScore)
-        } else if tapped {
-            // The tap is not on the polyline. A curve match of the stroke alone would
-            // outrank the word the beam built once that tap is included.
-            extra = []
         } else {
             extra = singleStrokeNominations(paths, layout: layout, lexicon: lexicon, personal: personal, pathScore: &pathScore)
         }
