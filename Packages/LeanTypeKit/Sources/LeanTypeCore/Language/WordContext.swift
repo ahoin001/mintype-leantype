@@ -45,6 +45,10 @@ public struct AppGroupWordContextStore: WordContextStore {
 @MainActor
 final class WordContext {
     static let capacity = 400
+    /// Uses before a personal pair may beat a shape that is a little further ahead.
+    static let familiarUses = 4
+    /// Still a tie, just wider than `DecodeResult.confidenceMargin`. A clear shape stays first.
+    static let familiarMargin = 0.7
 
     /// Followers worth offering before this user has written the pair themselves.
     /// The first word in each list is the one to prefer when several are close.
@@ -81,6 +85,138 @@ final class WordContext {
         "out": ["of"],
         "more": ["than"],
         "because": ["of", "the"],
+        "a": ["lot", "good", "little"],
+        "an": ["old", "hour", "important"],
+        "as": ["a", "well", "the"],
+        "at": ["the", "least", "all"],
+        "by": ["the", "a"],
+        "can": ["be", "you", "i"],
+        "could": ["be", "have", "you"],
+        "did": ["you", "not", "the"],
+        "get": ["a", "the", "it"],
+        "go": ["to", "back", "home"],
+        "good": ["morning", "luck", "idea"],
+        "had": ["a", "to", "the"],
+        "has": ["a", "been", "to"],
+        "he": ["is", "was", "said"],
+        "her": ["to", "and", "a"],
+        "here": ["is", "are", "we"],
+        "him": ["to", "a", "and"],
+        "his": ["own", "a"],
+        "how": ["to", "are", "much"],
+        "just": ["a", "the", "want"],
+        "know": ["what", "that", "how"],
+        "let": ["me", "us", "you"],
+        "like": ["a", "to", "the"],
+        "make": ["a", "it", "sure"],
+        "me": ["a", "to", "the"],
+        "not": ["a", "the", "to"],
+        "now": ["i", "the", "that"],
+        "or": ["the", "a", "not"],
+        "our": ["own", "a"],
+        "she": ["is", "was", "said"],
+        "should": ["be", "have", "i"],
+        "so": ["i", "much", "that"],
+        "some": ["of", "people", "time"],
+        "take": ["a", "the", "it"],
+        "than": ["the", "a", "i"],
+        "them": ["to", "a", "and"],
+        "then": ["i", "the", "he"],
+        "they": ["are", "were", "have"],
+        "time": ["to", "i", "for"],
+        "up": ["to", "the", "with"],
+        "what": ["i", "is", "do"],
+        "when": ["i", "the", "you"],
+        "where": ["the", "i", "is"],
+        "which": ["is", "the"],
+        "who": ["is", "are", "was"],
+        "will": ["be", "have", "you"],
+        "your": ["own", "a"],
+        "been": ["a", "the", "to"],
+        "back": ["to", "in", "and"],
+        "over": ["the", "to"],
+        "after": ["the", "a"],
+        "before": ["the", "i"],
+        "very": ["much", "good"],
+        "really": ["good", "want"],
+        "think": ["that", "it", "i"],
+        "see": ["you", "the", "if"],
+        "need": ["to", "a"],
+        "thank": ["you"],
+        "thanks": ["for"],
+        "its": ["a", "the"],
+        "it's": ["a", "the", "not"],
+        "i'm": ["not", "going", "a"],
+        "can't": ["be", "wait"],
+        "didn't": ["know", "want"],
+        "that's": ["a", "the", "what"],
+        "there's": ["a", "no"],
+        "we're": ["going", "not"],
+        "you're": ["not", "going", "a"],
+        "gonna": ["be", "go"],
+        "wanna": ["go", "be", "see"],
+        "right": ["now", "there"],
+        "all": ["the", "of", "right"],
+        "one": ["of", "day"],
+        "also": ["a", "the"],
+        "even": ["if", "the"],
+        "still": ["have", "the"],
+        "only": ["a", "the"],
+        "other": ["than", "people"],
+        "same": ["as", "time"],
+        "much": ["as", "more"],
+        "many": ["people", "of"],
+        "most": ["of", "people"],
+        "such": ["a", "as"],
+        "too": ["much", "many"],
+        "well": ["as", "i"],
+        "way": ["to", "of"],
+        "look": ["at", "like"],
+        "come": ["on", "to"],
+        "went": ["to", "back"],
+        "said": ["that", "i", "the"],
+        "say": ["that", "i"],
+        "tell": ["me", "you"],
+        "give": ["me", "it", "you"],
+        "work": ["on", "for"],
+        "love": ["you", "it"],
+        "feel": ["like"],
+        "something": ["to", "like"],
+        "anything": ["else", "to"],
+        "nothing": ["to", "but"],
+        "lot": ["of"],
+        "bit": ["of"],
+        "sort": ["of"],
+        "able": ["to"],
+        "sure": ["that", "you"],
+        "sorry": ["for", "i"],
+        "maybe": ["i", "we"],
+        "around": ["the", "here"],
+        "through": ["the"],
+        "without": ["a", "the"],
+        "during": ["the"],
+        "between": ["the"],
+        "off": ["the", "of"],
+        "down": ["the", "to"],
+        "again": ["and"],
+        "always": ["be", "the"],
+        "never": ["been", "the"],
+        "today": ["i"],
+        "people": ["who", "are"],
+        "got": ["a", "to", "the"],
+        "let's": ["go", "see"],
+        "please": ["let", "help"],
+        "yes": ["i", "please"],
+        "no": ["i", "one"],
+        "hi": ["i"],
+        "hey": ["i"],
+        "hello": ["i"],
+    ]
+
+    /// Words that often open a sentence. Used only after a sentence ends, or at the start.
+    private static let sentenceStarters = [
+        "i", "the", "it", "this", "we", "you", "a", "if", "but", "so",
+        "there", "what", "how", "when", "he", "she", "they", "please", "yes", "no",
     ]
 
     /// The two words just written, when this user has not stored that triple yet.
@@ -132,27 +268,36 @@ final class WordContext {
         }
     }
 
+    /// Drops the words just written. Learned pairs stay, so the next sentence can start fresh.
+    func noteSentenceEnded() {
+        recent.removeAll()
+    }
+
     /// Moves a remembered follower ahead of the top word when the two were already close.
     /// A triple this user has written wins over a pair. A personal pair wins over the static
     /// list. With no personal memory, a common triple, then a common pair, can break the tie.
+    /// After a sentence ends, only sentence-opening words can break that tie.
     func applying(to result: DecodeResult) -> DecodeResult {
-        guard let immediate = recent.last, result.readings.count > 1, let top = result.readings.first else { return result }
+        guard result.readings.count > 1, let top = result.readings.first else { return result }
+        guard let immediate = recent.last else {
+            return promoting(ranked(Self.sentenceStarters), in: result, top: top) ?? result
+        }
         let tripleKey = recent.count >= 2 ? recent.suffix(2).joined(separator: " ") : nil
         if let tripleKey {
             let personal = pairs.filter { $0.previous == tripleKey }
-            if !personal.isEmpty {
-                return promoting(ranked(personal), in: result, top: top)
+            if !personal.isEmpty, let promoted = promoting(ranked(personal), in: result, top: top) {
+                return promoted
             }
         }
         let personalPair = pairs.filter { $0.previous == immediate }
         if !personalPair.isEmpty {
-            return promoting(ranked(personalPair), in: result, top: top)
+            return promoting(ranked(personalPair), in: result, top: top) ?? result
         }
         if let tripleKey, let common = Self.commonTriples[tripleKey] {
-            return promoting(ranked(common), in: result, top: top)
+            return promoting(ranked(common), in: result, top: top) ?? result
         }
         guard let common = Self.commonFollowers[immediate] else { return result }
-        return promoting(ranked(common), in: result, top: top)
+        return promoting(ranked(common), in: result, top: top) ?? result
     }
 
     private func record(previous: String, next: String) {
@@ -168,28 +313,33 @@ final class WordContext {
         store?.save(pairs)
     }
 
-    private func ranked(_ pairs: [WordPair]) -> [(word: String, rank: (Int, Date))] {
-        pairs.map { (word: $0.next, rank: ($0.uses, $0.lastUsed)) }
-    }
-
-    private func ranked(_ words: [String]) -> [(word: String, rank: (Int, Date))] {
-        words.enumerated().map { index, word in
-            (word: word, rank: (words.count - index, Date.distantPast))
+    private func ranked(_ pairs: [WordPair]) -> [(word: String, rank: (Int, Date), margin: Double)] {
+        pairs.map { pair in
+            let margin = pair.uses >= Self.familiarUses ? Self.familiarMargin : DecodeResult.confidenceMargin
+            return (word: pair.next, rank: (pair.uses, pair.lastUsed), margin: margin)
         }
     }
 
+    private func ranked(_ words: [String]) -> [(word: String, rank: (Int, Date), margin: Double)] {
+        words.enumerated().map { index, word in
+            (word: word, rank: (words.count - index, Date.distantPast), margin: DecodeResult.confidenceMargin)
+        }
+    }
+
+    /// Nil when no follower is close enough to move ahead. Callers that have personal memory
+    /// then try the next, less specific list. A personal pair still blocks the static list.
     private func promoting(
-        _ followers: [(word: String, rank: (Int, Date))],
+        _ followers: [(word: String, rank: (Int, Date), margin: Double)],
         in result: DecodeResult,
         top: DecodeResult.Reading
-    ) -> DecodeResult {
+    ) -> DecodeResult? {
         let ranked = result.readings.enumerated().dropFirst().filter { _, reading in
-            top.score - reading.score <= DecodeResult.confidenceMargin
-                && followers.contains { $0.word == reading.word.lowercased() }
+            guard let follower = followers.first(where: { $0.word == reading.word.lowercased() }) else { return false }
+            return top.score - reading.score <= follower.margin
         }
         guard let best = ranked.max(by: { lhs, rhs in
             rank(of: lhs.element.word, in: followers) < rank(of: rhs.element.word, in: followers)
-        }) else { return result }
+        }) else { return nil }
         var readings = result.readings
         let chosen = readings.remove(at: best.offset)
         readings.insert(
@@ -199,7 +349,7 @@ final class WordContext {
         return DecodeResult(readings: readings)
     }
 
-    private func rank(of word: String, in followers: [(word: String, rank: (Int, Date))]) -> (Int, Date) {
+    private func rank(of word: String, in followers: [(word: String, rank: (Int, Date), margin: Double)]) -> (Int, Date) {
         followers.first { $0.word == word.lowercased() }?.rank ?? (0, .distantPast)
     }
 

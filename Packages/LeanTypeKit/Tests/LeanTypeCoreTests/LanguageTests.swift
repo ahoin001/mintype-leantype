@@ -333,6 +333,37 @@ struct EngineLanguageTests {
         #expect(store.load().map(\.word) == ["zorbly"])
     }
 
+    @Test func banningAWordRemovesItUntilItIsRemembered() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.isLearningEnabled = true
+        let ranked = DecodeResult(readings: [
+            .init(word: "there", score: -1),
+            .init(word: "three", score: -1.2),
+        ])
+        language.noteRejection(preferred: "three", rejected: "there")
+        let swapped = language.applyingRejections(to: ranked)
+        #expect(!language.isBlocked("there"))
+        #expect(swapped.words.contains("there"))
+
+        #expect(language.ban("there"))
+        let banned = language.applyingBlocks(to: ranked)
+        #expect(banned.words == ["three"])
+        #expect(language.memory(of: "there") == .blocked)
+
+        #expect(language.remember("there"))
+        #expect(!language.isBlocked("there"))
+        #expect(language.applyingBlocks(to: ranked).words.first == "there")
+    }
+
+    @Test func restoringABannedWordFromTheStorePutsItBack() {
+        let store = MemoryBlocklistStore()
+        let language = LanguageModel(lexicon: TestLexicon.shared, blocklist: store)
+        #expect(language.ban("there"))
+        store.save(store.load().filter { $0.word != "there" })
+        language.reloadLearnedWords()
+        #expect(!language.isBlocked("there"))
+    }
+
     @Test func passwordFieldsGetNoLanguageFeatures() {
         let language = LanguageModel(lexicon: TestLexicon.shared)
         let harness = EngineHarness(traits: InputTraits(autocapitalization: .none, allowsAutocorrection: false), language: language)
@@ -350,6 +381,14 @@ final class MemoryLearnedWordsStore: LearnedWordsStore, @unchecked Sendable {
     func load() -> [LearnedWord] { words }
     func save(_ words: [LearnedWord]) { self.words = words }
     func clear() { words = [] }
+}
+
+/// Banned spellings kept in memory for tests.
+final class MemoryBlocklistStore: BlocklistStore, @unchecked Sendable {
+    private var entries: [BlockedSpelling] = []
+
+    func load() -> [BlockedSpelling] { entries }
+    func save(_ entries: [BlockedSpelling]) { self.entries = entries }
 }
 
 /// The letters layout of a standard iPhone-width keyboard.

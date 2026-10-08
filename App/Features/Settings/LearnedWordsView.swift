@@ -34,6 +34,27 @@ struct LearnedWordsView: View {
                 Text("A word shows up in suggestions after you’ve used it twice, or as soon as you choose Remember.")
             }
 
+            Section {
+                if data.blockedWords.isEmpty {
+                    Text("Nothing hidden. Hold a suggestion on the keyboard and choose Never suggest.")
+                        .font(.pebble(.subheadline))
+                        .foregroundStyle(theme.subtleInk)
+                        .listRowBackground(theme.surface)
+                } else {
+                    ForEach(data.blockedWords, id: \.word) { entry in
+                        Text(entry.word)
+                            .font(.pebble(.body, weight: .semibold))
+                            .foregroundStyle(theme.ink)
+                            .listRowBackground(theme.surface)
+                    }
+                    .onDelete(perform: restore)
+                }
+            } header: {
+                Text("Never suggested")
+            } footer: {
+                Text("Swipe a row to let the keyboard suggest that spelling again.")
+            }
+
             if !data.learnedWords.isEmpty {
                 Section {
                     Button("Clear learned words", role: .destructive) {
@@ -67,6 +88,13 @@ struct LearnedWordsView: View {
         let words = offsets.map { data.learnedWords[$0].word }
         for word in words {
             data.forgetLearnedWord(word)
+        }
+    }
+
+    private func restore(at offsets: IndexSet) {
+        let words = offsets.map { data.blockedWords[$0].word }
+        for word in words {
+            data.restoreBlockedWord(word)
         }
     }
 }

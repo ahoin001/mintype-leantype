@@ -60,6 +60,11 @@ final class DockView: UIView {
         set { suggestions.onForget = newValue }
     }
 
+    var onBanWord: ((String) -> Void)? {
+        get { suggestions.onBan }
+        set { suggestions.onBan = newValue }
+    }
+
     /// A tap on the wordmark. Opens the delete-tap choice.
     var onWordmarkTap: (() -> Void)?
 

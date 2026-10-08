@@ -114,6 +114,9 @@ public final class KeyboardView: UIView {
         dock.onForgetWord = { [weak self] word in
             self?.engine.forgetWord(word)
         }
+        dock.onBanWord = { [weak self] word in
+            self?.engine.banWord(word)
+        }
         dock.onWordmarkTap = { [weak self] in
             self?.dock.toggleDeleteMenu()
         }

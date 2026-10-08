@@ -204,6 +204,11 @@ final class WordAssistant {
         cached = nil
     }
 
+    /// The sentence just ended, so the next word is not a follower of the one before the period.
+    func noteSentenceEnded() {
+        language?.noteSentenceEnded()
+    }
+
     func swipeCommitted(_ readings: [String], unsure _: Bool, literal: String? = nil) {
         if let word = readings.first {
             language?.noteCommitted(word)

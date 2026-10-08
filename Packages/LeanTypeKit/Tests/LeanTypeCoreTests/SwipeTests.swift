@@ -136,6 +136,36 @@ struct PathDecoderTests {
         #expect(result.words.first == "Hoinville")
     }
 
+    @Test func aTightSwipeStaysInsideTheCommonWords() async {
+        let path = SwipeSynthesizer.path(for: "hello", layout: layout, jitter: 0, seed: 1)
+        let result = await decoder.decode(SwipeGesture(path: path, strokeCount: 1), layout: layout, personal: [])
+        #expect(result.words.first?.lowercased() == "hello")
+        #expect(await decoder.scannedBeyondCommon == false)
+    }
+
+    @Test func aPoorFitFindsARarerWordFurtherDownTheBucket() async {
+        let word = "disobedience"
+        let straight = SwipeSynthesizer.path(for: word, layout: layout, jitter: 0, seed: 3)
+        let width = layout.keyWidth
+        // The common d–e words sit close to a straight swipe. Bend the middle down and
+        // to the right, just past the location cutoff, and the rest of the bucket is
+        // what still spells this word.
+        let path = bend(straight, by: CGPoint(x: width * 1.3, y: -width * 1.3))
+        let result = await decoder.decode(SwipeGesture(path: path, strokeCount: 1), layout: layout, personal: [])
+        #expect(await decoder.scannedBeyondCommon)
+        #expect(result.words.first?.lowercased() == word)
+    }
+
+    /// Pulls the middle of a path off the keys and leaves the start and end where they are.
+    private func bend(_ path: [CGPoint], by delta: CGPoint) -> [CGPoint] {
+        guard path.count > 1 else { return path }
+        return path.enumerated().map { index, point in
+            let along = CGFloat(index) / CGFloat(path.count - 1)
+            let weight = sin(along * .pi)
+            return CGPoint(x: point.x + delta.x * weight, y: point.y + delta.y * weight)
+        }
+    }
+
     @Test func decodesFastEnough() async {
         let paths = Self.words.prefix(40).enumerated().map { index, word in
             SwipeSynthesizer.path(for: word, layout: layout, jitter: 0.15, seed: UInt64(index))
@@ -1161,6 +1191,58 @@ struct SwipeTypingTests {
             .init(word: "zoo", score: -1.2),
         ])
         #expect(language.preferringFollowers(in: learned).words.first == "zoo")
+    }
+
+    @Test func aFamiliarPairWinsAWiderTieAndASentenceStartsFresh() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("the")
+        language.noteCommitted("quick")
+        language.noteCommitted("the")
+        let once = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -1.5),
+        ])
+        #expect(language.preferringFollowers(in: once).words.first == "quit")
+
+        for _ in 0..<3 {
+            language.noteCommitted("quick")
+            language.noteCommitted("the")
+        }
+        let wider = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -1.5),
+        ])
+        #expect(language.preferringFollowers(in: wider).words.first == "quick")
+        let clear = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -2),
+        ])
+        #expect(language.preferringFollowers(in: clear).words.first == "quit")
+
+        let common = LanguageModel(lexicon: TestLexicon.shared)
+        common.noteCommitted("to")
+        let staticTie = DecodeResult(readings: [
+            .init(word: "too", score: -1),
+            .init(word: "the", score: -1.5),
+        ])
+        #expect(common.preferringFollowers(in: staticTie).words.first == "too")
+
+        language.noteSentenceEnded()
+        let forgotten = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "quick", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: forgotten).words.first == "quit")
+        let opener = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "it", score: -1.2),
+        ])
+        #expect(language.preferringFollowers(in: opener).words.first == "it")
+        let openerClear = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "it", score: -3),
+        ])
+        #expect(language.preferringFollowers(in: openerClear).words.first == "quit")
     }
 
     @Test func aSwappedUnknownWordJoinsTheNextDecode() {

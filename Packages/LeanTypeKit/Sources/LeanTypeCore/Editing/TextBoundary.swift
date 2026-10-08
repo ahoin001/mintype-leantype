@@ -101,6 +101,11 @@ public enum TextBoundary {
         return characterClass(of: first) == .word
     }
 
+    /// `.`, `!`, `?`, and `…` end a sentence. A comma does not.
+    public static func endsSentence(_ character: Character) -> Bool {
+        sentenceTerminators.contains(character)
+    }
+
     /// Whether the next typed letter should be capitalized automatically.
     public static func shouldAutoCapitalize(before: String?, mode: AutocapitalizationMode) -> Bool {
         switch mode {

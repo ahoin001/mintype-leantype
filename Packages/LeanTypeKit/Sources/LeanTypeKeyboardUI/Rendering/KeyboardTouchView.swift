@@ -126,7 +126,7 @@ final class KeyboardTouchView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         var samples: [TouchSample] = []
         for touch in touches {
-            let point = touch.location(in: self)
+            let point = touch.preciseLocation(in: self)
             if let globeKeyID, geometry?.key(at: point)?.id == globeKeyID {
                 globeTouches.insert(ObjectIdentifier(touch))
                 setGlobePressed(true)
@@ -154,7 +154,7 @@ final class KeyboardTouchView: UIView {
             for sampleTouch in coalesced {
                 samples.append(TouchSample(
                     id: id,
-                    location: sampleTouch.location(in: self),
+                    location: sampleTouch.preciseLocation(in: self),
                     timestamp: sampleTouch.timestamp,
                     phase: .moved
                 ))
@@ -179,7 +179,7 @@ final class KeyboardTouchView: UIView {
                 setGlobePressed(false)
                 continue
             }
-            samples.append(sample(for: touch, at: touch.location(in: self), phase: phase))
+            samples.append(sample(for: touch, at: touch.preciseLocation(in: self), phase: phase))
         }
         send(samples)
     }

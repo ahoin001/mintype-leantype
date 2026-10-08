@@ -10,6 +10,8 @@ public enum WordMemory: Equatable, Sendable {
     case learning
     /// Stored and eligible to be suggested.
     case remembered
+    /// The user asked for this spelling not to be suggested.
+    case blocked
 }
 
 /// Everything the keyboard knows about English words: the memory-mapped dictionary, the
@@ -27,6 +29,7 @@ public final class LanguageModel {
 
     private let store: (any LearnedWordsStore)?
     private let rejections: RejectionMemory
+    private let blocklist: Blocklist
     private let context: WordContext
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
@@ -40,11 +43,13 @@ public final class LanguageModel {
         lexicon: MappedLexicon,
         store: (any LearnedWordsStore)? = nil,
         rejections rejectionStore: (any RejectionStore)? = nil,
-        wordContext contextStore: (any WordContextStore)? = nil
+        wordContext contextStore: (any WordContextStore)? = nil,
+        blocklist blocklistStore: (any BlocklistStore)? = nil
     ) {
         self.lexicon = lexicon
         self.store = store
         rejections = RejectionMemory(store: rejectionStore)
+        blocklist = Blocklist(store: blocklistStore)
         context = WordContext(store: contextStore)
         decoder = PathDecoder(lexicon: lexicon)
         personal = PersonalLexicon(learned: store?.load() ?? [])
@@ -55,10 +60,17 @@ public final class LanguageModel {
     public static func bundled(
         store: (any LearnedWordsStore)? = nil,
         rejections: (any RejectionStore)? = nil,
-        wordContext: (any WordContextStore)? = nil
+        wordContext: (any WordContextStore)? = nil,
+        blocklist: (any BlocklistStore)? = nil
     ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
-        return LanguageModel(lexicon: lexicon, store: store, rejections: rejections, wordContext: wordContext)
+        return LanguageModel(
+            lexicon: lexicon,
+            store: store,
+            rejections: rejections,
+            wordContext: wordContext,
+            blocklist: blocklist
+        )
     }
 
     // MARK: - Queries
@@ -72,12 +84,15 @@ public final class LanguageModel {
         corrector.isRejected = { [rejections] typed, chosen in
             rejections.rejects(replacing: typed, with: chosen)
         }
+        corrector.isBlocked = { [blocklist] word in
+            blocklist.contains(word)
+        }
         return corrector.analyze(word, touches: touches, layout: layout, completionLimit: completionLimit)
     }
 
     func decode(_ gesture: SwipeGesture, layout: LetterLayout) async -> DecodeResult {
         let result = await decoder.decode(gesture, layout: layout, personal: personalEntries)
-        return rejections.applying(to: context.applying(to: result))
+        return blocklist.applying(to: rejections.applying(to: context.applying(to: result)))
     }
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when several thumb
@@ -95,12 +110,17 @@ public final class LanguageModel {
             personal: personalEntries,
             bigram: letterBigram
         )
-        return SequenceOutcome(result: rejections.applying(to: context.applying(to: outcome.result)), traced: outcome.traced)
+        return SequenceOutcome(result: blocklist.applying(to: rejections.applying(to: context.applying(to: outcome.result))), traced: outcome.traced)
     }
 
     /// The word that just landed, so the next swipe can prefer what usually follows it.
     func noteCommitted(_ word: String) {
         context.noteCommitted(word)
+    }
+
+    /// A period, question mark, exclamation, or new line. The next word is a new sentence.
+    func noteSentenceEnded() {
+        context.noteSentenceEnded()
     }
 
     /// What a swipe would rank once the preceding word is taken into account.
@@ -115,6 +135,14 @@ public final class LanguageModel {
 
     func applyingRejections(to result: DecodeResult) -> DecodeResult {
         rejections.applying(to: result)
+    }
+
+    func applyingBlocks(to result: DecodeResult) -> DecodeResult {
+        blocklist.applying(to: result)
+    }
+
+    func isBlocked(_ word: String) -> Bool {
+        blocklist.contains(word)
     }
 
     // MARK: - Learning
@@ -133,6 +161,7 @@ public final class LanguageModel {
 
     /// How `word` sits in the personal list, for the suggestion menu.
     public func memory(of word: String) -> WordMemory {
+        if blocklist.contains(word) { return .blocked }
         guard isLearningEnabled, Self.isLearnable(word) else { return .unavailable }
         switch personal.uses(of: word) {
         case nil:
@@ -148,10 +177,17 @@ public final class LanguageModel {
     /// One explicit remember is enough for it to be suggested.
     @discardableResult
     public func remember(_ word: String) -> Bool {
+        let restored = blocklist.restore(word)
         let word = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isLearningEnabled, Self.isLearnable(word), personal.remember(word, at: Date()) else { return false }
+        guard isLearningEnabled, Self.isLearnable(word), personal.remember(word, at: Date()) else { return restored }
         persistPersonalChange()
         return true
+    }
+
+    /// Keeps `word` out of suggestions until it is remembered or restored from the companion.
+    @discardableResult
+    public func ban(_ word: String) -> Bool {
+        blocklist.block(word)
     }
 
     /// Removes one learned word, and any note that said to keep that spelling.
@@ -167,6 +203,7 @@ public final class LanguageModel {
     public func reloadLearnedWords() {
         personal = PersonalLexicon(learned: store?.load() ?? [])
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
+        blocklist.reload()
         unsavedChanges = 0
     }
 

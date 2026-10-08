@@ -11,6 +11,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     var memoryOf: ((String) -> WordMemory)?
     var onRemember: ((String) -> Void)?
     var onForget: ((String) -> Void)?
+    var onBan: ((String) -> Void)?
 
     private var slots: [SuggestionSlot] = []
     private var separators: [UIView] = []
@@ -116,9 +117,10 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         _: UIContextMenuInteraction,
         configurationForMenuAtLocation location: CGPoint
     ) -> UIContextMenuConfiguration? {
-        guard let word = word(at: location), memoryOf?(word) != .unavailable else { return nil }
+        guard let word = word(at: location) else { return nil }
+        let memory = memoryOf?(word) ?? .unavailable
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            self?.menu(for: word)
+            self?.menu(for: word, memory: memory)
         }
     }
 
@@ -129,18 +131,24 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         return state.candidates[index].text
     }
 
-    private func menu(for word: String) -> UIMenu? {
-        switch memoryOf?(word) ?? .unavailable {
+    private func menu(for word: String, memory: WordMemory) -> UIMenu? {
+        switch memory {
         case .unavailable:
-            return nil
-        case .fresh, .learning:
-            var actions = [rememberAction(word, strengthens: false)]
-            if memoryOf?(word) == .learning {
-                actions.append(forgetAction(word))
-            }
-            return UIMenu(children: actions)
+            return UIMenu(children: [banAction(word)])
+        case .fresh:
+            return UIMenu(children: [rememberAction(word, strengthens: false), banAction(word)])
+        case .learning:
+            return UIMenu(children: [rememberAction(word, strengthens: false), forgetAction(word), banAction(word)])
         case .remembered:
-            return UIMenu(children: [rememberAction(word, strengthens: true), forgetAction(word)])
+            return UIMenu(children: [rememberAction(word, strengthens: true), forgetAction(word), banAction(word)])
+        case .blocked:
+            return UIMenu(children: [rememberAction(word, strengthens: false)])
+        }
+    }
+
+    private func banAction(_ word: String) -> UIAction {
+        UIAction(title: "Never suggest", subtitle: "Keep this spelling off the keyboard", image: UIImage(systemName: "nosign"), attributes: .destructive) { [weak self] _ in
+            self?.onBan?(word)
         }
     }
 
@@ -162,12 +170,21 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     private func accessibilityActions(for word: String) -> [UIAccessibilityCustomAction]? {
         switch memoryOf?(word) ?? .unavailable {
         case .unavailable:
-            return nil
-        case .fresh:
-            return [UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
-                self?.onRemember?(word)
+            return [UIAccessibilityCustomAction(name: "Never suggest \(word)") { [weak self] _ in
+                self?.onBan?(word)
                 return true
             }]
+        case .fresh:
+            return [
+                UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
+                    self?.onRemember?(word)
+                    return true
+                },
+                UIAccessibilityCustomAction(name: "Never suggest \(word)") { [weak self] _ in
+                    self?.onBan?(word)
+                    return true
+                },
+            ]
         case .learning:
             return [
                 UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
@@ -176,6 +193,10 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
                 },
                 UIAccessibilityCustomAction(name: "Forget \(word)") { [weak self] _ in
                     self?.onForget?(word)
+                    return true
+                },
+                UIAccessibilityCustomAction(name: "Never suggest \(word)") { [weak self] _ in
+                    self?.onBan?(word)
                     return true
                 },
             ]
@@ -189,7 +210,16 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
                     self?.onForget?(word)
                     return true
                 },
+                UIAccessibilityCustomAction(name: "Never suggest \(word)") { [weak self] _ in
+                    self?.onBan?(word)
+                    return true
+                },
             ]
+        case .blocked:
+            return [UIAccessibilityCustomAction(name: "Remember \(word)") { [weak self] _ in
+                self?.onRemember?(word)
+                return true
+            }]
         }
     }
 

@@ -118,7 +118,7 @@ struct SettingsView: View {
                             : "Needs Full Access to remember words.",
                         isOn: $model.settings.learnWordsEnabled
                     )
-                    if data.learnedWordCount > 0 {
+                    if data.learnedWordCount > 0 || data.blockedWordCount > 0 {
                         PebbleDivider()
                         NavigationLink {
                             LearnedWordsView()
@@ -126,9 +126,7 @@ struct SettingsView: View {
                             PebbleLinkRow(
                                 systemImage: "text.book.closed",
                                 title: "Learned words",
-                                detail: data.learnedWordCount == 1
-                                    ? "1 word. Swipe it to forget just that one."
-                                    : "\(data.learnedWordCount) words. Swipe one to forget just that word."
+                                detail: learnedWordsDetail
                             )
                         }
                         .buttonStyle(PebblePressStyle())
@@ -199,6 +197,16 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { data.refresh() }
+    }
+
+    private var learnedWordsDetail: String {
+        if data.learnedWordCount == 0, data.blockedWordCount > 0 {
+            let count = data.blockedWordCount
+            return count == 1 ? "1 spelling hidden." : "\(count) spellings hidden."
+        }
+        return data.learnedWordCount == 1
+            ? "1 word. Swipe it to forget just that one."
+            : "\(data.learnedWordCount) words. Swipe one to forget just that word."
     }
 
     private var shortcutDetail: String {

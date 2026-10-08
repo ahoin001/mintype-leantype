@@ -19,7 +19,8 @@ final class KeyboardViewController: UIInputViewController {
     private lazy var language = LanguageModel.bundled(
         store: AppGroupLearnedWordsStore(),
         rejections: AppGroupRejectionStore(),
-        wordContext: AppGroupWordContextStore()
+        wordContext: AppGroupWordContextStore(),
+        blocklist: AppGroupBlocklistStore()
     )
     private let crashMonitor = ExtensionCrashMonitor()
 

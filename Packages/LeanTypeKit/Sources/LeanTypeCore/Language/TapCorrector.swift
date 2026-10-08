@@ -43,6 +43,8 @@ struct TapCorrector {
     let isPersonal: (String) -> Bool
     /// True when the user has already refused this exact replacement.
     var isRejected: (_ typed: String, _ correction: String) -> Bool = { _, _ in false }
+    /// True when this spelling must not be suggested.
+    var isBlocked: (String) -> Bool = { _ in false }
 
     func analyze(_ typed: String, touches: [CGPoint]?, layout: LetterLayout?, completionLimit: Int) -> WordAnalysis {
         guard typed.allSatisfy({ $0.isLetter || $0 == "'" || $0 == "’" }) else { return .empty }
@@ -64,7 +66,10 @@ struct TapCorrector {
                 ?? correction(for: typed, key: key, touches: touches, layout: layout,
                               against: lexicon.logCountRange.lowerBound - Self.unknownWordPenalty, margin: Self.margin)
         }
-        let correction = proposed.flatMap { isRejected(typed, $0) ? nil : $0 }
+        let correction = proposed.flatMap { candidate in
+            if isRejected(typed, candidate) || isBlocked(candidate) { return nil as String? }
+            return candidate
+        }
         let known = personalWord || match != nil
         let completions = completions(for: key, excluding: [typed, correction].compactMap { $0 }, limit: completionLimit)
             .map { matchCase($0, to: typed) }
@@ -181,6 +186,7 @@ struct TapCorrector {
         var seen = excluded
         var result: [String] = []
         for candidate in scored where seen.insert(candidate.word.lowercased()).inserted {
+            if isBlocked(candidate.word) { continue }
             result.append(candidate.word)
             if result.count == limit { break }
         }

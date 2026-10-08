@@ -322,6 +322,13 @@ public final class KeyboardEngine {
         refreshTextState()
     }
 
+    /// Keeps `word` out of suggestions until it is remembered or restored.
+    public func banWord(_ word: String) {
+        guard language?.ban(word) == true else { return }
+        DarwinNotifications.post(SharedContainer.learnedWordsDidChangeNotification)
+        refreshTextState()
+    }
+
     /// Re-reads the personal list after the app, or this keyboard, changed it.
     public func reloadLearnedWords() {
         language?.reloadLearnedWords()
@@ -367,6 +374,7 @@ public final class KeyboardEngine {
             consumePickedUpWord()
             _ = finishWord(trailing: "")
             editor.insert("\n")
+            words.noteSentenceEnded()
             changed = true
         case .deleteWord:
             closeOpenWord()
@@ -468,6 +476,7 @@ public final class KeyboardEngine {
                 editor.insertSpace()
             }
             if hadWord { completeWord(.tap) }
+            noteSentenceBoundary(in: text)
         } else if text.count == 1, text.first?.isLetter == true, reviseOpenWord(with: text, at: point, time: time) {
             // The letter joined the swiped word already on screen.
         } else {
@@ -477,6 +486,7 @@ public final class KeyboardEngine {
             } else if text.count > 1 {
                 words.noteLiteralText()
             }
+            noteSentenceBoundary(in: text)
         }
         insertionCount += 1
         shift.consumeAfterInsertion()
@@ -491,6 +501,7 @@ public final class KeyboardEngine {
            now - lastSpaceTime < Self.doubleSpaceInterval,
            editor.applyDoubleSpacePeriod() {
             self.lastSpaceTime = nil
+            words.noteSentenceEnded()
             emit(.sentenceEnded(at: center(of: .space)))
         } else {
             let hadWord = !editor.currentWord.isEmpty
@@ -505,6 +516,12 @@ public final class KeyboardEngine {
             setLayer(.letters)
         }
         return true
+    }
+
+    /// A sentence mark forgets the words just written. The pairs already learned stay.
+    private func noteSentenceBoundary(in text: String) {
+        guard text.count == 1, let mark = text.first, TextBoundary.endsSentence(mark) else { return }
+        words.noteSentenceEnded()
     }
 
     /// Ends the current word, autocorrecting it if appropriate. Returns whether a correction
