@@ -48,6 +48,23 @@ public struct FingerJewel: Equatable, Sendable {
         return 11
     }
 
+    /// The ring sits one radius above the contact, clear of the thumb. The bead rests on the
+    /// rim in the direction of `action`. A still finger (a zero vector) keeps the bead on the
+    /// ring and draws no trail.
+    public static func placeAbove(contact: CGPoint, action: CGVector, intensity: CGFloat) -> FingerJewel {
+        let radius = radius(for: intensity)
+        let center = CGPoint(x: contact.x, y: contact.y - radius)
+        let length = hypot(action.dx, action.dy)
+        let moving = length > 0.01
+        let direction = moving
+            ? CGVector(dx: action.dx / length, dy: action.dy / length)
+            : CGVector.zero
+        let bead = moving
+            ? CGPoint(x: center.x + direction.dx * radius, y: center.y + direction.dy * radius)
+            : CGPoint(x: center.x, y: center.y - radius)
+        return FingerJewel(radius: radius, center: center, bead: bead, direction: direction, drawsTrail: moving)
+    }
+
     /// `velocity` is points per second. `previousCenter` is last frame's ring center.
     public static func place(
         contact: CGPoint,

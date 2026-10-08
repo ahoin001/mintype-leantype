@@ -3,9 +3,9 @@ import CoreGraphics
 /// Shift: toggles on touch-down (double tap locks caps) and stays held while other fingers type.
 ///
 /// A sideways flick is a delete scrub for the rest of the touch, same as delete. The finger
-/// may cross Z, X, and C; those letters are not typed and the path is not a word. Inward,
-/// toward the letters, deletes. Back toward shift restores. Before that lock, rising onto a
-/// letter above shift still types that one capital.
+/// may cross Z, X, and C; those letters are not typed and the path is not a word. Left, toward
+/// the edge, deletes. Right, back toward the letters, restores. Before that lock, rising onto
+/// a letter above shift still types that one capital.
 @MainActor
 final class ShiftSession: InteractionSession {
     /// A flick must be this much more sideways than vertical before it deletes. Rising onto
@@ -14,6 +14,7 @@ final class ShiftSession: InteractionSession {
 
     private unowned let context: any SessionContext
     private let key: KeyFrame
+    private var finger: CGPoint
     private var slideTarget: KeyFrame?
     private var phase = Phase.shifting
     private var isFinished = false
@@ -26,6 +27,7 @@ final class ShiftSession: InteractionSession {
 
     init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
+        self.finger = track.start.location
         self.context = context
         context.emit(.keyDown(.modifier, at: track.start.location))
         context.perform(.shiftPressBegan)
@@ -35,7 +37,10 @@ final class ShiftSession: InteractionSession {
         guard !isFinished else { return .none }
         switch phase {
         case let .scrubbing(scrub):
-            return SessionPresentation(pressedKey: key.id, scrub: scrub.mark(on: key.id))
+            return SessionPresentation(
+                pressedKey: key.id,
+                jewel: GestureMark(contact: finger, action: .scrub(scrub.mark(on: key.id)))
+            )
         case .sliding:
             if let slideTarget {
                 return SessionPresentation(pressedKey: slideTarget.id, callout: context.previewCallout(for: slideTarget))
@@ -48,6 +53,7 @@ final class ShiftSession: InteractionSession {
 
     func moved(_ track: TouchTrack) {
         guard !isFinished else { return }
+        finger = track.current.location
         switch phase {
         case var .scrubbing(scrub):
             scrub.update(to: track.current.location.x, context: context)
@@ -67,7 +73,7 @@ final class ShiftSession: InteractionSession {
                 anchorX: point.x,
                 applied: 0,
                 restoredWhole: false,
-                inward: -1
+                inward: 1
             ))
         }
     }

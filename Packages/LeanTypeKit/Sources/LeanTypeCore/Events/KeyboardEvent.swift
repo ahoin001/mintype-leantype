@@ -25,8 +25,8 @@ public enum KeyboardEvent: Hashable, Sendable {
     case wordDeleted(String, origin: CGPoint)
     /// A deleted word came back via a right swipe on backspace.
     case deletionRestored(String, origin: CGPoint)
-    /// One step of a backspace scrub or repeat.
-    case deleteStep
+    /// One step of a backspace scrub or repeat. `character` is what left or came back.
+    case deleteStep(character: String, restoring: Bool)
     /// Holding backspace moved up a gear (characters to words, or words to sentences).
     /// One event per gear, never per deleted character.
     case deleteEscalated(DeleteGear)

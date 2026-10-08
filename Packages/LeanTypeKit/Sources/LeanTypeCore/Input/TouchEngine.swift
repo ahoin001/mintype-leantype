@@ -48,7 +48,7 @@ final class TouchEngine {
         var callout: CalloutState?
         var isTrackpadActive = false
         var strokes = Set<TouchID>()
-        var scrub: ScrubMark?
+        var jewel: GestureMark?
 
         for id in order {
             guard let touch = touches[id], !touch.isAbsorbed else { continue }
@@ -61,8 +61,8 @@ final class TouchEngine {
             if presentation.isStroke {
                 strokes.insert(id)
             }
-            if let mark = presentation.scrub {
-                scrub = mark
+            if let mark = presentation.jewel {
+                jewel = mark
             }
         }
 
@@ -71,7 +71,7 @@ final class TouchEngine {
             callout: callout,
             isTrackpadActive: isTrackpadActive,
             strokes: strokes,
-            scrub: scrub
+            jewel: jewel
         )
         guard next != interaction else { return }
         interaction = next

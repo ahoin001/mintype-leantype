@@ -11,6 +11,24 @@ struct FingerJewelTests {
         #expect(FingerJewel.radius(for: 1.35) <= 48)
     }
 
+    @Test func anActionAboveTheFingerParksTheBeadOnThatRim() {
+        let contact = CGPoint(x: 120, y: 200)
+        let jewel = FingerJewel.placeAbove(contact: contact, action: CGVector(dx: -1, dy: 0), intensity: 1)
+        #expect(jewel.drawsTrail)
+        #expect(jewel.center.x == contact.x)
+        #expect(jewel.center.y == contact.y - jewel.radius)
+        #expect(jewel.bead.x < jewel.center.x)
+        #expect(abs(jewel.bead.y - jewel.center.y) < 0.01)
+        let fromCenter = hypot(jewel.bead.x - jewel.center.x, jewel.bead.y - jewel.center.y)
+        #expect(abs(fromCenter - jewel.radius) < 0.01)
+
+        let still = FingerJewel.placeAbove(contact: contact, action: .zero, intensity: 1)
+        #expect(!still.drawsTrail)
+        #expect(still.center.y < contact.y)
+        let stillDistance = hypot(still.bead.x - still.center.x, still.bead.y - still.center.y)
+        #expect(abs(stillDistance - still.radius) < 0.01)
+    }
+
     @Test func aMovingFingerParksTheBeadOnTheTrailingRim() {
         let contact = CGPoint(x: 100, y: 80)
         let jewel = FingerJewel.place(

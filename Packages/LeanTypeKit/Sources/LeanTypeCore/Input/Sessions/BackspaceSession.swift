@@ -68,11 +68,13 @@ final class BackspaceSession: InteractionSession {
 
     private unowned let context: any SessionContext
     private let key: KeyFrame
+    private var finger: CGPoint
     private var phase = Phase.pressed
     private var timer: (any Cancellable)?
 
     init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
+        self.finger = track.start.location
         self.context = context
         context.emit(.keyDown(.delete, at: track.start.location))
         timer = context.schedule(after: Self.holdDelay) { [weak self] in
@@ -83,7 +85,10 @@ final class BackspaceSession: InteractionSession {
     var presentation: SessionPresentation {
         if case .finished = phase { return .none }
         if case let .scrubbing(scrub) = phase {
-            return SessionPresentation(pressedKey: key.id, scrub: scrub.mark(on: key.id))
+            return SessionPresentation(
+                pressedKey: key.id,
+                jewel: GestureMark(contact: finger, action: .scrub(scrub.mark(on: key.id)))
+            )
         }
         return SessionPresentation(pressedKey: key.id)
     }
@@ -93,6 +98,7 @@ final class BackspaceSession: InteractionSession {
     }
 
     func moved(_ track: TouchTrack) {
+        finger = track.current.location
         switch phase {
         case .pressed:
             guard abs(track.translation.dx) >= Self.activationDistance else { return }
@@ -132,7 +138,7 @@ final class BackspaceSession: InteractionSession {
             finish()
             return
         }
-        context.emit(.deleteStep)
+        context.emit(.deleteStep(character: context.performedText, restoring: false))
         phase = .holding(gear: gear, interval: interval, timeInGear: timeInGear)
 
         var gear = gear
@@ -163,8 +169,8 @@ final class BackspaceSession: InteractionSession {
     }
 }
 
-/// Horizontal delete and restore. `inward` is +1 when moving left deletes (the delete key)
-/// and -1 when moving right deletes (shift, which has room toward the letters).
+/// Horizontal delete and restore. `inward` is +1 when moving left deletes, which is both
+/// the delete key and shift.
 @MainActor
 struct DeletionScrub {
     var anchorX: CGFloat
@@ -174,7 +180,7 @@ struct DeletionScrub {
     var restoring = false
     var step = 0
 
-    /// The bite leans this way. Deleting on shift travels right; deleting on the delete key travels left.
+    /// The bite leans this way. Deleting travels left. Restoring travels right.
     var travelsRight: Bool {
         let deletingRight = inward < 0
         return restoring ? !deletingRight : deletingRight
@@ -196,7 +202,7 @@ struct DeletionScrub {
             applied += 1
             restoring = false
             step += 1
-            context.emit(.deleteStep)
+            context.emit(.deleteStep(character: context.performedText, restoring: false))
         }
 
         while applied > max(target, 0) {
@@ -208,7 +214,7 @@ struct DeletionScrub {
             applied -= 1
             restoring = true
             step += 1
-            context.emit(.deleteStep)
+            context.emit(.deleteStep(character: context.performedText, restoring: true))
         }
 
         if target < 0, applied == 0, !restoredWhole {
@@ -216,7 +222,7 @@ struct DeletionScrub {
             if context.perform(.restoreLastDeletion) {
                 restoring = true
                 step += 1
-                context.emit(.deleteStep)
+                context.emit(.deleteStep(character: context.performedText, restoring: true))
             }
         }
     }

@@ -208,11 +208,11 @@ public final class TextEditor {
 
     /// Re-inserts the most recently deleted character.
     @discardableResult
-    public func restoreCharacter() -> Bool {
-        guard deletionHistoryIsValid(), let character = deletions.popCharacter() else { return false }
+    public func restoreCharacter() -> String? {
+        guard deletionHistoryIsValid(), let character = deletions.popCharacter() else { return nil }
         document.insert(String(character))
         markRestored()
-        return true
+        return String(character)
     }
 
     /// Re-inserts the most recently deleted word (or scrubbed run) in one step and returns it.

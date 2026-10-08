@@ -1,3 +1,5 @@
+import CoreGraphics
+
 /// A callout drawn above a key: either a preview of the pressed letter or a row of long-press
 /// alternates with one selected.
 public struct CalloutState: Hashable, Sendable {
@@ -27,18 +29,18 @@ struct SessionPresentation {
     var isTrackpadActive = false
     /// The finger is drawing a swipe stroke (and should leave a trail).
     var isStroke = false
-    /// Set while this finger is scrubbing delete or shift. Letter keys under it are not a swipe.
-    var scrub: ScrubMark?
+    /// Set while this finger is scrubbing or the space bar is a trackpad.
+    var jewel: GestureMark?
 
     static let none = SessionPresentation()
 }
 
-/// The glyph bite on the key a scrub started on.
+/// One step of a delete scrub: which key, whether the step put a letter back, and which way it leaned.
 public struct ScrubMark: Hashable, Sendable {
     public var keyID: KeyID
-    /// The latest step put a letter back, so the key shows the undo arrow.
+    /// The latest step put a letter back.
     public var restoring: Bool
-    /// The bite leans this way. Delete travels left; shift travels right.
+    /// The bite leans this way. Deleting travels left. Restoring travels right.
     public var travelsRight: Bool
     /// Increments on every letter removed or put back, so a second bite in the same direction still plays.
     public var step: Int
@@ -51,6 +53,22 @@ public struct ScrubMark: Hashable, Sendable {
     }
 }
 
+/// Where a scrub or trackpad finger is, so the jewel can sit above the contact.
+public struct GestureMark: Hashable, Sendable {
+    public enum Action: Hashable, Sendable {
+        case scrub(ScrubMark)
+        case trackpad
+    }
+
+    public var contact: CGPoint
+    public var action: Action
+
+    public init(contact: CGPoint, action: Action) {
+        self.contact = contact
+        self.action = action
+    }
+}
+
 /// Everything about in-flight touches the renderer needs, aggregated across fingers.
 public struct InteractionState: Hashable, Sendable {
     public var pressedKeys: Set<KeyID>
@@ -58,21 +76,21 @@ public struct InteractionState: Hashable, Sendable {
     public var isTrackpadActive: Bool
     /// Fingers currently drawing swipe strokes.
     public var strokes: Set<TouchID>
-    /// The shift or delete key currently scrubbing, if a finger that started there is still down.
-    public var scrub: ScrubMark?
+    /// The scrub or trackpad finger, so a jewel can ride above it.
+    public var jewel: GestureMark?
 
     public init(
         pressedKeys: Set<KeyID>,
         callout: CalloutState?,
         isTrackpadActive: Bool,
         strokes: Set<TouchID> = [],
-        scrub: ScrubMark? = nil
+        jewel: GestureMark? = nil
     ) {
         self.pressedKeys = pressedKeys
         self.callout = callout
         self.isTrackpadActive = isTrackpadActive
         self.strokes = strokes
-        self.scrub = scrub
+        self.jewel = jewel
     }
 
     public static let idle = InteractionState(pressedKeys: [], callout: nil, isTrackpadActive: false)

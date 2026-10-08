@@ -15,14 +15,9 @@ final class KeyView: UIView {
     private var isCompact = false
     private var isPressed = false
     private var isSuggested = false
-    /// Wider than 1 only while the space bar is a trackpad.
-    private var span: CGFloat = 1
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
-    private var gulpStep = 0
-    private var gulpToken = 0
-    private var iconIsGulping = false
 
     init(style: KeyStyle) {
         self.style = style
@@ -57,9 +52,7 @@ final class KeyView: UIView {
         isSuggested suggested: Bool = false,
         isEnabled: Bool,
         isCompact compact: Bool,
-        hint: String? = nil,
-        trackpadOpen: Bool = false,
-        gulp: (travelsRight: Bool, step: Int)? = nil
+        hint: String? = nil
     ) {
         applyHint(hint, color: colors.label)
         if newStyle != style {
@@ -85,17 +78,7 @@ final class KeyView: UIView {
         icon.tintColor = tint
         restingColor = colors.fill.uiColor
         pressedColor = colors.pressedFill.uiColor
-        let open = trackpadOpen && !UIAccessibility.isReduceMotionEnabled
-        let nextSpan: CGFloat = open ? Motion.trackpadSpan : 1
-        let spanChanged = abs(nextSpan - span) > 0.001
-        span = nextSpan
-        applyFill(pressed: pressed, suggested: suggested, animateSpan: spanChanged)
-        if let gulp, gulp.step != gulpStep {
-            gulpStep = gulp.step
-            playGulp(travelsRight: gulp.travelsRight)
-        } else if gulp == nil {
-            gulpStep = 0
-        }
+        applyFill(pressed: pressed, suggested: suggested)
     }
 
     /// The new layer's label settles in. The key body stays where layout put it.
@@ -123,9 +106,7 @@ final class KeyView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         label.frame = bounds.insetBy(dx: 2, dy: 0)
-        if !iconIsGulping {
-            icon.frame = bounds
-        }
+        icon.frame = bounds
         hintLabel?.frame = CGRect(x: bounds.maxX - 13, y: 2, width: 11, height: 12)
         if bounds != shadowBounds {
             shadowBounds = bounds
@@ -138,7 +119,7 @@ final class KeyView: UIView {
     /// Presses apply instantly (they happen hundreds of times a day); releases ease back.
     /// A suggested key uses the pressed fill without the press scale, so the preview word
     /// reads as lit letters rather than fingers.
-    private func applyFill(pressed: Bool, suggested: Bool, animateSpan: Bool) {
+    private func applyFill(pressed: Bool, suggested: Bool) {
         let wasLit = isPressed || isSuggested
         isPressed = pressed
         isSuggested = suggested
@@ -146,16 +127,7 @@ final class KeyView: UIView {
         let target = lit ? pressedColor : restingColor
         let transform = currentTransform()
 
-        if animateSpan {
-            UIView.animate(
-                withDuration: Motion.modeChange,
-                delay: 0,
-                options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
-            ) {
-                self.backgroundColor = target
-                self.transform = transform
-            }
-        } else if wasLit, !lit {
+        if wasLit, !lit {
             UIView.animate(
                 withDuration: Motion.keyRelease,
                 delay: 0,
@@ -172,11 +144,8 @@ final class KeyView: UIView {
         }
     }
 
-    /// The trackpad opens the bar sideways. A press, on any other key, scales evenly and at once.
+    /// A press scales evenly and at once. The keycap itself never stretches.
     private func currentTransform() -> CGAffineTransform {
-        if span != 1 {
-            return CGAffineTransform(scaleX: span, y: 1)
-        }
         let scale = isPressed && !UIAccessibility.isReduceMotionEnabled ? style.pressedScale : 1
         return CGAffineTransform(scaleX: scale, y: scale)
     }
@@ -218,31 +187,7 @@ final class KeyView: UIView {
             label.isHidden = true
             icon.isHidden = false
             let image = UIImage(systemName: name, withConfiguration: Typography.symbolConfiguration(compact: isCompact))
-            if let image, icon.image != nil, !UIAccessibility.isReduceMotionEnabled {
-                icon.setSymbolImage(image, contentTransition: .replace)
-            } else {
-                icon.image = image
-            }
-        }
-    }
-
-    /// The glyph leans into the finger, then settles back on the key. A new bite starts from
-    /// wherever the last one was drawn.
-    private func playGulp(travelsRight: Bool) {
-        guard !UIAccessibility.isReduceMotionEnabled, bounds.width > 1 else { return }
-        iconIsGulping = true
-        gulpToken += 1
-        let token = gulpToken
-        let resting = bounds
-        let lean = (travelsRight ? 1 : -1) * resting.width * 0.16
-        let stretched = resting.insetBy(dx: -resting.width * 0.1, dy: resting.height * 0.08).offsetBy(dx: lean, dy: 0)
-        MorphDriver.move(icon, to: stretched, kind: .stretch, duration: Motion.gulp * 0.62, travels: true) { [weak self] in
-            guard let self, self.gulpToken == token else { return }
-            MorphDriver.move(self.icon, to: resting, kind: .settle, duration: Motion.gulp * 0.38, travels: true) { [weak self] in
-                guard let self, self.gulpToken == token else { return }
-                self.iconIsGulping = false
-                self.icon.frame = self.bounds
-            }
+            icon.image = image
         }
     }
 }

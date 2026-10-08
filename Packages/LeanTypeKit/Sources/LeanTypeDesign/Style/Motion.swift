@@ -21,8 +21,6 @@ public enum Motion {
     public static let pillSettle: TimeInterval = 0.16
     /// How long a shape leads before its label appears.
     public static let contentDelay: TimeInterval = 0.12
-    /// Horizontal scale of the space bar while it is a trackpad. It eases back on lift.
-    public static let trackpadSpan: CGFloat = 1.04
     /// Delay between rows when a new layer's labels arrive.
     public static let rowStagger: TimeInterval = 0.02
     /// Labels of a new layer start at this scale. The keys themselves do not.
@@ -31,8 +29,6 @@ public enum Motion {
     public static let rowArrival: TimeInterval = 0.16
     /// One pop when backspace steps up a gear.
     public static let gearPop: TimeInterval = 0.32
-    /// The delete or shift glyph stretching as it takes or gives back a letter.
-    public static let gulp: TimeInterval = 0.14
     /// A copy of the return glyph lifting off its key.
     public static let returnLift: TimeInterval = 0.18
     /// How far that copy travels, in points.

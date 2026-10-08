@@ -41,9 +41,6 @@ enum KeyPresentationProvider {
             )
 
         case .shift:
-            if let symbol = scrubSymbol(for: key, state: state, deleting: "delete.left") {
-                return KeyPresentation(label: .symbol(symbol), family: .function, isEnabled: true, accessibilityLabel: "shift")
-            }
             return switch state.shift {
             case .off:
                 KeyPresentation(label: .symbol("shift"), family: .function, isEnabled: true, accessibilityLabel: "shift")
@@ -59,9 +56,6 @@ enum KeyPresentationProvider {
             }
 
         case .backspace:
-            if let symbol = scrubSymbol(for: key, state: state, deleting: "delete.left.fill") {
-                return KeyPresentation(label: .symbol(symbol), family: .function, isEnabled: true, accessibilityLabel: "delete")
-            }
             return KeyPresentation(label: .symbol("delete.left"), family: .function, isEnabled: true, accessibilityLabel: "delete")
 
         case .space:
@@ -106,12 +100,6 @@ enum KeyPresentationProvider {
     private static func uppercased(_ character: String) -> String {
         let upper = character.uppercased()
         return upper.count == character.count ? upper : character
-    }
-
-    /// The scrub glyph for this key, if a finger that started here is still scrubbing.
-    private static func scrubSymbol(for key: KeySpec, state: KeyboardViewState, deleting: String) -> String? {
-        guard let scrub = state.interaction.scrub, scrub.keyID == key.id else { return nil }
-        return scrub.restoring ? "arrow.uturn.backward" : deleting
     }
 }
 

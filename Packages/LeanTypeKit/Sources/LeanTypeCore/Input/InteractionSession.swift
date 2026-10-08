@@ -14,6 +14,9 @@ protocol SessionContext: AnyObject {
     /// How a character will appear if committed now (shift applied).
     func displayText(for character: String) -> String
 
+    /// Text removed or put back by the last successful delete or restore. Empty otherwise.
+    var performedText: String { get }
+
     @discardableResult
     func perform(_ intent: KeyboardIntent) -> Bool
     func emit(_ event: KeyboardEvent)

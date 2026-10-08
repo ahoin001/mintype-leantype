@@ -134,12 +134,12 @@ struct TextEditorTests {
 
         for _ in 0..<3 { editor.deleteCharacter() }
         #expect(document.text == "typ")
-        #expect(editor.restoreCharacter())
+        #expect(editor.restoreCharacter() != nil)
         #expect(document.text == "typi")
-        #expect(editor.restoreCharacter())
-        #expect(editor.restoreCharacter())
+        #expect(editor.restoreCharacter() != nil)
+        #expect(editor.restoreCharacter() != nil)
         #expect(document.text == "typing")
-        #expect(!editor.restoreCharacter())
+        #expect(editor.restoreCharacter() == nil)
     }
 
     @Test func restoreWalksBackThroughEarlierWordDeletes() {
@@ -149,7 +149,7 @@ struct TextEditorTests {
         editor.deleteWord()
         editor.deleteWord()
         #expect(document.text == "")
-        #expect(editor.restoreCharacter())
+        #expect(editor.restoreCharacter() != nil)
         #expect(document.text == "o")
         #expect(editor.restoreLastDeletion() != nil)
         #expect(document.text == "one ")
@@ -163,7 +163,7 @@ struct TextEditorTests {
 
         editor.deleteCharacter()
         editor.insert("x")
-        #expect(!editor.restoreCharacter())
+        #expect(editor.restoreCharacter() == nil)
         #expect(document.text == "abx")
     }
 

@@ -34,6 +34,7 @@ final class SpaceSession: InteractionSession {
 
     private unowned let context: any SessionContext
     private let key: KeyFrame
+    private var finger: CGPoint
     private let ticket: InputComposer.Ticket
     private var phase = Phase.pressed
     private var longPress: (any Cancellable)?
@@ -45,6 +46,7 @@ final class SpaceSession: InteractionSession {
 
     init(key: KeyFrame, track: TouchTrack, context: any SessionContext) {
         self.key = key
+        self.finger = track.start.location
         self.context = context
         ticket = context.composer.reserve()
         context.emit(.keyDown(.modifier, at: track.start.location))
@@ -56,7 +58,12 @@ final class SpaceSession: InteractionSession {
     var presentation: SessionPresentation {
         switch phase {
         case .pressed: SessionPresentation(pressedKey: key.id)
-        case .trackpad: SessionPresentation(pressedKey: key.id, isTrackpadActive: true)
+        case .trackpad:
+            SessionPresentation(
+                pressedKey: key.id,
+                isTrackpadActive: true,
+                jewel: GestureMark(contact: finger, action: .trackpad)
+            )
         case let .punctuation(layout, selected):
             SessionPresentation(
                 pressedKey: key.id,
@@ -78,6 +85,7 @@ final class SpaceSession: InteractionSession {
     }
 
     func moved(_ track: TouchTrack) {
+        finger = track.current.location
         switch phase {
         case .pressed:
             let move = track.translation

@@ -171,11 +171,11 @@ struct GestureTip: Identifiable {
         GestureTip(
             id: "shiftDelete",
             title: "Delete from shift",
-            detail: "Slide shift toward the letters to erase one at a time, and back toward the edge to bring them back. Slide up onto a letter for a single capital.",
+            detail: "Slide shift toward the edge to erase one at a time, and back toward the letters to bring them back. Slide up onto a letter for a single capital.",
             keyLabel: "shift",
             keySymbol: "shift",
             keyWidth: 72,
-            poses: poses([(0, false, 0.4), (0, true, 0.15), (70, true, 0.7), (20, true, 0.5), (20, false, 0.2)])
+            poses: poses([(0, false, 0.4), (0, true, 0.15), (-70, true, 0.7), (-20, true, 0.5), (-20, false, 0.2)])
         ),
         GestureTip(
             id: "symbols",

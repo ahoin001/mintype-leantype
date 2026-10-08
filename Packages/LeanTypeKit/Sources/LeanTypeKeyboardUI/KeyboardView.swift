@@ -98,6 +98,7 @@ public final class KeyboardView: UIView {
             guard let self else { return }
             engine.handle(samples)
             effects.trails.ingest(samples, strokes: engine.state.interaction.strokes)
+            effects.jewel.ingest(engine.state.interaction.jewel)
         }
         keysView.onAccessibilityActivate = { [weak self] id in
             self?.engine.activateKey(id)

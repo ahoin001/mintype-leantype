@@ -8,6 +8,7 @@ import UIKit
 final class EffectsCoordinator: KeyboardEventObserver {
     let stage: EffectsStage
     let trails: TrailRenderer
+    let jewel: GestureJewelRenderer
     /// Called when flow moves a step, for chrome outside the stage (the dock wordmark).
     var onFlowChange: ((FlowLevel) -> Void)?
 
@@ -20,7 +21,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
         self.stage = stage
         governor = EffectsGovernor(intensity: settings.intensity)
         effects = [
-            RippleEffect(), GustEffect(), CometEffect(), SparkleEffect(), FlowGlowEffect(),
+            RippleEffect(), GustEffect(), SparkleEffect(), FlowGlowEffect(),
             HoldWindupEffect(), GearMarkEffect(), ReturnLiftEffect(), halo,
         ]
         context = EffectContext(
@@ -33,6 +34,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
             geometry: nil
         )
         trails = TrailRenderer(stage: stage, palette: context.palette)
+        jewel = GestureJewelRenderer(stage: stage, palette: context.palette)
         syncTrails()
         governor.onChange = { [weak self] level in self?.levelDidChange(level) }
         if context.level > .off {
@@ -48,6 +50,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
             onFlowChange?(context.level > .off ? flow : .zero)
         }
         guard context.level > .off else { return }
+        jewel.handle(event)
         let interval = Signposts.effects.beginInterval("Effect")
         for effect in effects where context.level >= type(of: effect).minimumLevel {
             effect.handle(event, in: context)
@@ -97,6 +100,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
     func stopAll() {
         effects.forEach { $0.stop(in: context) }
         trails.endAll(animated: false)
+        jewel.end(animated: false)
     }
 
     // MARK: - Private
@@ -112,6 +116,9 @@ final class EffectsCoordinator: KeyboardEventObserver {
         trails.palette = context.palette
         trails.style = context.trailStyle
         trails.intensity = context.intensity
+        jewel.level = context.level
+        jewel.palette = context.palette
+        jewel.intensity = context.intensity
     }
 
     private func levelDidChange(_ level: EffectsLevel) {
@@ -123,6 +130,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
         if level == .off {
             onFlowChange?(.zero)
             trails.level = .off
+            jewel.level = .off
             stage.pool.drain()
         } else {
             stage.pool.prewarm()

@@ -38,6 +38,8 @@ public final class KeyboardEngine {
     public private(set) var state: KeyboardViewState
 
     private let editor: TextEditor
+    /// Text removed or put back by the latest delete or restore inside `perform`.
+    var performedText = ""
     private let scheduler: any Scheduler
     private let shift = ShiftController()
     private let words: WordAssistant
@@ -348,6 +350,7 @@ public final class KeyboardEngine {
     func perform(_ intent: KeyboardIntent) -> Bool {
         let interval = Signposts.input.beginInterval("Commit")
         defer { Signposts.input.endInterval("Commit", interval) }
+        performedText = ""
 
         if intent != .space {
             lastSpaceTime = nil
@@ -389,11 +392,21 @@ public final class KeyboardEngine {
             changed = deleteRun(editor.deleteSentence())
         case .deleteCharacter:
             closeOpenWord()
-            changed = editor.deleteCharacter() != nil
-            words.noteCharacterDeleted()
-            flow.noteDeletion()
+            if let text = editor.deleteCharacter() {
+                performedText = text
+                changed = true
+                words.noteCharacterDeleted()
+                flow.noteDeletion()
+            } else {
+                changed = false
+            }
         case .restoreCharacter:
-            changed = editor.restoreCharacter()
+            if let text = editor.restoreCharacter() {
+                performedText = text
+                changed = true
+            } else {
+                changed = false
+            }
         case .restoreLastDeletion:
             changed = restoreLastDeletion()
         case .undoRecentCommit:
@@ -972,6 +985,7 @@ public final class KeyboardEngine {
 
     private func deleteRun(_ removed: String?) -> Bool {
         guard let removed else { return false }
+        performedText = removed
         let visible = removed.trimmingCharacters(in: .whitespacesAndNewlines)
         if !visible.isEmpty {
             emit(.wordDeleted(visible, origin: center(of: .backspace)))
@@ -982,6 +996,7 @@ public final class KeyboardEngine {
 
     private func restoreLastDeletion() -> Bool {
         guard let restored = editor.restoreLastDeletion() else { return false }
+        performedText = restored
         let visible = restored.trimmingCharacters(in: .whitespacesAndNewlines)
         if !visible.isEmpty {
             words.noteSwipedWordRestored(visible)
