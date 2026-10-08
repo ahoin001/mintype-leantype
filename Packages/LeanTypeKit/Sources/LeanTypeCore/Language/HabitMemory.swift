@@ -42,11 +42,20 @@ public struct AppGroupHabitStore: HabitStore {
 @MainActor
 final class HabitMemory {
     static let capacity = 400
+    /// A commit this recent keeps its full bonus.
+    static let freshDays = 7.0
+    /// A commit this old, or older, adds nothing.
+    static let fadeDays = 45.0
 
-    /// `min(0.08 * log2(uses), 0.45)`. Zero for a single commit.
-    static func bonus(uses: Int) -> Double {
+    /// `min(0.08 * log2(uses), 0.45)`, then faded by age. Full for a week, zero after 45 days.
+    /// One use adds nothing.
+    static func bonus(uses: Int, lastUsed: Date = .now, now: Date = .now) -> Double {
         guard uses > 1 else { return 0 }
-        return min(0.08 * log2(Double(uses)), 0.45)
+        let raw = min(0.08 * log2(Double(uses)), 0.45)
+        let days = now.timeIntervalSince(lastUsed) / 86_400
+        if days <= freshDays { return raw }
+        if days >= fadeDays { return 0 }
+        return raw * (1 - (days - freshDays) / (fadeDays - freshDays))
     }
 
     private var habits: [WordHabit]
@@ -79,7 +88,7 @@ final class HabitMemory {
     func bonuses() -> [String: Double] {
         var result: [String: Double] = [:]
         for habit in habits {
-            let bonus = Self.bonus(uses: habit.uses)
+            let bonus = Self.bonus(uses: habit.uses, lastUsed: habit.lastUsed)
             if bonus > 0 { result[habit.word] = bonus }
         }
         return result

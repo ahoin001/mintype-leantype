@@ -1185,6 +1185,98 @@ struct SwipeTypingTests {
         #expect(HabitMemory.bonus(uses: 1) == 0)
     }
 
+    @Test func aCommitBonusFadesAfterAMonth() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let full = HabitMemory.bonus(uses: 32, lastUsed: now, now: now)
+        let thisWeek = HabitMemory.bonus(uses: 32, lastUsed: now.addingTimeInterval(-6 * 86_400), now: now)
+        let halfway = HabitMemory.bonus(uses: 32, lastUsed: now.addingTimeInterval(-26 * 86_400), now: now)
+        let gone = HabitMemory.bonus(uses: 32, lastUsed: now.addingTimeInterval(-50 * 86_400), now: now)
+        #expect(full == thisWeek)
+        #expect(full > 0.3)
+        #expect(halfway > full * 0.4)
+        #expect(halfway < full * 0.6)
+        #expect(gone == 0)
+        #expect(HabitMemory.bonus(uses: 1, lastUsed: now, now: now) == 0)
+    }
+
+    @Test func aHabitualPrefixStaysAheadOfARarerOne() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry),
+              let gesture = exactSwipe("live", layout: layout) else {
+            Issue.record("Gesture missing")
+            return
+        }
+        let plain = decode(gesture, layout: layout)
+        guard let rival = plain.readings.dropFirst().first else {
+            Issue.record("Need a runner-up")
+            return
+        }
+        let boosted = decode(gesture, layout: layout, habits: [rival.word.lowercased(): 0.45])
+        let plainScore = plain.readings.first { $0.word.lowercased() == rival.word.lowercased() }?.score ?? 0
+        let boostedScore = boosted.readings.first { $0.word.lowercased() == rival.word.lowercased() }?.score ?? 0
+        let delta = boostedScore - plainScore
+        // The prefix bonus only decides who stays in the beam. The finished word is scored once.
+        #expect(delta > 0.4)
+        #expect(delta < 0.55)
+        #expect(boosted.words.contains { $0.lowercased() == rival.word.lowercased() })
+    }
+
+    @Test func liveBeatsVeliBecauseTheWordShapeDiffers() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry),
+              let gesture = exactSwipe("live", layout: layout, split: true) else {
+            Issue.record("Gesture missing")
+            return
+        }
+        let result = decode(gesture, layout: layout)
+        #expect(result.words.first?.lowercased() == "live")
+        if let live = result.readings.firstIndex(where: { $0.word.lowercased() == "live" }),
+           let veli = result.readings.firstIndex(where: { $0.word.lowercased() == "veli" }) {
+            #expect(live < veli)
+        }
+    }
+
+    @Test func aFastStrokeSkipsACrossingASlowStrokeKeeps() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let letters: [UInt8] = [UInt8(ascii: "l"), UInt8(ascii: "i"), UInt8(ascii: "v"), UInt8(ascii: "e")]
+        let crossed = layout.center(of: UInt8(ascii: "k"))
+        func gesture(speed: Double) -> SwipeGesture {
+            var points = letters.map { layout.center(of: $0) }
+            points.insert(crossed, at: 1)
+            let roles: [EvidenceRole] = [.anchor, .crossing, .anchor, .anchor, .anchor]
+            let names = ["l", "k", "i", "v", "e"]
+            let events = zip(points.indices, points).map { index, point in
+                SwipeEvent(
+                    time: Double(index) * 0.05,
+                    point: point,
+                    letter: names[index],
+                    role: roles[index],
+                    strokeIndex: 0,
+                    speed: speed,
+                    distanceToCenter: index == 1 ? 0 : 1
+                )
+            }
+            return SwipeGesture(
+                path: points,
+                strokeCount: 1,
+                strokePaths: [points],
+                tracedLetters: "lkive",
+                observations: [],
+                evidence: SwipeEvidence(events: events, aimedLetters: "live")
+            )
+        }
+        let fast = decode(gesture(speed: 900), layout: layout)
+        let slow = decode(gesture(speed: 80), layout: layout)
+        let fastLive = fast.readings.first { $0.word.lowercased() == "live" }?.score
+        let slowLive = slow.readings.first { $0.word.lowercased() == "live" }?.score
+        #expect((fastLive ?? -.infinity) > (slowLive ?? -.infinity))
+        #expect(fast.words.first?.lowercased() == "live")
+    }
+
     @Test func aRejectedWordYieldsWhenThePreferredSpellingIsMissing() {
         let model = LanguageModel(lexicon: TestLexicon.shared)
         model.noteRejection(preferred: "teh", rejected: "the")

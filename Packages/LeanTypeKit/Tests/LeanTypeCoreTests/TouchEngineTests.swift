@@ -166,36 +166,43 @@ struct BackspaceGestureTests {
 @MainActor
 @Suite("Shift and layers")
 struct ShiftAndLayerTests {
-    @Test func slideFromShiftOntoZTypesOneCapital() {
-        let harness = EngineHarness(traits: InputTraits(autocapitalization: .none))
-        let id = harness.down(at: harness.point(for: .shift))
-        harness.move(id, to: harness.point(for: "z"), over: 0.08)
-        harness.up(id)
-        #expect(harness.text == "Z")
-        #expect(harness.state.shift == .off)
-    }
-
-    @Test func scrubbingShiftDeletesAndRestoresWithoutTogglingShift() {
+    @Test func scrubbingFromShiftAcrossZDeletesAndDoesNotTypeIt() {
         let harness = EngineHarness(text: "typing", traits: InputTraits(autocapitalization: .none))
         let id = harness.down(at: harness.point(for: .shift))
-        harness.move(id, by: CGVector(dx: -BackspaceSession.activationDistance, dy: 0))
-        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep * 3, dy: 0), steps: 3)
+        harness.move(id, to: harness.point(for: "z"))
+        harness.move(id, by: CGVector(dx: BackspaceSession.scrubStep * 3, dy: 0), steps: 3)
         #expect(harness.text == "typ")
 
-        harness.move(id, by: CGVector(dx: BackspaceSession.scrubStep * 2, dy: 0), steps: 2)
+        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep * 2, dy: 0), steps: 2)
         #expect(harness.text == "typin")
         harness.up(id)
         #expect(harness.text == "typin")
         #expect(harness.state.shift == .off)
+        #expect(!harness.text.contains("Z"))
+        #expect(!harness.recorder.events.contains { event in
+            if case .wordCommitted = event { return true }
+            return false
+        })
     }
 
-    @Test func aRightFlickOnShiftRestoresTheLastDeletion() {
+    @Test func scrubbingDeleteAcrossMDoesNotTypeIt() {
+        let harness = EngineHarness(text: "typing", traits: InputTraits(autocapitalization: .none))
+        let id = harness.down(at: harness.point(for: .backspace))
+        harness.move(id, to: harness.point(for: "m"))
+        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep * 3, dy: 0), steps: 3)
+        harness.up(id)
+        #expect(harness.text == "typ")
+        #expect(!harness.text.hasSuffix("m"))
+    }
+
+    @Test func reversingOnShiftRestoresTheLastDeletion() {
         let harness = EngineHarness(text: "hello world", traits: InputTraits(autocapitalization: .none))
         harness.tap(.backspace)
         #expect(harness.text == "hello ")
 
         let id = harness.down(at: harness.point(for: .shift))
-        harness.move(id, by: CGVector(dx: BackspaceSession.activationDistance + 2, dy: 0))
+        harness.move(id, by: CGVector(dx: BackspaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -(BackspaceSession.scrubStep + 1), dy: 0))
         harness.up(id)
         #expect(harness.text == "hello world")
         #expect(harness.state.shift == .off)
@@ -204,8 +211,8 @@ struct ShiftAndLayerTests {
     @Test func scrubbingShiftDoesNotCountAsAShiftTap() {
         let harness = EngineHarness(text: "typing", traits: InputTraits(autocapitalization: .none))
         let id = harness.down(at: harness.point(for: .shift))
-        harness.move(id, by: CGVector(dx: -BackspaceSession.activationDistance, dy: 0))
-        harness.move(id, by: CGVector(dx: -BackspaceSession.scrubStep, dy: 0))
+        harness.move(id, by: CGVector(dx: BackspaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: BackspaceSession.scrubStep, dy: 0))
         harness.up(id)
 
         harness.tap(.shift, gap: 0.05)

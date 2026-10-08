@@ -82,6 +82,9 @@ final class BackspaceSession: InteractionSession {
 
     var presentation: SessionPresentation {
         if case .finished = phase { return .none }
+        if case let .scrubbing(scrub) = phase {
+            return SessionPresentation(pressedKey: key.id, scrub: scrub.mark(on: key.id))
+        }
         return SessionPresentation(pressedKey: key.id)
     }
 
@@ -160,23 +163,39 @@ final class BackspaceSession: InteractionSession {
     }
 }
 
-/// Left deletes one character per step. Right puts those characters back. A rightward move
-/// before any of them were deleted restores the whole previous deletion.
+/// Horizontal delete and restore. `inward` is +1 when moving left deletes (the delete key)
+/// and -1 when moving right deletes (shift, which has room toward the letters).
 @MainActor
 struct DeletionScrub {
     var anchorX: CGFloat
     var applied: Int
     var restoredWhole: Bool
+    var inward: CGFloat = 1
+    var restoring = false
+    var step = 0
+
+    /// The bite leans this way. Deleting on shift travels right; deleting on the delete key travels left.
+    var travelsRight: Bool {
+        let deletingRight = inward < 0
+        return restoring ? !deletingRight : deletingRight
+    }
+
+    func mark(on keyID: KeyID) -> ScrubMark {
+        ScrubMark(keyID: keyID, restoring: restoring, travelsRight: travelsRight, step: step)
+    }
 
     mutating func update(to x: CGFloat, context: any SessionContext) {
-        let target = Int(((anchorX - x) / BackspaceSession.scrubStep).rounded(.towardZero))
+        let signed = (anchorX - x) * inward
+        let target = Int((signed / BackspaceSession.scrubStep).rounded(.towardZero))
 
         while applied < target {
             guard context.perform(.deleteCharacter) else {
-                anchorX = x + CGFloat(applied) * BackspaceSession.scrubStep
+                anchorX = x + CGFloat(applied) * BackspaceSession.scrubStep / inward
                 break
             }
             applied += 1
+            restoring = false
+            step += 1
             context.emit(.deleteStep)
         }
 
@@ -187,12 +206,16 @@ struct DeletionScrub {
                 break
             }
             applied -= 1
+            restoring = true
+            step += 1
             context.emit(.deleteStep)
         }
 
         if target < 0, applied == 0, !restoredWhole {
             restoredWhole = true
             if context.perform(.restoreLastDeletion) {
+                restoring = true
+                step += 1
                 context.emit(.deleteStep)
             }
         }

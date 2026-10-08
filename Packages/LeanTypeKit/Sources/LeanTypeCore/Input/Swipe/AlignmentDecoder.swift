@@ -54,11 +54,21 @@ enum AlignmentSearch {
         let events = raw.sorted { $0.time < $1.time }
         guard !events.isEmpty else { return .empty }
         let steps = StrokeChannel.steps(from: events, keyWidth: layout.keyWidth, keyHeight: layout.keyHeight)
+        let crossingScale = crossingScale(of: events)
 
         var readings: [DecodeResult.Reading] = []
         for order in orders(of: steps, costs: costs) {
             let penalty = orderPenalty(order, costs: costs)
-            let ranked = beam(order, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs, habits: habits)
+            let ranked = beam(
+                order,
+                layout: layout,
+                lexicon: lexicon,
+                personal: personal,
+                bigram: bigram,
+                costs: costs,
+                habits: habits,
+                crossingScale: crossingScale
+            )
                 .map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
             readings = merge(readings, ranked)
         }
@@ -166,8 +176,10 @@ enum AlignmentSearch {
         personal: [PersonalLexicon.Entry],
         bigram: LetterBigram,
         costs: AlignmentCosts,
-        habits: [String: Double]
+        habits: [String: Double],
+        crossingScale: Double
     ) -> [DecodeResult.Reading] {
+        let habitBuckets = habitBuckets(from: habits)
         var beam = [Hypothesis(letters: [], score: 0, anchorSkips: 0, lastX: 0, lastY: 0, placed: false, lastStroke: nil)]
         for step in steps {
             var next: [Hypothesis] = []
@@ -183,13 +195,13 @@ enum AlignmentSearch {
                             next.append(doubled)
                         }
                     }
-                    if let skipped = skip(hypothesis, event: event, layout: layout, costs: costs) {
+                    if let skipped = skip(hypothesis, event: event, layout: layout, costs: costs, crossingScale: crossingScale) {
                         next.append(skipped)
                     }
                 }
             } else {
                 for hypothesis in beam {
-                    next.append(skipChannel(hypothesis, costs: costs))
+                    next.append(skipChannel(hypothesis, costs: costs, crossingScale: crossingScale))
                     var seen = Set<UInt8>()
                     for event in step.channel {
                         guard let letter = event.letter.lowercased().utf8.first,
@@ -201,7 +213,7 @@ enum AlignmentSearch {
                     }
                 }
             }
-            beam = prune(next, lexicon: lexicon, costs: costs)
+            beam = prune(next, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
             if beam.isEmpty { return [] }
         }
 
@@ -293,7 +305,8 @@ enum AlignmentSearch {
         _ hypothesis: Hypothesis,
         event: SwipeEvent,
         layout: LetterLayout,
-        costs: AlignmentCosts
+        costs: AlignmentCosts,
+        crossingScale: Double
     ) -> Hypothesis? {
         switch event.role {
         case .anchor, .tap:
@@ -305,17 +318,31 @@ enum AlignmentSearch {
         case .crossing:
             let closeness = max(0, 1 - Double(event.distanceToCenter / max(layout.keyWidth, 1)))
             var skipped = hypothesis
-            skipped.score -= costs.crossingSkipBase + costs.crossingSkipCentral * closeness
+            skipped.score -= (costs.crossingSkipBase + costs.crossingSkipCentral * closeness) * crossingScale
             return skipped
         }
     }
 
     /// A straight run between corners costs almost nothing to ignore. The letters stay
     /// available as a single insertion, so a word can still take one of them.
-    private static func skipChannel(_ hypothesis: Hypothesis, costs: AlignmentCosts) -> Hypothesis {
+    private static func skipChannel(_ hypothesis: Hypothesis, costs: AlignmentCosts, crossingScale: Double) -> Hypothesis {
         var skipped = hypothesis
-        skipped.score -= costs.crossingSkipBase
+        skipped.score -= costs.crossingSkipBase * crossingScale
         return skipped
+    }
+
+    /// A fast flick makes a grazed key cheaper to skip. A slow trace makes it dearer.
+    /// Missing speeds stay at 1, so fixtures that never recorded a speed are unchanged.
+    private static func crossingScale(of events: [SwipeEvent]) -> Double {
+        let speeds = events.map(\.speed).filter { $0 > 0 }.sorted()
+        guard !speeds.isEmpty else { return 1 }
+        let median = speeds[speeds.count / 2]
+        let slow = 180.0
+        let fast = 700.0
+        if median <= slow { return 1.25 }
+        if median >= fast { return 0.75 }
+        let t = (median - slow) / (fast - slow)
+        return 1.25 + (0.75 - 1.25) * t
     }
 
     private static func spatialCost(_ point: CGPoint, letter: UInt8, layout: LetterLayout, costs: AlignmentCosts) -> Double {
@@ -362,7 +389,8 @@ enum AlignmentSearch {
     private static func prune(
         _ hypotheses: [Hypothesis],
         lexicon: MappedLexicon,
-        costs: AlignmentCosts
+        costs: AlignmentCosts,
+        habitBuckets: [[HabitKey]]
     ) -> [Hypothesis] {
         var best: [String: Hypothesis] = [:]
         best.reserveCapacity(hypotheses.count)
@@ -372,24 +400,65 @@ enum AlignmentSearch {
             best[key] = hypothesis
         }
         return best.values.sorted { lhs, rhs in
-            survival(lhs, lexicon: lexicon, costs: costs) > survival(rhs, lexicon: lexicon, costs: costs)
+            survival(lhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+                > survival(rhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
         }.prefix(costs.beamWidth).map { $0 }
     }
 
     private static func survival(
         _ hypothesis: Hypothesis,
         lexicon: MappedLexicon,
-        costs: AlignmentCosts
+        costs: AlignmentCosts,
+        habitBuckets: [[HabitKey]]
     ) -> Double {
-        guard let prior = lexicon.prefixLogCount(hypothesis.letters) else { return hypothesis.score }
-        let lower = lexicon.logCountRange.lowerBound
-        let span = lexicon.logCountRange.upperBound - lower
-        guard span > 0 else { return hypothesis.score }
-        // The table stores a raw log count. Using it whole outweighs the path, so a common
-        // stem such as "ve" can crowd out the letters the finger actually drew. The byte's
-        // place in the frequency range keeps the nudge inside one frequency weight.
-        let fraction = min(1, max(0, (prior - lower) / span))
-        return hypothesis.score + costs.frequencyWeight * fraction
+        var score = hypothesis.score
+        if let prior = lexicon.prefixLogCount(hypothesis.letters) {
+            let lower = lexicon.logCountRange.lowerBound
+            let span = lexicon.logCountRange.upperBound - lower
+            if span > 0 {
+                // The table stores a raw log count. Using it whole outweighs the path, so a common
+                // stem such as "ve" can crowd out the letters the finger actually drew. The byte's
+                // place in the frequency range keeps the nudge inside one frequency weight.
+                let fraction = min(1, max(0, (prior - lower) / span))
+                score += costs.frequencyWeight * fraction
+            }
+        }
+        score += habitPrefixBonus(hypothesis.letters, buckets: habitBuckets)
+        return score
+    }
+
+    /// A committed word helps its own prefix stay in the beam. The fraction is how much of
+    /// that word is written so far. The full bonus is added once, later, when the word is scored.
+    private struct HabitKey {
+        var key: [UInt8]
+        var bonus: Double
+    }
+
+    private static func habitBuckets(from habits: [String: Double]) -> [[HabitKey]] {
+        var buckets = Array(repeating: [HabitKey](), count: LexiconKey.letterCount * LexiconKey.letterCount)
+        guard !habits.isEmpty else { return buckets }
+        for (word, bonus) in habits where bonus > 0 {
+            let key = LexiconKey.make(word)
+            guard key.count >= 2 else { continue }
+            let first = LexiconKey.index(of: key[0])
+            let second = LexiconKey.index(of: key[1])
+            guard (0..<LexiconKey.letterCount).contains(first), (0..<LexiconKey.letterCount).contains(second) else { continue }
+            buckets[first * LexiconKey.letterCount + second].append(HabitKey(key: key, bonus: bonus))
+        }
+        return buckets
+    }
+
+    private static func habitPrefixBonus(_ letters: [UInt8], buckets: [[HabitKey]]) -> Double {
+        guard letters.count >= 2 else { return 0 }
+        let first = LexiconKey.index(of: letters[0])
+        let second = LexiconKey.index(of: letters[1])
+        guard (0..<LexiconKey.letterCount).contains(first), (0..<LexiconKey.letterCount).contains(second) else { return 0 }
+        var best = 0.0
+        for habit in buckets[first * LexiconKey.letterCount + second] where habit.key.count >= letters.count && habit.key.starts(with: letters) {
+            let scaled = habit.bonus * Double(letters.count) / Double(habit.key.count)
+            if scaled > best { best = scaled }
+        }
+        return best
     }
 
     private static func consider(
@@ -862,7 +931,7 @@ enum AlignmentSearch {
                 pairs.append((first, last))
             }
         }
-        var best: [(word: String, score: Double)] = []
+        var best: [(word: String, score: Double, logCount: Double, spare: Int)] = []
         func keep(_ display: String, logCount: Double, key: UnsafeRawBufferPointer) {
             guard key.count >= 2, key.count <= maxLength else { return }
             guard isSubsequence(left, of: key), isSubsequence(right, of: key) else { return }
@@ -872,7 +941,7 @@ enum AlignmentSearch {
             if let ceiling { score = min(score, ceiling - 0.01) }
             if best.contains(where: { $0.word.compare(display, options: .caseInsensitive) == .orderedSame }) { return }
             let position = best.firstIndex { $0.score < score } ?? best.count
-            best.insert((display, score), at: position)
+            best.insert((display, score, logCount, spare), at: position)
             if best.count > 8 { best.removeLast() }
         }
         for (first, last) in pairs {
@@ -890,6 +959,14 @@ enum AlignmentSearch {
                 keep(entry.display, logCount: entry.logCount, key: raw)
             }
         }
+        for index in best.indices {
+            let shaped = wordOnStrokes(LexiconKey.make(best[index].word), gesture: gesture, layout: layout, pathScore: &pathScore)
+            guard shaped < 0, shaped > -8 else { continue }
+            var score = shaped + costs.frequencyWeight * best[index].logCount - costs.lengthWeight * Double(best[index].spare)
+            if let ceiling { score = min(score, ceiling - 0.01) }
+            best[index].score = score
+        }
+        best.sort { $0.score > $1.score }
         return best.map { DecodeResult.Reading(word: $0.word, score: $0.score) }
     }
 

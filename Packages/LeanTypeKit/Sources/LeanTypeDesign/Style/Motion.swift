@@ -31,6 +31,8 @@ public enum Motion {
     public static let rowArrival: TimeInterval = 0.16
     /// One pop when backspace steps up a gear.
     public static let gearPop: TimeInterval = 0.32
+    /// The delete or shift glyph stretching as it takes or gives back a letter.
+    public static let gulp: TimeInterval = 0.14
     /// A copy of the return glyph lifting off its key.
     public static let returnLift: TimeInterval = 0.18
     /// How far that copy travels, in points.

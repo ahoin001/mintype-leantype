@@ -20,6 +20,9 @@ final class KeyView: UIView {
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
+    private var gulpStep = 0
+    private var gulpToken = 0
+    private var iconIsGulping = false
 
     init(style: KeyStyle) {
         self.style = style
@@ -55,7 +58,8 @@ final class KeyView: UIView {
         isEnabled: Bool,
         isCompact compact: Bool,
         hint: String? = nil,
-        trackpadOpen: Bool = false
+        trackpadOpen: Bool = false,
+        gulp: (travelsRight: Bool, step: Int)? = nil
     ) {
         applyHint(hint, color: colors.label)
         if newStyle != style {
@@ -86,6 +90,12 @@ final class KeyView: UIView {
         let spanChanged = abs(nextSpan - span) > 0.001
         span = nextSpan
         applyFill(pressed: pressed, suggested: suggested, animateSpan: spanChanged)
+        if let gulp, gulp.step != gulpStep {
+            gulpStep = gulp.step
+            playGulp(travelsRight: gulp.travelsRight)
+        } else if gulp == nil {
+            gulpStep = 0
+        }
     }
 
     /// The new layer's label settles in. The key body stays where layout put it.
@@ -113,7 +123,9 @@ final class KeyView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         label.frame = bounds.insetBy(dx: 2, dy: 0)
-        icon.frame = bounds
+        if !iconIsGulping {
+            icon.frame = bounds
+        }
         hintLabel?.frame = CGRect(x: bounds.maxX - 13, y: 2, width: 11, height: 12)
         if bounds != shadowBounds {
             shadowBounds = bounds
@@ -205,7 +217,32 @@ final class KeyView: UIView {
         case let .symbol(name):
             label.isHidden = true
             icon.isHidden = false
-            icon.image = UIImage(systemName: name, withConfiguration: Typography.symbolConfiguration(compact: isCompact))
+            let image = UIImage(systemName: name, withConfiguration: Typography.symbolConfiguration(compact: isCompact))
+            if let image, icon.image != nil, !UIAccessibility.isReduceMotionEnabled {
+                icon.setSymbolImage(image, contentTransition: .replace)
+            } else {
+                icon.image = image
+            }
+        }
+    }
+
+    /// The glyph leans into the finger, then settles back on the key. A new bite starts from
+    /// wherever the last one was drawn.
+    private func playGulp(travelsRight: Bool) {
+        guard !UIAccessibility.isReduceMotionEnabled, bounds.width > 1 else { return }
+        iconIsGulping = true
+        gulpToken += 1
+        let token = gulpToken
+        let resting = bounds
+        let lean = (travelsRight ? 1 : -1) * resting.width * 0.16
+        let stretched = resting.insetBy(dx: -resting.width * 0.1, dy: resting.height * 0.08).offsetBy(dx: lean, dy: 0)
+        MorphDriver.move(icon, to: stretched, kind: .stretch, duration: Motion.gulp * 0.62, travels: true) { [weak self] in
+            guard let self, self.gulpToken == token else { return }
+            MorphDriver.move(self.icon, to: resting, kind: .settle, duration: Motion.gulp * 0.38, travels: true) { [weak self] in
+                guard let self, self.gulpToken == token else { return }
+                self.iconIsGulping = false
+                self.icon.frame = self.bounds
+            }
         }
     }
 }

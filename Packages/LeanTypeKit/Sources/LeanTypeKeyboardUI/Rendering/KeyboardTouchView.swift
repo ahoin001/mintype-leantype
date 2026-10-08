@@ -234,7 +234,8 @@ final class KeyboardTouchView: UIView {
                 isEnabled: presentation.isEnabled,
                 isCompact: compact,
                 hint: presentation.hint,
-                trackpadOpen: frame.key.kind == .space && state.interaction.isTrackpadActive
+                trackpadOpen: frame.key.kind == .space && state.interaction.isTrackpadActive,
+                gulp: gulp(for: frame.id, in: state)
             )
         }
         calloutView.apply(theme: theme, style: style, isCompact: compact)
@@ -243,6 +244,12 @@ final class KeyboardTouchView: UIView {
         let fades = fingerCallout == nil && callout != nil && UIAccessibility.isReduceMotionEnabled
         calloutView.show(callout, fades: fades)
         updateAccessibilityLabels()
+    }
+
+    /// A bite on the key this finger started on. Later steps with the same count do not replay.
+    private func gulp(for keyID: KeyID, in state: KeyboardViewState) -> (travelsRight: Bool, step: Int)? {
+        guard let scrub = state.interaction.scrub, scrub.keyID == keyID, scrub.step > 0 else { return nil }
+        return (scrub.travelsRight, scrub.step)
     }
 
     private func setLabelsHidden(_ hidden: Bool) {

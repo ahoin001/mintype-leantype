@@ -27,8 +27,28 @@ struct SessionPresentation {
     var isTrackpadActive = false
     /// The finger is drawing a swipe stroke (and should leave a trail).
     var isStroke = false
+    /// Set while this finger is scrubbing delete or shift. Letter keys under it are not a swipe.
+    var scrub: ScrubMark?
 
     static let none = SessionPresentation()
+}
+
+/// The glyph bite on the key a scrub started on.
+public struct ScrubMark: Hashable, Sendable {
+    public var keyID: KeyID
+    /// The latest step put a letter back, so the key shows the undo arrow.
+    public var restoring: Bool
+    /// The bite leans this way. Delete travels left; shift travels right.
+    public var travelsRight: Bool
+    /// Increments on every letter removed or put back, so a second bite in the same direction still plays.
+    public var step: Int
+
+    public init(keyID: KeyID, restoring: Bool, travelsRight: Bool, step: Int) {
+        self.keyID = keyID
+        self.restoring = restoring
+        self.travelsRight = travelsRight
+        self.step = step
+    }
 }
 
 /// Everything about in-flight touches the renderer needs, aggregated across fingers.
@@ -38,12 +58,21 @@ public struct InteractionState: Hashable, Sendable {
     public var isTrackpadActive: Bool
     /// Fingers currently drawing swipe strokes.
     public var strokes: Set<TouchID>
+    /// The shift or delete key currently scrubbing, if a finger that started there is still down.
+    public var scrub: ScrubMark?
 
-    public init(pressedKeys: Set<KeyID>, callout: CalloutState?, isTrackpadActive: Bool, strokes: Set<TouchID> = []) {
+    public init(
+        pressedKeys: Set<KeyID>,
+        callout: CalloutState?,
+        isTrackpadActive: Bool,
+        strokes: Set<TouchID> = [],
+        scrub: ScrubMark? = nil
+    ) {
         self.pressedKeys = pressedKeys
         self.callout = callout
         self.isTrackpadActive = isTrackpadActive
         self.strokes = strokes
+        self.scrub = scrub
     }
 
     public static let idle = InteractionState(pressedKeys: [], callout: nil, isTrackpadActive: false)

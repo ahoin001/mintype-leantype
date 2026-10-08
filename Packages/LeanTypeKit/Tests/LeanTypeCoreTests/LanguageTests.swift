@@ -130,6 +130,47 @@ struct TapCorrectorTests {
         #expect(analyze("keyb").completions.contains("keyboard"))
     }
 
+    @Test func aHabitWinsACloseCorrectionAndCompletion() throws {
+        let layout = try #require(TestLayout.shared)
+
+        func lexicon(_ entries: [LexiconFormat.Entry]) throws -> MappedLexicon {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("lexicon-\(UUID().uuidString).bin")
+            try LexiconFormat.write(entries).write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            return try MappedLexicon(url: url)
+        }
+
+        func analyze(_ typed: String, lexicon: MappedLexicon, habits: [String: Double]) -> WordAnalysis {
+            var corrector = TapCorrector(lexicon: lexicon, personal: []) { _ in false }
+            corrector.habits = habits
+            return corrector.analyze(typed, touches: nil, layout: layout, completionLimit: 3)
+        }
+
+        let close = try lexicon([
+            .init(display: "hello", count: 100),
+            .init(display: "help", count: 120),
+            .init(display: "helm", count: 30),
+        ])
+        let plain = analyze("helo", lexicon: close, habits: [:])
+        let once = analyze("helo", lexicon: close, habits: ["hello": HabitMemory.bonus(uses: 1)])
+        let kept = analyze("helo", lexicon: close, habits: ["hello": 0.45])
+        #expect(plain.correction == nil)
+        #expect(once.correction == nil)
+        #expect(kept.correction == "hello")
+
+        let familiar = try lexicon([
+            .init(display: "hello", count: 100),
+            .init(display: "helm", count: 20),
+        ])
+        #expect(analyze("helo", lexicon: familiar, habits: [:]).correction == "hello")
+        #expect(analyze("helo", lexicon: familiar, habits: ["helo": HabitMemory.bonus(uses: 1)]).correction == "hello")
+        #expect(analyze("helo", lexicon: familiar, habits: ["helo": 0.45]).correction == nil)
+
+        #expect(analyze("hel", lexicon: close, habits: [:]).completions.first == "help")
+        #expect(analyze("hel", lexicon: close, habits: ["hello": HabitMemory.bonus(uses: 1)]).completions.first == "help")
+        #expect(analyze("hel", lexicon: close, habits: ["hello": 0.45]).completions.first == "hello")
+    }
+
     @Test func touchLocationsDecideBetweenNeighbors() throws {
         let layout = try #require(TestLayout.shared)
         // "tge": the g was touched right at the edge with h, so "the" is a natural reading.

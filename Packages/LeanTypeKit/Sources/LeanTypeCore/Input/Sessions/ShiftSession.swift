@@ -1,16 +1,15 @@
 import CoreGraphics
 
-/// Shift: toggles on touch-down (double tap locks caps), stays held while other fingers type,
-/// and supports sliding from shift onto a letter to type a single capital.
+/// Shift: toggles on touch-down (double tap locks caps) and stays held while other fingers type.
 ///
-/// A sideways flick deletes and restores the way delete does, so the left thumb can correct
-/// without reaching across. Left erases letters as the finger moves. Back to the right puts
-/// them back. A short slide right, lifted before it reaches a letter, restores the last
-/// deletion. Reaching a letter still types that capital.
+/// A sideways flick is a delete scrub for the rest of the touch, same as delete. The finger
+/// may cross Z, X, and C; those letters are not typed and the path is not a word. Inward,
+/// toward the letters, deletes. Back toward shift restores. Before that lock, rising onto a
+/// letter above shift still types that one capital.
 @MainActor
 final class ShiftSession: InteractionSession {
-    /// A flick must be this much more sideways than vertical before it deletes. Reaching a
-    /// letter is an upward or landing move, and that still types the capital.
+    /// A flick must be this much more sideways than vertical before it deletes. Rising onto
+    /// the letter above is still a capital.
     static let horizontalBias: CGFloat = 1.25
 
     private unowned let context: any SessionContext
@@ -34,10 +33,17 @@ final class ShiftSession: InteractionSession {
 
     var presentation: SessionPresentation {
         guard !isFinished else { return .none }
-        if let slideTarget {
-            return SessionPresentation(pressedKey: slideTarget.id, callout: context.previewCallout(for: slideTarget))
+        switch phase {
+        case let .scrubbing(scrub):
+            return SessionPresentation(pressedKey: key.id, scrub: scrub.mark(on: key.id))
+        case .sliding:
+            if let slideTarget {
+                return SessionPresentation(pressedKey: slideTarget.id, callout: context.previewCallout(for: slideTarget))
+            }
+            return SessionPresentation(pressedKey: key.id)
+        case .shifting:
+            return SessionPresentation(pressedKey: key.id)
         }
-        return SessionPresentation(pressedKey: key.id)
     }
 
     func moved(_ track: TouchTrack) {
@@ -49,18 +55,24 @@ final class ShiftSession: InteractionSession {
         case .sliding:
             slideTarget = characterKey(at: track.current.location)
         case .shifting:
-            if let characterKey = characterKey(at: track.current.location), !key.hitFrame.contains(track.current.location) {
+            let point = track.current.location
+            if let characterKey = characterKey(at: point), !isOnShiftRow(point) {
                 slideTarget = characterKey
                 phase = .sliding
                 return
             }
-            guard isLeftwardDelete(track) else { return }
+            guard locksScrub(track) else { return }
             context.perform(.shiftPressCancelled)
-            phase = .scrubbing(DeletionScrub(anchorX: track.current.location.x, applied: 0, restoredWhole: false))
+            phase = .scrubbing(DeletionScrub(
+                anchorX: point.x,
+                applied: 0,
+                restoredWhole: false,
+                inward: -1
+            ))
         }
     }
 
-    func ended(_ track: TouchTrack) {
+    func ended(_: TouchTrack) {
         guard !isFinished else { return }
         switch phase {
         case .scrubbing:
@@ -71,12 +83,7 @@ final class ShiftSession: InteractionSession {
             }
             context.perform(.shiftPressEnded)
         case .shifting:
-            if isRightwardRestore(track), context.perform(.restoreLastDeletion) {
-                context.perform(.shiftPressCancelled)
-                context.emit(.deleteStep)
-            } else {
-                context.perform(.shiftPressEnded)
-            }
+            context.perform(.shiftPressEnded)
         }
         isFinished = true
     }
@@ -99,18 +106,16 @@ final class ShiftSession: InteractionSession {
         context.geometry.key(at: point).flatMap { $0.key.kind.isCharacter ? $0 : nil }
     }
 
-    private func isSideways(_ track: TouchTrack) -> Bool {
-        abs(track.translation.dx) > abs(track.translation.dy) * Self.horizontalBias
+    /// The row shift sits on. Z is on it; A is the row above, so a rise onto A is still a capital.
+    private func isOnShiftRow(_ point: CGPoint) -> Bool {
+        context.geometry.key(at: point)?.row == key.row
     }
 
-    private func isLeftwardDelete(_ track: TouchTrack) -> Bool {
-        track.translation.dx <= -BackspaceSession.activationDistance && isSideways(track)
-    }
-
-    /// A rightward flick that never landed on a letter. Lifting there restores the last deletion.
-    private func isRightwardRestore(_ track: TouchTrack) -> Bool {
-        track.translation.dx >= BackspaceSession.activationDistance
-            && isSideways(track)
-            && characterKey(at: track.current.location) == nil
+    private func locksScrub(_ track: TouchTrack) -> Bool {
+        let dx = track.translation.dx
+        let dy = track.translation.dy
+        return abs(dx) >= BackspaceSession.activationDistance
+            && abs(dx) > abs(dy) * Self.horizontalBias
+            && isOnShiftRow(track.current.location)
     }
 }

@@ -98,6 +98,7 @@ public final class LanguageModel {
         corrector.isBlocked = { [blocklist] word in
             blocklist.contains(word)
         }
+        corrector.habits = habitBonuses
         return corrector.analyze(word, touches: touches, layout: layout, completionLimit: completionLimit)
     }
 

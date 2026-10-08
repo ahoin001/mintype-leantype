@@ -27,7 +27,7 @@ struct SettingsView: View {
                     PebblePickerRow(
                         systemImage: "delete.left",
                         title: "A tap on delete removes",
-                        detail: "Swipe left on delete or shift to erase letters, right to bring them back.",
+                        detail: "Swipe delete or shift toward the letters to erase them, and back to bring them back.",
                         selection: $model.settings.backspaceTapAction,
                         options: [("A whole word", .deleteWord), ("One letter", .deleteCharacter)]
                     )

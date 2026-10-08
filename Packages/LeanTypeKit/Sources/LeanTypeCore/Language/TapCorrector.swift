@@ -45,6 +45,8 @@ struct TapCorrector {
     var isRejected: (_ typed: String, _ correction: String) -> Bool = { _, _ in false }
     /// True when this spelling must not be suggested.
     var isBlocked: (String) -> Bool = { _ in false }
+    /// Commit bonus for a lowercase word. Already capped. Empty until the user has a habit.
+    var habits: [String: Double] = [:]
 
     func analyze(_ typed: String, touches: [CGPoint]?, layout: LetterLayout?, completionLimit: Int) -> WordAnalysis {
         guard typed.allSatisfy({ $0.isLetter || $0 == "'" || $0 == "’" }) else { return .empty }
@@ -104,13 +106,14 @@ struct TapCorrector {
         // Without trustworthy touches, assume each letter was hit dead center.
         let points = touches.flatMap { $0.count == key.count ? $0 : nil } ?? key.map(layout.center(of:))
         var best: (word: String, score: Double)?
-        let baseline = typedLogCount + spatialScore(key, points: points, layout: layout)
+        let baseline = typedLogCount + habit(of: typed) + spatialScore(key, points: points, layout: layout)
 
         func consider(_ candidate: [UInt8], penalty: Double) {
             guard let index = lexicon.indices(ofKey: candidate).first else { return }
-            let score = lexicon.logCount(at: index) - penalty
+            let display = lexicon.display(at: index)
+            let score = lexicon.logCount(at: index) + habit(of: display) - penalty
             if score > (best?.score ?? -.infinity) {
-                best = (lexicon.display(at: index), score)
+                best = (display, score)
             }
         }
 
@@ -176,10 +179,11 @@ struct TapCorrector {
         let excluded = Set(excluding.map { $0.lowercased() })
         var scored: [(word: String, logCount: Double)] = []
         for index in lexicon.completions(prefix: key, limit: limit + excluded.count + 1) {
-            scored.append((lexicon.display(at: index), lexicon.logCount(at: index)))
+            let display = lexicon.display(at: index)
+            scored.append((display, lexicon.logCount(at: index) + habit(of: display)))
         }
         for entry in personal where entry.key.starts(with: key) {
-            scored.append((entry.display, entry.logCount))
+            scored.append((entry.display, entry.logCount + habit(of: entry.display)))
         }
         scored.sort { $0.logCount > $1.logCount }
 
@@ -191,6 +195,11 @@ struct TapCorrector {
             if result.count == limit { break }
         }
         return result
+    }
+
+    private func habit(of word: String) -> Double {
+        guard !habits.isEmpty else { return 0 }
+        return habits[word.lowercased()] ?? 0
     }
 
     /// Carries the typed word's capitalization onto a suggestion: "Teh" → "The", "TEH" → "THE".
