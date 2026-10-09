@@ -46,7 +46,12 @@ public final class TextEditor {
         self.document = document
     }
 
-    public var contextBefore: String? { document.contextBefore }
+    public var contextBefore: String? {
+        guard let base = document.contextBefore else {
+            return document.typedComposing.isEmpty ? nil : document.typedComposing
+        }
+        return base + document.typedComposing
+    }
     public var contextAfter: String? { document.contextAfter }
 
     public var isDocumentEmpty: Bool {
@@ -54,8 +59,9 @@ public final class TextEditor {
     }
 
     /// The word right before the cursor, if the cursor is at the end of one.
+    /// Held letters are already in `contextBefore`.
     public var currentWord: Substring {
-        TextBoundary.currentWord(before: document.contextBefore)
+        TextBoundary.currentWord(before: contextBefore)
     }
 
     /// The most recent unit commit, if the cursor is still right after it.
@@ -76,6 +82,26 @@ public final class TextEditor {
     public func insertSpace() {
         insert(" ")
         spaceAnchor = currentAnchor()
+    }
+
+    public func setTypedComposing(_ text: String) {
+        document.setTypedComposing(text)
+    }
+
+    public func setPreviewComposing(_ text: String) {
+        document.setPreviewComposing(text)
+    }
+
+    public func flushTypedComposing() {
+        document.flushTypedComposing()
+    }
+
+    public func appendTypedComposing(_ letter: String) {
+        document.setTypedComposing(document.typedComposing + letter)
+    }
+
+    public func clearPreviewComposing() {
+        document.setPreviewComposing("")
     }
 
     /// Types hopping punctuation. Right after a space the keyboard added ("word |"), the mark
@@ -188,6 +214,10 @@ public final class TextEditor {
 
     @discardableResult
     public func deleteCharacter() -> String? {
+        if let last = document.typedComposing.last {
+            document.setTypedComposing(String(document.typedComposing.dropLast()))
+            return String(last)
+        }
         if hasSelection {
             forgetEverything()
             document.deleteBackward()

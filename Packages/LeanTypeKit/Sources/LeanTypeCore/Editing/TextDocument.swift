@@ -14,6 +14,15 @@ public protocol TextDocument: AnyObject {
     /// Moves the cursor by `offset` UTF-16 code units, matching
     /// `UITextDocumentProxy.adjustTextPosition(byCharacterOffset:)`.
     func adjustCursor(byUTF16Offset offset: Int)
+
+    /// Letters typed but not yet committed. They belong to the open word.
+    var typedComposing: String { get }
+    /// The swipe's current reading, shown until the finger lifts. It is not part of the word.
+    var previewComposing: String { get }
+    func setTypedComposing(_ text: String)
+    func setPreviewComposing(_ text: String)
+    /// Moves the held letters into the document.
+    func flushTypedComposing()
 }
 
 /// A complete in-memory document used by tests and the companion app's live preview.
@@ -21,9 +30,14 @@ public protocol TextDocument: AnyObject {
 public final class InMemoryTextDocument: TextDocument {
     public private(set) var before: String
     public private(set) var after: String
+    public private(set) var typedComposing = ""
+    public private(set) var previewComposing = ""
     public var onChange: ((InMemoryTextDocument) -> Void)?
 
-    public var text: String { before + after }
+    public var text: String {
+        let ghost = typedComposing.isEmpty ? previewComposing : typedComposing
+        return before + ghost + after
+    }
     public var contextBefore: String? { before }
     public var contextAfter: String? { after }
     public var selectedText: String? { nil }
@@ -44,12 +58,18 @@ public final class InMemoryTextDocument: TextDocument {
     }
 
     public func deleteBackward() {
+        guard typedComposing.isEmpty else {
+            typedComposing.removeLast()
+            onChange?(self)
+            return
+        }
         guard !before.isEmpty else { return }
         before.removeLast()
         onChange?(self)
     }
 
     public func adjustCursor(byUTF16Offset offset: Int) {
+        flushTypedComposing()
         var remaining = abs(offset)
         while remaining > 0 {
             if offset < 0 {
@@ -66,7 +86,29 @@ public final class InMemoryTextDocument: TextDocument {
         onChange?(self)
     }
 
+    public func setTypedComposing(_ text: String) {
+        guard typedComposing != text else { return }
+        typedComposing = text
+        onChange?(self)
+    }
+
+    public func setPreviewComposing(_ text: String) {
+        guard previewComposing != text else { return }
+        previewComposing = text
+        onChange?(self)
+    }
+
+    public func flushTypedComposing() {
+        let text = typedComposing
+        typedComposing = ""
+        guard !text.isEmpty else { return }
+        before += text
+        onChange?(self)
+    }
+
     public func replaceAll(with text: String) {
+        typedComposing = ""
+        previewComposing = ""
         before = text
         after = ""
         onChange?(self)

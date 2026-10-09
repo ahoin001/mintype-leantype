@@ -73,13 +73,6 @@ enum AlignmentSearch {
             readings = merge(readings, ranked)
         }
         readings = rescore(readings, gesture: gesture, layout: layout, costs: costs, pathScore: &pathScore)
-        readings = preferringCommonCurves(
-            readings,
-            gesture: gesture,
-            layout: layout,
-            lexicon: lexicon,
-            pathScore: &pathScore
-        )
         readings = addingExpected(
             readings,
             words: expected,
@@ -102,7 +95,12 @@ enum AlignmentSearch {
             pathScore: &pathScore
         )
         let aimed = gesture.evidence.aimedLetters.isEmpty ? gesture.tracedLetters : gesture.evidence.aimedLetters
-        return ReadingPolicy.apply(DecodeResult(readings: readings), aimed: aimed, limit: costs.resultLimit)
+        return ReadingPolicy.apply(
+            DecodeResult(readings: readings),
+            aimed: aimed,
+            habits: habits,
+            limit: costs.resultLimit
+        )
     }
 
     // MARK: - Order
@@ -228,7 +226,9 @@ enum AlignmentSearch {
                         if let grown = extend(hypothesis, with: letter, times: 1, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
                             next.append(grown)
                         }
-                        if let doubled = extend(hypothesis, with: letter, times: 2, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
+                        // A pause is the letter itself. Doubling it would turn a stop on R into "rr".
+                        if event.dwell < GestureComposer.dwellDuration,
+                           let doubled = extend(hypothesis, with: letter, times: 2, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
                             next.append(doubled)
                         }
                     }
@@ -301,7 +301,7 @@ enum AlignmentSearch {
         guard prefixExists(letters, lexicon: lexicon, personal: personal) else { return nil }
 
         let center = layout.center(of: letter)
-        var score = hypothesis.score - spatialCost(event.point, letter: letter, layout: layout, costs: costs)
+        var score = hypothesis.score - spatialCost(event, letter: letter, layout: layout, costs: costs)
         if times == 2 { score -= costs.doublePenalty }
         if event.role == .crossing {
             let keys = Double(event.distanceToCenter / max(layout.keyWidth, 1))
@@ -382,13 +382,30 @@ enum AlignmentSearch {
         return 1.25 + (0.75 - 1.25) * t
     }
 
-    private static func spatialCost(_ point: CGPoint, letter: UInt8, layout: LetterLayout, costs: AlignmentCosts) -> Double {
+    /// Distance from the finger to the key, in key widths. A moving finger is forgiven
+    /// along its travel and held to the key across it. A fixture with no speed stays round.
+    private static func spatialCost(_ event: SwipeEvent, letter: UInt8, layout: LetterLayout, costs: AlignmentCosts) -> Double {
         let center = layout.center(of: letter)
-        let dx = (point.x - center.x) / layout.keyWidth
-        let dy = (point.y - center.y) / layout.keyHeight
-        let sigmaX = Double(costs.sigmaX)
-        let sigmaY = Double(costs.sigmaY)
-        return 0.5 * (Double(dx * dx) / (sigmaX * sigmaX) + Double(dy * dy) / (sigmaY * sigmaY))
+        let dx = (event.point.x - center.x) / layout.keyWidth
+        let dy = (event.point.y - center.y) / layout.keyHeight
+        let dirX = event.directionX / layout.keyWidth
+        let dirY = event.directionY / layout.keyHeight
+        let dirLength = hypot(dirX, dirY)
+        // A fast flick is sloppy along its travel. A normal trace stays round, so a close
+        // spelling is not reshuffled by a modest change in speed.
+        let stretch = event.speed >= 750 ? 1 + min((event.speed - 750) / 900, 0.8) : 1
+        guard stretch > 1.01, dirLength > 0.01 else {
+            let sigmaX = Double(costs.sigmaX)
+            let sigmaY = Double(costs.sigmaY)
+            return 0.5 * (Double(dx * dx) / (sigmaX * sigmaX) + Double(dy * dy) / (sigmaY * sigmaY))
+        }
+        let ux = dirX / dirLength
+        let uy = dirY / dirLength
+        let along = Double(dx) * Double(ux) + Double(dy) * Double(uy)
+        let across = Double(dx) * Double(-uy) + Double(dy) * Double(ux)
+        let sigmaAlong = Double(costs.sigmaX) * Double(stretch)
+        let sigmaAcross = Double(costs.sigmaY)
+        return 0.5 * (along * along / (sigmaAlong * sigmaAlong) + across * across / (sigmaAcross * sigmaAcross))
     }
 
     /// A touch on the left of the keyboard is weak evidence for Y, H, or N, and the reverse.
@@ -571,54 +588,7 @@ enum AlignmentSearch {
     ) -> CGFloat? {
         let key = LexiconKey.make(word)
         guard key.count >= 2, pathScore.prepare(path, layout: layout) else { return nil }
-        return pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout).location
-    }
-
-    /// The head of the English lexicon, most common first. Scored as curves, not grown letter by letter.
-    private static let commonWords = [
-        "the", "and", "you", "that", "was", "for", "are", "with", "his", "they",
-        "this", "have", "from", "had", "but", "not", "what", "all", "were", "when",
-        "your", "can", "said", "there", "each", "which", "she", "how", "their", "will",
-        "other", "about", "out", "many", "then", "them", "these", "some", "would", "make",
-    ]
-
-    /// A common word whose key centers sit clearly closer to the finger than the beam's leader
-    /// takes the lead. Grazes along a QWERTY row no longer outvote "the" or "you".
-    private static func preferringCommonCurves(
-        _ readings: [DecodeResult.Reading],
-        gesture: SwipeGesture,
-        layout: LetterLayout,
-        lexicon: MappedLexicon,
-        pathScore: inout PathScore
-    ) -> [DecodeResult.Reading] {
-        let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
-        guard paths.count == 1, let path = paths.first, path.count >= 2,
-              !gesture.evidence.events.contains(where: { $0.role == .tap }),
-              pathScore.prepare(path, layout: layout) else { return readings }
-        let leader = readings.max { $0.score < $1.score }
-        let leaderLocation = leader.flatMap { location(of: $0.word, path: path, layout: layout, pathScore: &pathScore) }
-        var best: (word: String, location: CGFloat)?
-        for word in commonWords where lexicon.contains(word) {
-            let key = LexiconKey.make(word)
-            let measured = pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout)
-            guard let fit = measured.score, fit < 0, fit > -8, let place = measured.location else { continue }
-            let closer = leaderLocation.map { leader in leader - place >= 0.35 } ?? (place < 0.7)
-            guard closer else { continue }
-            if let current = best, place >= current.location { continue }
-            best = (word, place)
-        }
-        guard let best else { return readings }
-        if let leader, best.word == leader.word.lowercased() { return readings }
-        var updated = readings
-        // Clear the exact-lead window. A graze that merely aligns stays behind a curve this much closer.
-        let score = (leader?.score ?? 0) + ReadingPolicy.exactLead + 0.01
-        if let index = updated.firstIndex(where: { $0.word.compare(best.word, options: .caseInsensitive) == .orderedSame }) {
-            updated[index] = DecodeResult.Reading(word: updated[index].word, score: score)
-        } else {
-            updated.append(DecodeResult.Reading(word: best.word, score: score))
-        }
-        updated.sort { $0.score > $1.score }
-        return updated
+        return pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout, warp: true).location
     }
 
     // MARK: - Expected words
@@ -660,10 +630,10 @@ enum AlignmentSearch {
     /// How many curve matches from each thumb may be joined into a two-stroke word.
     private static let shapePieceLimit = 3
 
-    /// Words the curve found that the beam did not. A word already on the list keeps the
-    /// beam's score. A new word is inserted with its path fit and the frequency prior.
-    /// A one-stroke curve stays just outside the tie margin, unless the finger is clearly
-    /// closer to that word than to the beam's leader and no tap is holding a letter down.
+    /// Words the curve found. A word already on the list keeps the beam's score, unless this
+    /// one stroke sits clearly closer to that word than to the leader. Then it leads, far
+    /// enough that an aligned graze cannot take the place back. Any other one-stroke curve
+    /// stays just outside the tie margin. A tap holds its letter.
     private static func addingShape(
         _ readings: [DecodeResult.Reading],
         gesture: SwipeGesture,
@@ -699,21 +669,35 @@ enum AlignmentSearch {
                   let leader = readings.max(by: { $0.score < $1.score }) else { return nil }
             return location(of: leader.word, path: path, layout: layout, pathScore: &pathScore)
         }()
+        let leaderScore = readings.map(\.score).max()
         var best: [String: DecodeResult.Reading] = [:]
         for reading in readings {
             best[reading.word.lowercased()] = reading
         }
         for reading in extra {
             let key = reading.word.lowercased()
-            // The beam already explained this word. Its score stands. The two scores are not added.
-            if best[key] != nil { continue }
-            var score = reading.score + habitBonus(reading.word, habits: habits)
-            if let cap {
-                let clearlyCloser = !tapped && paths.count == 1 && paths.first.map { path in
-                    isClearlyCloser(reading.word, than: leaderLocation, path: path, layout: layout, pathScore: &pathScore)
-                } == true
-                if !clearlyCloser { score = min(score, cap) }
+            let clearlyCloser = !tapped && paths.count == 1 && paths.first.map { path in
+                isClearlyCloser(reading.word, than: leaderLocation, path: path, layout: layout, pathScore: &pathScore)
+            } == true
+            let habit = habitBonus(reading.word, habits: habits)
+            if let existing = best[key] {
+                if clearlyCloser, let leaderScore {
+                    let raised = leaderScore + ReadingPolicy.exactLead + 0.01 + habit
+                    if raised > existing.score {
+                        best[key] = DecodeResult.Reading(word: existing.word, score: raised)
+                    }
+                }
+                continue
             }
+            // The cap keeps an ordinary curve just outside the tie. The habit is a preference
+            // on top of that, so a repeated shape still moves and the cap cannot erase it.
+            var score = reading.score
+            if clearlyCloser, let leaderScore {
+                score = max(score, leaderScore + ReadingPolicy.exactLead + 0.01)
+            } else if let cap {
+                score = min(score, cap)
+            }
+            score += habit
             best[key] = DecodeResult.Reading(word: reading.word, score: score)
         }
         return best.values.sorted { $0.score > $1.score }
@@ -727,7 +711,8 @@ enum AlignmentSearch {
         layout: LetterLayout,
         pathScore: inout PathScore
     ) -> Bool {
-        guard let leader, let shape = location(of: word, path: path, layout: layout, pathScore: &pathScore) else { return false }
+        guard let shape = location(of: word, path: path, layout: layout, pathScore: &pathScore) else { return false }
+        guard let leader else { return shape < 0.55 }
         return leader - shape >= 0.35
     }
 
@@ -970,19 +955,30 @@ enum ReadingPolicy {
     /// stays where its score put it.
     static let exactLead = 1.0
 
-    static func apply(_ result: DecodeResult, aimed: String, limit: Int = 4) -> DecodeResult {
+    static func apply(
+        _ result: DecodeResult,
+        aimed: String,
+        habits: [String: Double] = [:],
+        limit: Int = 4
+    ) -> DecodeResult {
         let letters = BeatChooser.collapse(aimed)
         var readings = result.readings
+        // The window is the path and the word frequency. A habit sits on top of that score,
+        // so it can lift a rival in the list without spending the margin that protects the
+        // keys the finger actually hit.
+        func standing(_ reading: DecodeResult.Reading) -> Double {
+            reading.score - (habits[reading.word.lowercased()] ?? 0)
+        }
         let aligned = readings.filter { WordJoiner.aligns($0.word, traced: letters) }
-        if let bestAligned = aligned.map(\.score).max(),
-           let overall = readings.map(\.score).max(),
+        if let bestAligned = aligned.map(standing).max(),
+           let overall = readings.map(standing).max(),
            let chosen = aligned
-            .filter({ $0.score + exactLead >= bestAligned && $0.score + exactLead >= overall })
+            .filter({ standing($0) + exactLead >= bestAligned && standing($0) + exactLead >= overall })
             .max(by: { lhs, rhs in
                 let left = lhs.word.filter(\.isLetter).count
                 let right = rhs.word.filter(\.isLetter).count
                 if left != right { return left < right }
-                return lhs.score < rhs.score
+                return standing(lhs) < standing(rhs)
             }) {
             readings.removeAll { $0.word.lowercased() == chosen.word.lowercased() }
             readings.insert(chosen, at: 0)

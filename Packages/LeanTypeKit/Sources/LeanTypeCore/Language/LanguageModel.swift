@@ -34,6 +34,7 @@ public final class LanguageModel {
     private let blocklist: Blocklist
     private let context: WordContext
     private let habits: HabitMemory
+    private let strokes: StrokeMemory
     private var habitBonuses: [String: Double]
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
@@ -49,6 +50,7 @@ public final class LanguageModel {
         rejections rejectionStore: (any RejectionStore)? = nil,
         wordContext contextStore: (any WordContextStore)? = nil,
         habits habitStore: (any HabitStore)? = nil,
+        strokes strokeStore: (any StrokeStore)? = nil,
         blocklist blocklistStore: (any BlocklistStore)? = nil
     ) {
         self.lexicon = lexicon
@@ -58,6 +60,7 @@ public final class LanguageModel {
         context = WordContext(store: contextStore)
         let memory = HabitMemory(store: habitStore)
         habits = memory
+        strokes = StrokeMemory(store: strokeStore)
         habitBonuses = memory.bonuses()
         decoder = PathDecoder(lexicon: lexicon)
         aligner = AlignmentDecoder()
@@ -71,6 +74,7 @@ public final class LanguageModel {
         rejections: (any RejectionStore)? = nil,
         wordContext: (any WordContextStore)? = nil,
         habits: (any HabitStore)? = nil,
+        strokes: (any StrokeStore)? = nil,
         blocklist: (any BlocklistStore)? = nil
     ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
@@ -80,6 +84,7 @@ public final class LanguageModel {
             rejections: rejections,
             wordContext: wordContext,
             habits: habits,
+            strokes: strokes,
             blocklist: blocklist
         )
     }
@@ -121,7 +126,8 @@ public final class LanguageModel {
             expected: expected,
             habits: bonuses
         )
-        return finish(result, trace: Self.strokeTrace(of: gesture))
+        let path = gesture.strokePaths.first ?? gesture.path
+        return finish(strokes.applying(to: result, path: path, layout: layout), trace: Self.strokeTrace(of: gesture))
     }
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when a later beat
@@ -134,11 +140,11 @@ public final class LanguageModel {
     ) -> SequenceOutcome {
         guard !observations.isEmpty else { return .empty }
         let evidence = SwipeEvidence.fromObservations(observations)
-        let strokes = Set(observations.filter { !$0.isTap && $0.strokeIndex >= 0 }.map(\.strokeIndex))
+        let strokeIndexes = Set(observations.filter { !$0.isTap && $0.strokeIndex >= 0 }.map(\.strokeIndex))
         let paths = strokePaths.filter { $0.count >= 2 }
         let gesture = SwipeGesture(
             path: paths.max { StrokeAnalyzer.length(of: $0) < StrokeAnalyzer.length(of: $1) } ?? [],
-            strokeCount: max(strokes.count, paths.isEmpty ? 1 : paths.count),
+            strokeCount: max(strokeIndexes.count, paths.isEmpty ? 1 : paths.count),
             strokePaths: paths,
             tracedLetters: evidence.aimedLetters,
             observations: observations,
@@ -156,8 +162,9 @@ public final class LanguageModel {
             habits: habitBonuses,
             pathScore: &pathScore
         )
+        let adjusted = strokes.applying(to: result, path: gesture.path, layout: layout)
         return SequenceOutcome(
-            result: finish(result, trace: evidence.aimedLetters),
+            result: finish(adjusted, trace: evidence.aimedLetters),
             traced: evidence.aimedLetters
         )
     }
@@ -212,6 +219,11 @@ public final class LanguageModel {
     /// Remembers that the user wanted `preferred` instead of the `rejected` correction.
     func noteRejection(preferred: String, rejected: String) {
         rejections.note(preferred: preferred, rejected: rejected)
+    }
+
+    /// The stroke the user just redrew by picking a different word.
+    func rememberStroke(_ word: String, path: [CGPoint], layout: LetterLayout) {
+        strokes.remember(word, path: path, layout: layout)
     }
 
     /// The user deleted this swipe the moment it landed. The next similar stroke tries another word.

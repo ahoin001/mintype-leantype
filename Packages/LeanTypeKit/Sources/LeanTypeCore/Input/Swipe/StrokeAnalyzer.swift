@@ -192,13 +192,19 @@ enum GestureComposer {
     private static func strokeEvents(in stroke: StrokeBuffer, strokeIndex: Int, tuning: EvidenceTuning) -> [SwipeEvent] {
         let arrivals = StrokeLetters.aimedArrivals(stroke.arrivals)
         guard !arrivals.isEmpty else { return [] }
+        // The entry sample is the key boundary, which is still on the way in. The corner
+        // happens later, where the finger comes nearest the letter.
+        let approaches = arrivals.enumerated().map { index, arrival in
+            let end = index + 1 < arrivals.count ? arrivals[index + 1].time : (stroke.points.last?.time ?? arrival.time)
+            return closestApproach(to: arrival, until: end, in: stroke)
+        }
         var turns: [CGFloat] = []
         turns.reserveCapacity(arrivals.count)
         for (index, _) in arrivals.enumerated() {
             if index > 0, index + 1 < arrivals.count {
                 // The finger's path, not the key centers. Centers zigzag across rows even when
                 // the stroke is straight, and that was promoting every graze to a corner.
-                turns.append(turn(arrivals[index - 1].touch, arrivals[index].touch, arrivals[index + 1].touch))
+                turns.append(turn(approaches[index - 1], approaches[index], approaches[index + 1]))
             } else {
                 turns.append(0)
             }
@@ -206,6 +212,7 @@ enum GestureComposer {
         var events: [SwipeEvent] = []
         for (index, arrival) in arrivals.enumerated() {
             let nextTime = index + 1 < arrivals.count ? arrivals[index + 1].time : (stroke.points.last?.time ?? arrival.time)
+            let approach = approaches[index]
             let turnAngle = turns[index]
             let dwell = dwellDuration(on: arrival, until: nextTime, in: stroke, tuning: tuning)
             let endpoint = index == 0 || index == arrivals.count - 1
@@ -216,30 +223,44 @@ enum GestureComposer {
             let nextTurn = index + 1 < turns.count ? turns[index + 1] : 0
             let turnBar = onOneRow(arrivals, around: index) ? max(tuning.aimTurn, Self.sameRowTurn) : tuning.aimTurn
             let peaked = turnAngle >= turnBar && turnAngle >= previousTurn && turnAngle >= nextTurn
-            let onCenter = hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y) <= 8
+            let onCenter = hypot(approach.x - arrival.center.x, approach.y - arrival.center.y) <= 8
             let aimedCorner = turnAngle >= turnBar && onCenter
             let anchored = endpoint || peaked || aimedCorner || dwell >= tuning.dwellDuration
             if events.last?.letter == arrival.letter {
                 if anchored, let last = events.indices.last {
                     events[last].role = .anchor
                     events[last].time = arrival.time
-                    events[last].point = arrival.touch
+                    events[last].point = approach
                 }
                 continue
             }
             events.append(SwipeEvent(
                 time: arrival.time,
-                point: arrival.touch,
+                point: approach,
                 letter: arrival.letter,
                 role: anchored ? .anchor : .crossing,
                 strokeIndex: strokeIndex,
                 turn: turnAngle,
                 dwell: dwell,
                 speed: speed(at: arrival.time, in: stroke),
-                distanceToCenter: hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y)
+                distanceToCenter: hypot(approach.x - arrival.center.x, approach.y - arrival.center.y)
             ))
         }
         return events
+    }
+
+    /// The sample nearest this key while it was the key under the thumb.
+    private static func closestApproach(to arrival: KeyArrival, until end: Double, in stroke: StrokeBuffer) -> CGPoint {
+        var best = arrival.touch
+        var bestDistance = hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y)
+        for point in stroke.points where point.time >= arrival.time && point.time <= end {
+            let distance = hypot(point.location.x - arrival.center.x, point.location.y - arrival.center.y)
+            if distance < bestDistance {
+                bestDistance = distance
+                best = point.location
+            }
+        }
+        return best
     }
 
     /// The keys on either side share this key's row. A wobble there is not a corner.

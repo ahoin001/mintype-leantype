@@ -10,7 +10,18 @@ public final class TextDocumentProxyAdapter: TextDocument {
         self.proxy = proxy
     }
 
-    public var contextBefore: String? { proxy.documentContextBeforeInput }
+    public private(set) var typedComposing = ""
+    public private(set) var previewComposing = ""
+
+    public var contextBefore: String? {
+        guard var before = proxy.documentContextBeforeInput else { return nil }
+        let mark = typedComposing.isEmpty ? previewComposing : typedComposing
+        if !mark.isEmpty, before.hasSuffix(mark) {
+            before.removeLast(mark.count)
+        }
+        return before
+    }
+
     public var contextAfter: String? { proxy.documentContextAfterInput }
     public var selectedText: String? { proxy.selectedText }
 
@@ -19,11 +30,40 @@ public final class TextDocumentProxyAdapter: TextDocument {
     }
 
     public func deleteBackward() {
+        guard typedComposing.isEmpty else {
+            typedComposing.removeLast()
+            publishMark()
+            return
+        }
         proxy.deleteBackward()
     }
 
     public func adjustCursor(byUTF16Offset offset: Int) {
+        flushTypedComposing()
         proxy.adjustTextPosition(byCharacterOffset: offset)
+    }
+
+    public func setTypedComposing(_ text: String) {
+        typedComposing = text
+        publishMark()
+    }
+
+    public func setPreviewComposing(_ text: String) {
+        previewComposing = text
+        publishMark()
+    }
+
+    public func flushTypedComposing() {
+        let text = typedComposing
+        typedComposing = ""
+        publishMark()
+        if !text.isEmpty { proxy.insertText(text) }
+    }
+
+    private func publishMark() {
+        let shown = typedComposing.isEmpty ? previewComposing : typedComposing
+        let end = shown.utf16.count
+        proxy.setMarkedText(shown, selectedRange: NSRange(location: end, length: 0))
     }
 }
 

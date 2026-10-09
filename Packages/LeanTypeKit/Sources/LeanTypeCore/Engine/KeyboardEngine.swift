@@ -63,6 +63,10 @@ public final class KeyboardEngine {
     private var liveTouches: Set<TouchID> = []
     /// Exact text lifted by an upward flick on space, so delete or another flick can put it back.
     private var pickedUpText: String?
+    /// Holds freshly typed letters until the word is finished or a swipe takes them.
+    private var composingTimer: (any Cancellable)?
+    /// The polyline of the swipe just committed, so picking another word can remember it.
+    private var recentStrokePath: [CGPoint] = []
 
     lazy var composer = InputComposer { [weak self] intents in
         self?.performBatch(intents)
@@ -85,11 +89,17 @@ public final class KeyboardEngine {
         coordinator.onPreview = { [weak self] result in
             guard let self else { return }
             if let result {
+                composingTimer?.cancel()
                 if words.showPreview(result) {
                     emit(.swipePreviewChanged)
                 }
+                if let word = words.previewLeader {
+                    editor.setPreviewComposing(applyShift(to: word))
+                }
             } else {
                 words.clearPreview()
+                editor.clearPreviewComposing()
+                scheduleComposingFlush()
             }
             publishState()
         }
@@ -477,6 +487,7 @@ public final class KeyboardEngine {
         let text = displayText(for: character)
         if EmojiCatalog.contains(text) {
             closeOpenWord()
+            flushTypedComposing()
             let hadWord = !editor.currentWord.isEmpty
             if hadWord, !finishWord(trailing: " ") {
                 editor.insertSpace()
@@ -485,6 +496,7 @@ public final class KeyboardEngine {
             if hadWord { completeWord(.tap) }
         } else if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
             closeOpenWord()
+            flushTypedComposing()
             let hadWord = !editor.currentWord.isEmpty
             let smart = settings.smartPunctuationEnabled && traits.variant == .standard
             if !finishWord(trailing: "") {
@@ -501,11 +513,12 @@ public final class KeyboardEngine {
             noteSentenceBoundary(in: text)
         } else if text.count == 1, text.first?.isLetter == true, reviseOpenWord(with: text, at: point, time: time) {
             // The letter joined the swiped word already on screen.
+        } else if text.count == 1, text.first?.isLetter == true {
+            holdLetter(text, at: point, time: time)
         } else {
+            flushTypedComposing()
             editor.insert(text)
-            if text.count == 1, text.first?.isLetter == true {
-                words.noteLetter(at: point, time: time)
-            } else if text.count > 1 {
+            if text.count > 1 {
                 words.noteLiteralText()
             }
             noteSentenceBoundary(in: text)
@@ -516,7 +529,28 @@ public final class KeyboardEngine {
         return true
     }
 
+    /// Keeps `letter` with the word being typed. A pause commits it; a swipe takes it instead.
+    private func holdLetter(_ letter: String, at point: CGPoint?, time: Double) {
+        editor.appendTypedComposing(letter)
+        words.noteLetter(at: point, time: time)
+        scheduleComposingFlush()
+    }
+
+    private func flushTypedComposing() {
+        composingTimer?.cancel()
+        composingTimer = nil
+        editor.flushTypedComposing()
+    }
+
+    private func scheduleComposingFlush() {
+        composingTimer?.cancel()
+        composingTimer = scheduler.schedule(after: Self.wordLeash) { [weak self] in
+            self?.flushTypedComposing()
+        }
+    }
+
     private func insertSpace() -> Bool {
+        flushTypedComposing()
         let now = scheduler.now
         if settings.doubleSpacePeriodEnabled,
            let lastSpaceTime,
@@ -571,6 +605,7 @@ public final class KeyboardEngine {
     ) -> Bool {
         consumePickedUpWord()
         guard !readings.isEmpty || !observations.isEmpty else { return false }
+        recentStrokePath = strokePaths.max { $0.count < $1.count } ?? []
         let choice = resolvedBeat(readings, unsure: unsure, strokes: strokes, observations: observations)
         let readings = choice.readings
         let unsure = choice.unsure
@@ -849,6 +884,7 @@ public final class KeyboardEngine {
         let cased = result.words.map(applyShift(to:))
         let score = result.readings[0].score
         let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
+        editor.clearPreviewComposing()
         editor.commitWord(cased[0])
         noteRhythm(priorChunks.flatMap(\.events) + events)
         let literal = BeatChooser.collapse((priorChunks.flatMap(\.events) + events).map(\.letter).joined())
@@ -972,6 +1008,9 @@ public final class KeyboardEngine {
             return (true, true)
         case let .swap(word):
             words.noteSwap(preferred: word, rejected: editor.recentCommit?.word)
+            if let layout = words.letterLayout, recentStrokePath.count >= 2 {
+                words.rememberStroke(word, path: recentStrokePath, layout: layout)
+            }
             return (editor.replaceRecentCommitWord(with: word), true)
         case .revert:
             guard let commit = editor.undoRecentCommit() else { return (false, true) }

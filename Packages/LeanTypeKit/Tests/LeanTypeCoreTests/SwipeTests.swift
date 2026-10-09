@@ -590,7 +590,7 @@ struct SwipeTypingTests {
         }
         #expect(sawPreview)
         #expect(harness.state.candidates.candidates.contains { $0.text.lowercased() == "hello" })
-        #expect(harness.text.isEmpty, "A preview is not typed yet")
+        #expect(harness.text.lowercased() == "hello")
         harness.up(id)
         await harness.settle()
         #expect(harness.text == "hello ")

@@ -41,6 +41,8 @@ final class WordAssistant {
     private var tracedLiteral: String?
     /// Set while a finger is still drawing; cleared when the swipe commits or is cancelled.
     private var preview: DecodeResult?
+    /// The leader being challenged. It takes the strip only if it is still ahead on the next update.
+    private var previewChallenger: String?
     /// A preview word the user tapped, kept at the front until the fingers lift.
     private var chosenPreview: String?
     /// The word that just ended. Stays on the strip, unhighlighted, until the next letter.
@@ -237,6 +239,7 @@ final class WordAssistant {
         }
         preview = nil
         chosenPreview = nil
+        previewChallenger = nil
         touches = []
         touchTimes = []
         settledWord = nil
@@ -273,11 +276,39 @@ final class WordAssistant {
             return true
         }
         guard !result.isEmpty else { return false }
-        let ordered = placingChoice(on: result)
+        let ordered = holding(placingChoice(on: result))
         let previous = preview?.readings.first?.word
         preview = ordered
         cached = nil
         return ordered.readings.first?.word != previous
+    }
+
+    /// The word the strip is about to commit.
+    var previewLeader: String? { preview?.readings.first?.word }
+
+    /// Keeps the current leader unless the challenger is clearly ahead on two updates in a row.
+    private func holding(_ result: DecodeResult) -> DecodeResult {
+        guard let previous = preview?.readings.first?.word,
+              let incoming = result.readings.first,
+              incoming.word.compare(previous, options: .caseInsensitive) != .orderedSame,
+              let held = result.readings.first(where: {
+                  $0.word.compare(previous, options: .caseInsensitive) == .orderedSame
+              })
+        else {
+            previewChallenger = nil
+            return result
+        }
+        let gap = incoming.score - held.score
+        let name = incoming.word.lowercased()
+        if gap < DecodeResult.confidenceMargin || previewChallenger != name {
+            previewChallenger = gap >= DecodeResult.confidenceMargin ? name : nil
+            var readings = result.readings
+            readings.removeAll { $0.word.compare(previous, options: .caseInsensitive) == .orderedSame }
+            readings.insert(held, at: 0)
+            return result.replacingReadings(readings)
+        }
+        previewChallenger = nil
+        return result
     }
 
     /// Moves a preview reading to the front. The callout and the lit keys follow it,
@@ -312,7 +343,12 @@ final class WordAssistant {
         guard preview != nil || chosenPreview != nil else { return }
         preview = nil
         chosenPreview = nil
+        previewChallenger = nil
         cached = nil
+    }
+
+    func rememberStroke(_ word: String, path: [CGPoint], layout: LetterLayout) {
+        language?.rememberStroke(word, path: path, layout: layout)
     }
 
     // MARK: - Suggestions

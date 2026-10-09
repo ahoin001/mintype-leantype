@@ -11,11 +11,17 @@ struct PathScore: Sendable {
     static let endpointSigma: CGFloat = 0.55
     static let locationCutoff: CGFloat = 1.6
 
+    /// How far a sample may slide along the curve and still match. Wide enough for a small
+    /// corner cut, narrow enough that a longer word cannot hide inside a short stroke.
+    static let warpRadius = 2
+
     private var gesturePoints: [CGPoint]
     private var gestureShape: [CGPoint]
     private var idealPath: [CGPoint]
     private var idealPoints: [CGPoint]
     private var idealShape: [CGPoint]
+    private var warpPrevious: [CGFloat]
+    private var warpCurrent: [CGFloat]
     private(set) var gestureLength: CGFloat = 0
 
     init() {
@@ -25,6 +31,8 @@ struct PathScore: Sendable {
         idealPath.reserveCapacity(32)
         idealPoints = Array(repeating: .zero, count: Self.sampleCount)
         idealShape = Array(repeating: .zero, count: Self.sampleCount)
+        warpPrevious = Array(repeating: 0, count: Self.sampleCount)
+        warpCurrent = Array(repeating: 0, count: Self.sampleCount)
     }
 
     /// Resamples `path` once. Returns false when there is nothing to score.
@@ -45,11 +53,13 @@ struct PathScore: Sendable {
     /// Log-likelihood of the prepared gesture given `key`. `location` is reported even when
     /// the path is too far to score. `gateLength` rejects a single stroke whose length is
     /// nowhere near the word. The alignment decoder passes false and applies `lengthCost`.
+    /// `warp` lets a sample slide a short way along the curve, for the lead comparison only.
     mutating func measure(
         _ key: UnsafeRawBufferPointer,
         mustExceed floor: Double,
         gateLength: Bool,
-        layout: LetterLayout
+        layout: LetterLayout,
+        warp: Bool = false
     ) -> (score: Double?, location: CGFloat?) {
         guard key.count >= 2 else { return (nil, nil) }
 
@@ -77,11 +87,12 @@ struct PathScore: Sendable {
             idealPoints.withUnsafeMutableBufferPointer { StrokeAnalyzer.resample(source, into: $0) }
         }
 
-        var location: CGFloat = 0
+        var paired: CGFloat = 0
         for index in 0..<Self.sampleCount {
-            location += layout.normalizedDistance(gesturePoints[index], idealPoints[index])
+            paired += layout.normalizedDistance(gesturePoints[index], idealPoints[index])
         }
-        location /= CGFloat(Self.sampleCount)
+        paired /= CGFloat(Self.sampleCount)
+        let location = warp ? min(paired, warpedLocation(layout: layout)) : paired
         guard location < Self.locationCutoff else { return (nil, location) }
         let locationTerm = Double(location * location / (2 * Self.locationSigma * Self.locationSigma))
         guard -(endpointTerm + locationTerm) > floor else { return (nil, location) }
@@ -103,9 +114,10 @@ struct PathScore: Sendable {
         _ key: [UInt8],
         mustExceed floor: Double,
         gateLength: Bool,
-        layout: LetterLayout
+        layout: LetterLayout,
+        warp: Bool = false
     ) -> (score: Double?, location: CGFloat?) {
-        key.withUnsafeBytes { measure($0, mustExceed: floor, gateLength: gateLength, layout: layout) }
+        key.withUnsafeBytes { measure($0, mustExceed: floor, gateLength: gateLength, layout: layout, warp: warp) }
     }
 
     /// How far the drawn length sits outside the band a single stroke used to hard-reject.
@@ -126,6 +138,36 @@ struct PathScore: Sendable {
         let outside = max(0, 0.45 - ratio) + max(0, ratio - 2.2)
         guard outside > 0 else { return 0 }
         return weight * Double(outside * outside)
+    }
+
+    /// Mean distance along a monotonic alignment. Samples may drift by `warpRadius`, so a
+    /// finger that cuts a corner is not charged at every later point.
+    private mutating func warpedLocation(layout: LetterLayout) -> CGFloat {
+        let count = Self.sampleCount
+        let huge = CGFloat.greatestFiniteMagnitude / 4
+        for index in 0..<count { warpPrevious[index] = huge }
+        warpPrevious[0] = layout.normalizedDistance(gesturePoints[0], idealPoints[0])
+        guard count > 1 else { return warpPrevious[0] }
+        for row in 1..<count {
+            for index in 0..<count { warpCurrent[index] = huge }
+            let lower = max(0, row - Self.warpRadius)
+            let upper = min(count - 1, row + Self.warpRadius)
+            var rowBest = huge
+            for column in lower...upper {
+                let step = layout.normalizedDistance(gesturePoints[row], idealPoints[column])
+                var best = warpPrevious[column]
+                if column > 0 {
+                    best = min(best, warpPrevious[column - 1])
+                    best = min(best, warpCurrent[column - 1])
+                }
+                let cost = best + step
+                warpCurrent[column] = cost
+                rowBest = min(rowBest, cost)
+            }
+            if rowBest / CGFloat(count) >= Self.locationCutoff { return Self.locationCutoff }
+            swap(&warpPrevious, &warpCurrent)
+        }
+        return warpPrevious[count - 1] / CGFloat(count)
     }
 
     private func normalize(_ points: [CGPoint], into output: inout [CGPoint], layout: LetterLayout) {
