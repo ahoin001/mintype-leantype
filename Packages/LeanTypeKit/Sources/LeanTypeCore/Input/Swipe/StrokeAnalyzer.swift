@@ -136,6 +136,9 @@ enum GestureComposer {
     /// stays a crossing. `StrokeAnalyzer.turnAngle` is a sharper test for the raw polyline,
     /// and it would drop those real corners.
     static let aimTurn: CGFloat = 0.50
+    /// A bend this sharp is a real hook even when every key is on one row. A shallower wobble
+    /// along QWERTY's top or home row stays a graze, so "you" does not have to spell U and I.
+    static let sameRowTurn: CGFloat = 1.20
     /// How long a finger must sit on one key before that key is a letter. Travel, however
     /// slow, is not a pause.
     static let dwellDuration: Double = 0.18
@@ -211,9 +214,10 @@ enum GestureComposer {
             // key, such as the last L in "pill", keeps the key and makes it the endpoint.
             let previousTurn = index > 0 ? turns[index - 1] : 0
             let nextTurn = index + 1 < turns.count ? turns[index + 1] : 0
-            let peaked = turnAngle >= tuning.aimTurn && turnAngle >= previousTurn && turnAngle >= nextTurn
+            let turnBar = onOneRow(arrivals, around: index) ? max(tuning.aimTurn, Self.sameRowTurn) : tuning.aimTurn
+            let peaked = turnAngle >= turnBar && turnAngle >= previousTurn && turnAngle >= nextTurn
             let onCenter = hypot(arrival.touch.x - arrival.center.x, arrival.touch.y - arrival.center.y) <= 8
-            let aimedCorner = turnAngle >= tuning.aimTurn && onCenter
+            let aimedCorner = turnAngle >= turnBar && onCenter
             let anchored = endpoint || peaked || aimedCorner || dwell >= tuning.dwellDuration
             if events.last?.letter == arrival.letter {
                 if anchored, let last = events.indices.last {
@@ -236,6 +240,13 @@ enum GestureComposer {
             ))
         }
         return events
+    }
+
+    /// The keys on either side share this key's row. A wobble there is not a corner.
+    private static func onOneRow(_ arrivals: [KeyArrival], around index: Int) -> Bool {
+        guard index > 0, index + 1 < arrivals.count else { return false }
+        let y = arrivals[index].center.y
+        return abs(arrivals[index - 1].center.y - y) < 8 && abs(arrivals[index + 1].center.y - y) < 8
     }
 
     /// Longest stretch the finger stayed near this key without wandering off, in seconds.

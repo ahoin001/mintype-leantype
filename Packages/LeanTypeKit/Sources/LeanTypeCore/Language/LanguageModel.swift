@@ -126,13 +126,20 @@ public final class LanguageModel {
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when a later beat
     /// joins an open word and the original polylines are no longer the thing being scored.
-    func sequenceDecode(_ observations: [StrokeObservation], layout: LetterLayout, costs: AlignmentCosts = .standard) -> SequenceOutcome {
+    func sequenceDecode(
+        _ observations: [StrokeObservation],
+        layout: LetterLayout,
+        strokePaths: [[CGPoint]] = [],
+        costs: AlignmentCosts = .standard
+    ) -> SequenceOutcome {
         guard !observations.isEmpty else { return .empty }
         let evidence = SwipeEvidence.fromObservations(observations)
         let strokes = Set(observations.filter { !$0.isTap && $0.strokeIndex >= 0 }.map(\.strokeIndex))
+        let paths = strokePaths.filter { $0.count >= 2 }
         let gesture = SwipeGesture(
-            path: [],
-            strokeCount: max(strokes.count, 1),
+            path: paths.max { StrokeAnalyzer.length(of: $0) < StrokeAnalyzer.length(of: $1) } ?? [],
+            strokeCount: max(strokes.count, paths.isEmpty ? 1 : paths.count),
+            strokePaths: paths,
             tracedLetters: evidence.aimedLetters,
             observations: observations,
             evidence: evidence

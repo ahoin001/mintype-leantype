@@ -419,8 +419,8 @@ public final class KeyboardEngine {
             closeOpenWord()
             let restored = restorePickedUpWord()
             changed = editor.moveCursorByWord(direction) || restored
-        case let .commitSwipe(readings, unsure, strokes, observations):
-            changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations)
+        case let .commitSwipe(readings, unsure, strokes, observations, strokePaths):
+            changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations, strokePaths: strokePaths)
         case let .acceptCandidate(index):
             if words.isPreviewing {
                 changed = words.promotePreview(at: index)
@@ -566,7 +566,8 @@ public final class KeyboardEngine {
         _ readings: [String],
         unsure: Bool,
         strokes: Int,
-        observations: [StrokeObservation]
+        observations: [StrokeObservation],
+        strokePaths: [[CGPoint]]
     ) -> Bool {
         consumePickedUpWord()
         guard !readings.isEmpty || !observations.isEmpty else { return false }
@@ -586,7 +587,7 @@ public final class KeyboardEngine {
             // A lifted letter stays in the word only for a short beat. Past that, the swipe is
             // its own word even when the two would spell something together.
             if withinLeash(started, after: lastTap),
-               let joined = joinedReading(existing: typed, adding: observations, merged: merged),
+               let joined = joinedReading(existing: typed, adding: observations, merged: merged, strokePaths: strokePaths),
                acceptsJoin(joined) {
                 let shown = String(editor.currentWord)
                 let prior = OpenChunk(events: typed, readings: [shown], score: WordJoiner.provisionalScore)
@@ -610,7 +611,7 @@ public final class KeyboardEngine {
             let merged = (open.events + observations).inReadingOrder()
             let existing = sequenceOutcome(open.events)
             if mayExtend(finished: finished, ownReading: choice.hasOwnReading, at: started),
-               let joined = joinedReading(existing: existing, adding: observations, merged: merged),
+               let joined = joinedReading(existing: existing, adding: observations, merged: merged, strokePaths: strokePaths),
                acceptsJoin(joined) {
                 committed = revise(open, with: joined, batch: observations, strokes: strokes)
             } else if settings.swipeCommitMode == .explicitSpace,
@@ -750,7 +751,7 @@ public final class KeyboardEngine {
         }
         let merged = (open.events + batch).inReadingOrder()
         let existing = sequenceOutcome(open.events)
-        if let joined = joinedReading(existing: existing, adding: batch, merged: merged), acceptsJoin(joined) {
+        if let joined = joinedReading(existing: existing, adding: batch, merged: merged, strokePaths: []), acceptsJoin(joined) {
             return revise(open, with: joined, batch: batch, strokes: 0)
         }
         if !finished, reassemble(adding: batch) { return true }
@@ -790,19 +791,21 @@ public final class KeyboardEngine {
     private func joinedReading(
         existing typed: [StrokeObservation],
         adding: [StrokeObservation],
-        merged: [StrokeObservation]
+        merged: [StrokeObservation],
+        strokePaths: [[CGPoint]]
     ) -> DecodeResult? {
         let outcome = sequenceOutcome(typed)
-        return joinedReading(existing: outcome, adding: adding, merged: merged)
+        return joinedReading(existing: outcome, adding: adding, merged: merged, strokePaths: strokePaths)
     }
 
     private func joinedReading(
         existing: SequenceOutcome,
         adding: [StrokeObservation],
-        merged: [StrokeObservation]
+        merged: [StrokeObservation],
+        strokePaths: [[CGPoint]]
     ) -> DecodeResult? {
         guard words.letterLayout != nil else { return nil }
-        let extended = sequenceOutcome(merged)
+        let extended = sequenceOutcome(merged, strokePaths: strokePaths)
         return WordJoiner.choose(
             extended: extended,
             alone: sequenceOutcome(adding),
@@ -829,9 +832,9 @@ public final class KeyboardEngine {
         return false
     }
 
-    private func sequenceOutcome(_ observations: [StrokeObservation]) -> SequenceOutcome {
+    private func sequenceOutcome(_ observations: [StrokeObservation], strokePaths: [[CGPoint]] = []) -> SequenceOutcome {
         guard let language = words.language, let layout = words.letterLayout else { return .empty }
-        return language.sequenceDecode(observations, layout: layout)
+        return language.sequenceDecode(observations, layout: layout, strokePaths: strokePaths)
     }
 
     private func publishSwipe(

@@ -28,7 +28,7 @@ public enum KeyboardIntent: Hashable, Sendable {
     case moveCursorByWord(Int)
     /// Commits a decoded swipe. Candidates are best first and never empty. `unsure` means the
     /// top two readings were too close to present the first as the one a space accepts.
-    case commitSwipe([String], unsure: Bool, strokes: Int, observations: [StrokeObservation])
+    case commitSwipe([String], unsure: Bool, strokes: Int, observations: [StrokeObservation], strokePaths: [[CGPoint]])
     /// Picks a slot in the suggestion bar.
     case acceptCandidate(Int)
     case shiftPressBegan

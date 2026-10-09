@@ -65,6 +65,59 @@ enum GestureSampler {
         return GestureComposer.compose([moving], taps: [tap])
     }
 
+    /// Even letters on one thumb and odd letters on the other, overlapping in time.
+    static func interleavedThumbs(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        let letters = LexiconKey.make(word)
+        guard letters.count >= 4 else { return nil }
+        let left = letters.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
+        let right = letters.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? nil : $0.element }
+        guard left.count >= 2, right.count >= 2 else { return nil }
+        let leftStroke = stroke(left, layout: layout, seed: seed, cut: 0.1, overshoot: 0, start: 0)
+        let rightStroke = stroke(right, layout: layout, seed: seed &+ 9, cut: 0.1, overshoot: 0, start: 0.03)
+        return GestureComposer.compose([leftStroke, rightStroke])
+    }
+
+    /// The first letter is a tap, then the rest of the word is one stroke.
+    static func tapThenSwipe(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        let letters = LexiconKey.make(word)
+        guard letters.count >= 3, let head = letters.first else { return nil }
+        let moving = stroke(Array(letters.dropFirst()), layout: layout, seed: seed, cut: 0.1, overshoot: 0, start: 0.06)
+        let tap = StrokeObservation(
+            time: 0,
+            point: layout.center(of: head),
+            directionX: 0,
+            directionY: 0,
+            letter: String(UnicodeScalar(head)),
+            isTap: true
+        )
+        return GestureComposer.compose([moving], taps: [tap])
+    }
+
+    /// A tap lands on the middle letter while the other thumb is still drawing.
+    static func tapInTheMiddle(word: String, layout: LetterLayout, seed: UInt64) -> SwipeGesture? {
+        let letters = LexiconKey.make(word)
+        guard letters.count >= 4 else { return nil }
+        let mid = letters.count / 2
+        let tapped = letters[mid]
+        var movingLetters = letters
+        movingLetters.remove(at: mid)
+        guard movingLetters.count >= 2 else { return nil }
+        let moving = stroke(movingLetters, layout: layout, seed: seed, cut: 0.1, overshoot: 0, start: 0)
+        let previous = String(UnicodeScalar(letters[mid - 1]))
+        let following = mid + 1 < letters.count ? String(UnicodeScalar(letters[mid + 1])) : nil
+        let afterPrevious = moving.arrivals.last { $0.letter == previous }?.time ?? moving.start.time
+        let beforeNext = following.flatMap { letter in moving.arrivals.first { $0.letter == letter }?.time } ?? moving.end.time
+        let tap = StrokeObservation(
+            time: afterPrevious + max(0.01, (beforeNext - afterPrevious) / 2),
+            point: layout.center(of: tapped),
+            directionX: 0,
+            directionY: 0,
+            letter: String(UnicodeScalar(tapped)),
+            isTap: true
+        )
+        return GestureComposer.compose([moving], taps: [tap])
+    }
+
     private static func compose(
         word: String,
         layout: LetterLayout,
@@ -301,7 +354,10 @@ struct PathDecoderTests {
             ("single", GestureSampler.singleSwipe),
             ("corners", GestureSampler.cutCorners),
             ("thumbs", GestureSampler.twoThumbs),
+            ("interleaved", GestureSampler.interleavedThumbs),
             ("tap", GestureSampler.swipePlusTap),
+            ("tapFirst", GestureSampler.tapThenSwipe),
+            ("tapMiddle", GestureSampler.tapInTheMiddle),
         ]
         let language = LanguageModel(lexicon: TestLexicon.shared)
         for (name, make) in cases {
@@ -581,7 +637,14 @@ struct SwipeTypingTests {
             await Task.yield()
         }
         #expect(!composer.hasPendingCommits)
-        #expect(committed == [.commitSwipe(["hello"], unsure: false, strokes: 1, observations: [])])
+        guard case let .commitSwipe(words, unsure, strokes, observations, _) = committed.first else {
+            Issue.record("Expected a swipe commit")
+            return
+        }
+        #expect(words == ["hello"])
+        #expect(!unsure)
+        #expect(strokes == 1)
+        #expect(observations.isEmpty)
     }
 
     @Test func swipeIsOffWhenTypingModeIsTap() {
@@ -663,7 +726,7 @@ struct SwipeTypingTests {
             spins += 1
             await Task.yield()
         }
-        guard case let .commitSwipe(words, unsure, strokes, observations) = committed.first else {
+        guard case let .commitSwipe(words, unsure, strokes, observations, _) = committed.first else {
             Issue.record("Expected a swipe commit")
             return
         }
@@ -773,6 +836,86 @@ struct SwipeTypingTests {
             stroke.arrive(String(letters[index + 1]), at: point, time: Double(index + 1))
         }
         #expect(stroke.arrivals.map(\.letter).joined() == "traged")
+        #expect(StrokeLetters.aimedArrivals(stroke.arrivals).map(\.letter).joined() == "traged")
+    }
+
+    @Test func aSameRowWobbleDoesNotAimTheGrazedKeys() {
+        let harness = makeHarness()
+        let letters = ["y", "u", "i", "o"]
+        let centers = letters.map { harness.point(for: $0) }
+        var stroke = StrokeBuffer(start: StrokePoint(location: centers[0], time: 0))
+        stroke.arrive("y", at: centers[0], touch: centers[0], time: 0)
+        for (index, letter) in letters.enumerated().dropFirst() {
+            let wobble = CGPoint(x: centers[index].x, y: centers[index].y + (index.isMultiple(of: 2) ? 12 : -12))
+            stroke.append(StrokePoint(location: wobble, time: Double(index) * 0.05))
+            stroke.arrive(letter, at: centers[index], touch: wobble, time: Double(index) * 0.05)
+        }
+        stroke.finish(at: StrokePoint(location: centers[3], time: 0.2))
+        let gesture = GestureComposer.compose([stroke])
+        let anchors = gesture?.evidence.events.filter { $0.role == .anchor }.map(\.letter)
+        #expect(anchors == ["y", "o"])
+    }
+
+    @Test func aSameRowReturnKeepsTheFarKeyAndAShortWordStays() {
+        let positions: [CGFloat] = [0, 1, 2, 3, 4, 5, 6, 5, 4, 3]
+        let top = ["w", "e", "r", "t", "y", "u", "i", "u", "y", "t"]
+        var with = zip(top, positions).map { letter, place in
+            arrival(letter, x: place * 40, y: 0)
+        }
+        with.append(arrival("h", x: 5 * 40, y: 56))
+        #expect(StrokeLetters.aimedArrivals(with).map(\.letter).joined() == "with")
+
+        let were = ["w", "e", "r", "e"].enumerated().map { index, letter in
+            let place: CGFloat = index == 3 ? 1 : CGFloat(index)
+            return arrival(letter, x: place * 40, y: 0)
+        }
+        #expect(StrokeLetters.aimedArrivals(were).map(\.letter).joined() == "were")
+    }
+
+    @Test func aCommonCurveLeadsAGrazedRival() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let t = harness.point(for: "t")
+        let h = harness.point(for: "h")
+        let e = harness.point(for: "e")
+        let r = harness.point(for: "r")
+        let path = [t, h, e]
+        let events = [
+            SwipeEvent(time: 0, point: t, letter: "t", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.08, point: r, letter: "r", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.16, point: e, letter: "e", role: .anchor, strokeIndex: 0),
+        ]
+        let gesture = SwipeGesture(
+            path: path,
+            strokeCount: 1,
+            strokePaths: [path],
+            tracedLetters: "tre",
+            evidence: SwipeEvidence(events: events, aimedLetters: "tre")
+        )
+        #expect(decode(gesture, layout: layout).words.first?.lowercased() == "the")
+    }
+
+    @Test func aJoinedSwipeKeepsItsCurve() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let harness = EngineHarness(language: language)
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let t = harness.point(for: "t")
+        let h = harness.point(for: "h")
+        let e = harness.point(for: "e")
+        let observations = [
+            aimedStroke("t", stroke: 0, at: t, time: 0),
+            aimedStroke("e", stroke: 0, at: e, time: 0.16),
+        ]
+        let withCurve = language.sequenceDecode(observations, layout: layout, strokePaths: [[t, h, e]])
+        let withoutCurve = language.sequenceDecode(observations, layout: layout)
+        #expect(withCurve.result.words.first?.lowercased() == "the")
+        #expect(withoutCurve.result.words.first?.lowercased() != "the")
     }
 
     @Test func estrangedKeepsNInsideTheSecondStroke() async {
@@ -860,7 +1003,7 @@ struct SwipeTypingTests {
         }
         let typed = committed.reduce(into: "") { text, intent in
             switch intent {
-            case let .commitSwipe(words, _, _, _): text += words.first ?? ""
+            case let .commitSwipe(words, _, _, _, _): text += words.first ?? ""
             case let .insert(character): text += character
             default: break
             }
@@ -1450,7 +1593,7 @@ struct SwipeTypingTests {
         }
         let typed = committed.reduce(into: "") { text, intent in
             switch intent {
-            case let .commitSwipe(words, _, _, _): text += words.first ?? ""
+            case let .commitSwipe(words, _, _, _, _): text += words.first ?? ""
             case let .insert(character): text += character
             default: break
             }
@@ -1713,6 +1856,74 @@ struct SwipeTypingTests {
             pathScore: &score
         )
         #expect(result.words.contains { $0.lowercased() == "were" })
+    }
+
+    @Test func aTapCanCrossAGrazedKey() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let w = harness.point(for: "w")
+        let e = harness.point(for: "e")
+        let s = harness.point(for: "s")
+        let t = harness.point(for: "t")
+        // The tap is early, and the grazed E sits on the line from W to T. Reading "west"
+        // means the tap moved later across that graze.
+        let events = [
+            SwipeEvent(time: 0, point: w, letter: "w", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.02, point: s, letter: "s", role: .tap, strokeIndex: -2),
+            SwipeEvent(time: 0.16, point: e, letter: "e", role: .crossing, strokeIndex: 0, distanceToCenter: 0),
+            SwipeEvent(time: 0.30, point: t, letter: "t", role: .anchor, strokeIndex: 0),
+        ]
+        let gesture = SwipeGesture(
+            path: [w, e, t],
+            strokeCount: 1,
+            strokePaths: [[w, e, t]],
+            tracedLetters: "wst",
+            observations: [],
+            evidence: SwipeEvidence(events: events, aimedLetters: "wst")
+        )
+        let result = decode(gesture, layout: layout)
+        #expect(
+            result.words.contains { $0.lowercased() == "west" },
+            Comment(rawValue: result.words.joined(separator: ", "))
+        )
+    }
+
+    @Test func eachThumbKeepsItsOwnSkipBudget() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        func event(_ letter: String, time: Double, stroke: Int) -> SwipeEvent {
+            SwipeEvent(time: time, point: harness.point(for: letter), letter: letter, role: .anchor, strokeIndex: stroke)
+        }
+        let events = [
+            event("c", time: 0, stroke: 0),
+            event("a", time: 0.02, stroke: 0),
+            event("x", time: 0.04, stroke: 0),
+            event("t", time: 0.06, stroke: 1),
+            event("y", time: 0.08, stroke: 1),
+            event("z", time: 0.10, stroke: 1),
+        ]
+        let gesture = SwipeGesture(
+            path: [harness.point(for: "c"), harness.point(for: "t")],
+            strokeCount: 2,
+            strokePaths: [
+                [harness.point(for: "c"), harness.point(for: "a"), harness.point(for: "x")],
+                [harness.point(for: "t"), harness.point(for: "y"), harness.point(for: "z")],
+            ],
+            tracedLetters: "caxtyz",
+            observations: [],
+            evidence: SwipeEvidence(events: events, aimedLetters: "caxtyz")
+        )
+        let result = decode(gesture, layout: layout)
+        #expect(
+            result.words.contains { $0.lowercased() == "cat" },
+            Comment(rawValue: result.words.joined(separator: ", "))
+        )
     }
 
     @Test func tappingAPreviewReadingCommitsThatWord() async throws {

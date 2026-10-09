@@ -73,6 +73,13 @@ enum AlignmentSearch {
             readings = merge(readings, ranked)
         }
         readings = rescore(readings, gesture: gesture, layout: layout, costs: costs, pathScore: &pathScore)
+        readings = preferringCommonCurves(
+            readings,
+            gesture: gesture,
+            layout: layout,
+            lexicon: lexicon,
+            pathScore: &pathScore
+        )
         readings = addingExpected(
             readings,
             words: expected,
@@ -135,12 +142,42 @@ enum AlignmentSearch {
     }
 
     private static func canSwap(_ left: StrokeChannel.Step, _ right: StrokeChannel.Step, costs: AlignmentCosts) -> Bool {
-        guard left.strokeIndex != right.strokeIndex, abs(left.time - right.time) <= costs.swapWindow else { return false }
-        // A letter already down stays before keys that land after it. Two thumbs can still
-        // interleave, and a tap can still move earlier into a key that landed first.
-        if left.event?.role == .tap, left.time < right.time { return false }
-        if right.event?.role == .tap, right.time < left.time { return false }
+        guard left.strokeIndex != right.strokeIndex else { return false }
+        let tapCrossesChannel = (left.event?.role == .tap && right.isChannel) || (right.event?.role == .tap && left.isChannel)
+        let window = tapCrossesChannel ? costs.swapWindow * 3 : costs.swapWindow
+        guard abs(left.time - right.time) <= window else { return false }
+        // A tap may slide across a graze. It stays before a corner that landed after it.
+        if left.event?.role == .tap, left.time < right.time, right.event != nil { return false }
+        if right.event?.role == .tap, right.time < left.time, left.event != nil { return false }
         return true
+    }
+
+    /// Four bits per slot. Moving strokes use slots 0...3. Taps, whose stroke indexes are
+    /// −2 and below, use slots 4...7. Each thumb can spend its own skip budget.
+    private struct SkipCounts: Sendable {
+        private var bits: UInt32 = 0
+
+        func allows(_ stroke: Int, limit: Int) -> Bool {
+            Int(count(of: stroke)) < limit
+        }
+
+        func adding(_ stroke: Int) -> SkipCounts {
+            var copy = self
+            let shift = slot(of: stroke) * 4
+            let mask: UInt32 = 0xF << shift
+            let next = min((bits >> shift) & 0xF, 14) + 1
+            copy.bits = (bits & ~mask) | (next << shift)
+            return copy
+        }
+
+        private func count(of stroke: Int) -> UInt32 {
+            (bits >> (slot(of: stroke) * 4)) & 0xF
+        }
+
+        private func slot(of stroke: Int) -> Int {
+            if stroke >= 0 { return min(stroke, 3) }
+            return min(4 + max(0, -stroke - 2), 7)
+        }
     }
 
     private static func key(_ order: [Int]) -> String {
@@ -152,7 +189,7 @@ enum AlignmentSearch {
     private struct Hypothesis {
         var letters: [UInt8]
         var score: Double
-        var anchorSkips: Int
+        var skips: SkipCounts
         var lastX: CGFloat
         var lastY: CGFloat
         var placed: Bool
@@ -180,7 +217,7 @@ enum AlignmentSearch {
         crossingScale: Double
     ) -> [DecodeResult.Reading] {
         let habitBuckets = habitBuckets(from: habits)
-        var beam = [Hypothesis(letters: [], score: 0, anchorSkips: 0, lastX: 0, lastY: 0, placed: false, lastStroke: nil)]
+        var beam = [Hypothesis(letters: [], score: 0, skips: SkipCounts(), lastX: 0, lastY: 0, placed: false, lastStroke: nil)]
         for step in steps {
             var next: [Hypothesis] = []
             next.reserveCapacity(beam.count * (costs.neighborLimit + 2))
@@ -293,7 +330,7 @@ enum AlignmentSearch {
         return Hypothesis(
             letters: letters,
             score: score,
-            anchorSkips: hypothesis.anchorSkips,
+            skips: hypothesis.skips,
             lastX: center.x,
             lastY: center.y,
             placed: true,
@@ -310,9 +347,9 @@ enum AlignmentSearch {
     ) -> Hypothesis? {
         switch event.role {
         case .anchor, .tap:
-            guard hypothesis.placed, hypothesis.anchorSkips < costs.maxAnchorSkips else { return nil }
+            guard hypothesis.placed, hypothesis.skips.allows(event.strokeIndex, limit: costs.maxAnchorSkips) else { return nil }
             var skipped = hypothesis
-            skipped.anchorSkips += 1
+            skipped.skips = hypothesis.skips.adding(event.strokeIndex)
             skipped.score -= costs.anchorSkip
             return skipped
         case .crossing:
@@ -514,129 +551,15 @@ enum AlignmentSearch {
         let totalLength = paths.reduce(CGFloat(0)) { $0 + StrokeAnalyzer.length(of: $1) } / layout.keyWidth
         var adjusted: [DecodeResult.Reading] = []
         adjusted.reserveCapacity(readings.count)
-        let tapped = gesture.evidence.events.contains { $0.role == .tap }
         for reading in readings {
             let key = LexiconKey.make(reading.word)
             var score = reading.score
-            if paths.count == 1 {
-                // A tap is not on the polyline. Score the stroke against the letters that
-                // stroke aimed at, and let the beam explain the tap.
-                let shaped = tapped ? anchorLetters(in: gesture, stroke: paths.indices.first ?? 0) : key
-                score += pathFit(shaped, path: paths[0], layout: layout, pathScore: &pathScore)
-            } else {
-                score += wordOnStrokes(key, gesture: gesture, layout: layout, pathScore: &pathScore)
-            }
+            score += StrokeFit.score(key, gesture: gesture, layout: layout, pathScore: &pathScore)
             score -= PathScore.lengthCost(gestureLength: totalLength, key: key, layout: layout, weight: costs.lengthWeight)
             adjusted.append(DecodeResult.Reading(word: reading.word, score: score))
         }
         adjusted.sort { $0.score > $1.score }
         return adjusted
-    }
-
-    /// A word that skips a moving thumb pays for it. Each thumb's polyline is scored against
-    /// the slice of the word that thumb explains, not against the word's first and last letter.
-    private static func wordOnStrokes(
-        _ word: [UInt8],
-        gesture: SwipeGesture,
-        layout: LetterLayout,
-        pathScore: inout PathScore
-    ) -> Double {
-        let thumbs = thumbs(in: gesture)
-        guard thumbs.count > 1 else {
-            guard let path = gesture.strokePaths.first else { return 0 }
-            return pathFit(word, path: path, layout: layout, pathScore: &pathScore)
-        }
-        guard let slices = slices(of: word, thumbs: thumbs) else { return -8 }
-        var total = 0.0
-        var counted = 0
-        for (thumb, slice) in zip(thumbs, slices) {
-            let fit = pathFit(slice, path: thumb.path, layout: layout, pathScore: &pathScore)
-            if fit != 0 || slice.count >= 2 {
-                total += fit
-                counted += 1
-            }
-        }
-        guard counted > 0 else { return 0 }
-        return total / Double(counted)
-    }
-
-    private struct ThumbSlice {
-        var letters: [UInt8]
-        var path: [CGPoint]
-    }
-
-    private static func thumbs(in gesture: SwipeGesture) -> [ThumbSlice] {
-        var order: [Int] = []
-        var letters: [Int: [UInt8]] = [:]
-        for event in gesture.evidence.events where event.role == .anchor && event.strokeIndex >= 0 {
-            guard let letter = event.letter.lowercased().utf8.first else { continue }
-            if letters[event.strokeIndex] == nil {
-                order.append(event.strokeIndex)
-                letters[event.strokeIndex] = []
-            }
-            if letters[event.strokeIndex]?.last != letter {
-                letters[event.strokeIndex]?.append(letter)
-            }
-        }
-        return order.compactMap { index in
-            guard gesture.strokePaths.indices.contains(index), gesture.strokePaths[index].count >= 2,
-                  let aimed = letters[index], !aimed.isEmpty else { return nil }
-            return ThumbSlice(letters: aimed, path: gesture.strokePaths[index])
-        }
-    }
-
-    /// One slice per thumb, in stroke order. The last thumb keeps the rest of the word.
-    private static func slices(of word: [UInt8], thumbs: [ThumbSlice]) -> [[UInt8]]? {
-        var cursor = 0
-        var result: [[UInt8]] = []
-        for (index, thumb) in thumbs.enumerated() {
-            if index == thumbs.count - 1 {
-                guard cursor < word.count else { return nil }
-                let rest = Array(word[cursor...])
-                guard matchEnd(thumb.letters, in: rest, from: 0) != nil else { return nil }
-                result.append(rest)
-            } else {
-                guard let end = matchEnd(thumb.letters, in: word, from: cursor) else { return nil }
-                result.append(Array(word[cursor...end]))
-                cursor = end + 1
-            }
-        }
-        return result
-    }
-
-    private static func matchEnd(_ letters: [UInt8], in word: [UInt8], from start: Int) -> Int? {
-        guard start <= word.count else { return nil }
-        var cursor = start
-        var last = start - 1
-        for letter in letters {
-            guard cursor < word.count, let found = word[cursor...].firstIndex(of: letter) else { return nil }
-            last = found
-            cursor = found + 1
-        }
-        guard last >= start else { return nil }
-        return last
-    }
-
-    private static func anchorLetters(in gesture: SwipeGesture, stroke index: Int) -> [UInt8] {
-        gesture.evidence.events.compactMap { event in
-            guard event.role == .anchor, event.strokeIndex == index else { return nil }
-            return event.letter.lowercased().utf8.first
-        }
-    }
-
-    /// Log-likelihood of `letters` on `path`. A path too far to score pays more than a
-    /// borderline fit, so missing the cutoff cannot outrank a word the path actually follows.
-    private static func pathFit(
-        _ letters: [UInt8],
-        path: [CGPoint],
-        layout: LetterLayout,
-        pathScore: inout PathScore
-    ) -> Double {
-        guard letters.count >= 2, pathScore.prepare(path, layout: layout) else { return 0 }
-        if let fit = pathScore.measure(letters, mustExceed: -.infinity, gateLength: false, layout: layout).score {
-            return fit
-        }
-        return -8
     }
 
     /// How far `word` sits from `path`, in key widths. Nil when the word is too short to measure.
@@ -649,6 +572,53 @@ enum AlignmentSearch {
         let key = LexiconKey.make(word)
         guard key.count >= 2, pathScore.prepare(path, layout: layout) else { return nil }
         return pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout).location
+    }
+
+    /// The head of the English lexicon, most common first. Scored as curves, not grown letter by letter.
+    private static let commonWords = [
+        "the", "and", "you", "that", "was", "for", "are", "with", "his", "they",
+        "this", "have", "from", "had", "but", "not", "what", "all", "were", "when",
+        "your", "can", "said", "there", "each", "which", "she", "how", "their", "will",
+        "other", "about", "out", "many", "then", "them", "these", "some", "would", "make",
+    ]
+
+    /// A common word whose key centers sit clearly closer to the finger than the beam's leader
+    /// takes the lead. Grazes along a QWERTY row no longer outvote "the" or "you".
+    private static func preferringCommonCurves(
+        _ readings: [DecodeResult.Reading],
+        gesture: SwipeGesture,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        pathScore: inout PathScore
+    ) -> [DecodeResult.Reading] {
+        let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
+        guard paths.count == 1, let path = paths.first, path.count >= 2,
+              !gesture.evidence.events.contains(where: { $0.role == .tap }),
+              pathScore.prepare(path, layout: layout) else { return readings }
+        let leader = readings.max { $0.score < $1.score }
+        let leaderLocation = leader.flatMap { location(of: $0.word, path: path, layout: layout, pathScore: &pathScore) }
+        var best: (word: String, location: CGFloat)?
+        for word in commonWords where lexicon.contains(word) {
+            let key = LexiconKey.make(word)
+            let measured = pathScore.measure(key, mustExceed: -.infinity, gateLength: false, layout: layout)
+            guard let fit = measured.score, fit < 0, fit > -8, let place = measured.location else { continue }
+            let closer = leaderLocation.map { leader in leader - place >= 0.35 } ?? (place < 0.7)
+            guard closer else { continue }
+            if let current = best, place >= current.location { continue }
+            best = (word, place)
+        }
+        guard let best else { return readings }
+        if let leader, best.word == leader.word.lowercased() { return readings }
+        var updated = readings
+        // Clear the exact-lead window. A graze that merely aligns stays behind a curve this much closer.
+        let score = (leader?.score ?? 0) + ReadingPolicy.exactLead + 0.01
+        if let index = updated.firstIndex(where: { $0.word.compare(best.word, options: .caseInsensitive) == .orderedSame }) {
+            updated[index] = DecodeResult.Reading(word: updated[index].word, score: score)
+        } else {
+            updated.append(DecodeResult.Reading(word: best.word, score: score))
+        }
+        updated.sort { $0.score > $1.score }
+        return updated
     }
 
     // MARK: - Expected words
@@ -677,28 +647,12 @@ enum AlignmentSearch {
             if best[key] != nil { continue }
             guard let known = knownWord(word, lexicon: lexicon, personal: personal) else { continue }
             let letters = LexiconKey.make(known.display)
-            let fit = gestureFit(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
+            let fit = StrokeFit.score(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
             guard fit < 0, fit > -8 else { continue }
             let score = fit + costs.frequencyWeight * known.logCount + habitBonus(known.display, habits: habits)
             best[key] = DecodeResult.Reading(word: known.display, score: score)
         }
         return best.values.sorted { $0.score > $1.score }
-    }
-
-    /// The same path term `rescore` adds: one stroke against the whole word, two strokes
-    /// against the slices those thumbs explain.
-    private static func gestureFit(
-        _ letters: [UInt8],
-        gesture: SwipeGesture,
-        layout: LetterLayout,
-        pathScore: inout PathScore
-    ) -> Double {
-        let paths = gesture.strokePaths.isEmpty ? (gesture.path.count >= 2 ? [gesture.path] : []) : gesture.strokePaths
-        guard !paths.isEmpty else { return 0 }
-        if paths.count == 1 {
-            return pathFit(letters, path: paths[0], layout: layout, pathScore: &pathScore)
-        }
-        return wordOnStrokes(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
     }
 
     // MARK: - Shape nominations
@@ -871,7 +825,7 @@ enum AlignmentSearch {
         guard let known = knownWord(text, lexicon: lexicon, personal: personal) else { return }
         let key = known.display.lowercased()
         guard seen.insert(key).inserted else { return }
-        let fit = wordOnStrokes(LexiconKey.make(known.display), gesture: gesture, layout: layout, pathScore: &pathScore)
+        let fit = StrokeFit.score(LexiconKey.make(known.display), gesture: gesture, layout: layout, pathScore: &pathScore)
         guard fit < 0, fit > -8 else { return }
         readings.append(DecodeResult.Reading(
             word: known.display,
@@ -897,8 +851,9 @@ enum AlignmentSearch {
     }
 
     /// Words both thumbs' anchors sit inside, including an interleaving the left-plus-right
-    /// join never spells. Each thumb is scored on its own path. `wordOnStrokes` would require
-    /// the thumbs to own sequential slices, so "l v" plus "i e" could not be "live".
+    /// join never spells. The shared thumb fit only ranks the short list. Each survivor is then
+    /// scored on its own letters. An anagram is held under a beam word only when that word
+    /// itself sits on both thumbs.
     private static func mergedNominations(
         _ readings: [DecodeResult.Reading],
         gesture: SwipeGesture,
@@ -908,22 +863,16 @@ enum AlignmentSearch {
         costs: AlignmentCosts,
         pathScore: inout PathScore
     ) -> [DecodeResult.Reading] {
-        let thumbs = thumbs(in: gesture)
+        let thumbs = StrokeFit.thumbs(in: gesture)
         guard thumbs.count == 2 else { return [] }
         let left = thumbs[0].letters
         let right = thumbs[1].letters
         guard let leftFirst = left.first, let leftLast = left.last,
               let rightFirst = right.first, let rightLast = right.last else { return [] }
         let maxLength = left.count + right.count + 2
-        let fit = thumbFit(thumbs, layout: layout, pathScore: &pathScore)
-        guard fit < 0, fit > -8 else { return [] }
-        let beamCoversBoth = readings.contains { reading in
-            let key = LexiconKey.make(reading.word)
-            return key.withUnsafeBytes { raw in
-                isSubsequence(left, of: raw) && isSubsequence(right, of: raw)
-            }
-        }
-        let ceiling = beamCoversBoth ? readings.map(\.score).max() : nil
+        let fit = StrokeFit.anchorsFit(thumbs, layout: layout, pathScore: &pathScore)
+        guard fit < 0, fit > StrokeFit.miss else { return [] }
+        let ceiling = beamCeiling(readings, left: left, right: right, gesture: gesture, layout: layout, pathScore: &pathScore)
 
         var pairs: [(UInt8, UInt8)] = []
         for first in [leftFirst, rightFirst] {
@@ -960,8 +909,8 @@ enum AlignmentSearch {
             }
         }
         for index in best.indices {
-            let shaped = wordOnStrokes(LexiconKey.make(best[index].word), gesture: gesture, layout: layout, pathScore: &pathScore)
-            guard shaped < 0, shaped > -8 else { continue }
+            let shaped = StrokeFit.score(LexiconKey.make(best[index].word), gesture: gesture, layout: layout, pathScore: &pathScore)
+            guard shaped < 0, shaped > StrokeFit.miss else { continue }
             var score = shaped + costs.frequencyWeight * best[index].logCount - costs.lengthWeight * Double(best[index].spare)
             if let ceiling { score = min(score, ceiling - 0.01) }
             best[index].score = score
@@ -970,19 +919,27 @@ enum AlignmentSearch {
         return best.map { DecodeResult.Reading(word: $0.word, score: $0.score) }
     }
 
-    /// Both thumbs followed their own letters. One unscored thumb rejects the merge.
-    private static func thumbFit(
-        _ thumbs: [ThumbSlice],
+    /// The best beam score among words that contain both thumbs and actually sit on their paths.
+    private static func beamCeiling(
+        _ readings: [DecodeResult.Reading],
+        left: [UInt8],
+        right: [UInt8],
+        gesture: SwipeGesture,
         layout: LetterLayout,
         pathScore: inout PathScore
-    ) -> Double {
-        var total = 0.0
-        for thumb in thumbs {
-            let fit = pathFit(thumb.letters, path: thumb.path, layout: layout, pathScore: &pathScore)
-            guard fit < 0, fit > -8 else { return -8 }
-            total += fit
+    ) -> Double? {
+        var ceiling: Double?
+        for reading in readings {
+            let key = LexiconKey.make(reading.word)
+            let covers = key.withUnsafeBytes { raw in
+                isSubsequence(left, of: raw) && isSubsequence(right, of: raw)
+            }
+            guard covers else { continue }
+            let fit = StrokeFit.score(key, gesture: gesture, layout: layout, pathScore: &pathScore)
+            guard fit < 0, fit > StrokeFit.miss else { continue }
+            if ceiling == nil || reading.score > ceiling! { ceiling = reading.score }
         }
-        return total / Double(thumbs.count)
+        return ceiling
     }
 
     private static func isSubsequence(_ needle: [UInt8], of word: UnsafeRawBufferPointer) -> Bool {
