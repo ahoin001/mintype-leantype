@@ -15,6 +15,19 @@ public enum SharedContainer {
             .containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)?
             .appending(path: name, directoryHint: .notDirectory)
     }
+
+    /// The leash the keyboard would use right now, written so the companion can show it.
+    public static let recommendedLeashKey = "recommendedLeash.v1"
+
+    public static func saveRecommendedLeash(_ seconds: Double) {
+        UserDefaults(suiteName: appGroupIdentifier)?.set(seconds, forKey: recommendedLeashKey)
+    }
+
+    public static func recommendedLeash() -> Double {
+        let stored = UserDefaults(suiteName: appGroupIdentifier)?.double(forKey: recommendedLeashKey) ?? 0
+        if stored > 0 { return min(0.55, max(0.16, stored)) }
+        return TypingRhythm.coldLeash
+    }
 }
 
 public protocol SettingsStore: Sendable {

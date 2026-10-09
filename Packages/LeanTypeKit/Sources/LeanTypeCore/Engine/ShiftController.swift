@@ -13,6 +13,9 @@ final class ShiftController {
     static let doubleTapInterval: TimeInterval = 0.32
 
     private(set) var state = ShiftState.off
+    /// Set when shift was turned on by auto-capitalization rather than the user.
+    var isSentenceCapital: Bool { state == .once && isAutomatic }
+
     /// Set when shift was turned on by auto-capitalization rather than the user, so the next
     /// context change may turn it back off.
     private var isAutomatic = false

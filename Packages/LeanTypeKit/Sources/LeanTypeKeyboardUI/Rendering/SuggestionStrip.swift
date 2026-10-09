@@ -12,8 +12,15 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     var onRemember: ((String) -> Void)?
     var onForget: ((String) -> Void)?
     var onBan: ((String) -> Void)?
+    var onMoreOften: ((String) -> Void)?
+    var onLessOften: ((String) -> Void)?
+    var useCount: ((String) -> Int)?
+    var historyChoices: ((String) -> [String])?
+    var onReplaceHistory: ((Int, String) -> Void)?
 
+    private let scroller = UIScrollView()
     private var slots: [SuggestionSlot] = []
+    private var contentWidth: CGFloat = 0
     private var separators: [UIView] = []
     /// One pill for the highlighted word, so it can slide between slots instead of popping.
     private let pill = UIView()
@@ -25,22 +32,30 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        clipsToBounds = true
+        scroller.showsHorizontalScrollIndicator = false
+        scroller.alwaysBounceHorizontal = false
+        scroller.clipsToBounds = true
+        addSubview(scroller)
         pill.isUserInteractionEnabled = false
         pill.layer.cornerCurve = .continuous
         pill.alpha = 0
-        addSubview(pill)
+        scroller.addSubview(pill)
         addInteraction(UIContextMenuInteraction(delegate: self))
-        for index in 0..<CandidateState.capacity {
+        for index in 0..<CandidateState.historyLimit {
             let slot = SuggestionSlot()
-            slot.addAction(UIAction { [weak self] _ in self?.onSelect?(index) }, for: .touchUpInside)
+            slot.addAction(UIAction { [weak self] _ in
+                guard self?.state.isHistory != true else { return }
+                self?.onSelect?(index)
+            }, for: .touchUpInside)
             slots.append(slot)
-            addSubview(slot)
+            scroller.addSubview(slot)
         }
-        for _ in 1..<CandidateState.capacity {
+        for _ in 1..<CandidateState.historyLimit {
             let separator = UIView()
             separator.isUserInteractionEnabled = false
             separators.append(separator)
-            addSubview(separator)
+            scroller.addSubview(separator)
         }
     }
 
@@ -96,17 +111,35 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     }
 
     private func positionSlots() {
+        scroller.frame = bounds
         let count = max(state.candidates.count, 1)
-        let width = bounds.width / CGFloat(count)
-        for (index, slot) in slots.enumerated() {
-            slot.isHidden = index >= state.candidates.count
-            slot.frame = CGRect(x: CGFloat(index) * width, y: 0, width: width, height: bounds.height).insetBy(dx: 3, dy: 4)
+        if state.isHistory {
+            var x: CGFloat = 0
+            for (index, slot) in slots.enumerated() {
+                let visible = index < state.candidates.count
+                slot.isHidden = !visible
+                let letters = visible ? CGFloat(state.candidates[index].text.count) : 0
+                let width = visible ? max(76, letters * 11 + 28) : 0
+                slot.frame = CGRect(x: x, y: 0, width: width, height: bounds.height).insetBy(dx: 3, dy: 4)
+                if visible { x += width }
+            }
+            for separator in separators { separator.isHidden = true }
+            contentWidth = max(x, bounds.width)
+        } else {
+            contentWidth = bounds.width
+            let width = bounds.width / CGFloat(count)
+            for (index, slot) in slots.enumerated() {
+                slot.isHidden = index >= state.candidates.count
+                slot.frame = CGRect(x: CGFloat(index) * width, y: 0, width: width, height: bounds.height).insetBy(dx: 3, dy: 4)
+            }
+            for (index, separator) in separators.enumerated() {
+                separator.isHidden = index + 1 >= state.candidates.count
+                    || state.highlightedIndex == index || state.highlightedIndex == index + 1
+                separator.frame = CGRect(x: CGFloat(index + 1) * width - 0.5, y: bounds.height * 0.28, width: 1, height: bounds.height * 0.44)
+            }
         }
-        for (index, separator) in separators.enumerated() {
-            separator.isHidden = index + 1 >= state.candidates.count
-                || state.highlightedIndex == index || state.highlightedIndex == index + 1
-            separator.frame = CGRect(x: CGFloat(index + 1) * width - 0.5, y: bounds.height * 0.28, width: 1, height: bounds.height * 0.44)
-        }
+        scroller.isScrollEnabled = state.isHistory && contentWidth > bounds.width + 1
+        scroller.contentSize = CGSize(width: contentWidth, height: bounds.height)
     }
 
     private func render(animated: Bool) {
@@ -130,6 +163,13 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             }
             slot.accessibilityLabel = candidate.role == .revert ? "Undo correction, \(candidate.text)" : candidate.text
             slot.accessibilityCustomActions = accessibilityActions(for: candidate.text)
+            if state.isHistory {
+                slot.menu = historyMenu(for: candidate.text, index: index)
+                slot.showsMenuAsPrimaryAction = true
+            } else {
+                slot.menu = nil
+                slot.showsMenuAsPrimaryAction = false
+            }
         }
     }
 
@@ -137,7 +177,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         _: UIContextMenuInteraction,
         configurationForMenuAtLocation location: CGPoint
     ) -> UIContextMenuConfiguration? {
-        guard let word = word(at: location) else { return nil }
+        guard !state.isHistory, let word = word(at: location) else { return nil }
         let memory = memoryOf?(word) ?? .unavailable
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             self?.menu(for: word, memory: memory)
@@ -145,7 +185,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     }
 
     private func word(at location: CGPoint) -> String? {
-        guard let index = slots.firstIndex(where: { !$0.isHidden && $0.frame.contains(location) }),
+        guard let index = slots.firstIndex(where: { !$0.isHidden && $0.frame.contains(scroller.convert(location, from: self)) }),
               index < state.candidates.count
         else { return nil }
         return state.candidates[index].text
@@ -158,12 +198,48 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         case .fresh:
             return UIMenu(children: [rememberAction(word, strengthens: false), banAction(word)])
         case .learning:
-            return UIMenu(children: [rememberAction(word, strengthens: false), forgetAction(word), banAction(word)])
+            return UIMenu(children: [rememberAction(word, strengthens: false)] + scoreActions(word) + [forgetAction(word), banAction(word)])
         case .remembered:
-            return UIMenu(children: [rememberAction(word, strengthens: true), forgetAction(word), banAction(word)])
+            return UIMenu(children: scoreActions(word) + [forgetAction(word), banAction(word)])
         case .blocked:
             return UIMenu(children: [rememberAction(word, strengthens: false)])
         }
+    }
+
+    private func historyMenu(for word: String, index: Int) -> UIMenu {
+        let choices = (historyChoices?(word) ?? []).map { choice in
+            UIAction(title: choice, image: UIImage(systemName: "text.cursor")) { [weak self] _ in
+                self?.onReplaceHistory?(index, choice)
+            }
+        }
+        let memory = memoryOf?(word) ?? .unavailable
+        let rank = scoreActions(word)
+        let tail: [UIMenuElement]
+        switch memory {
+        case .fresh:
+            tail = [rememberAction(word, strengthens: false), banAction(word)]
+        case .learning:
+            tail = rank + [forgetAction(word), banAction(word)]
+        case .remembered:
+            tail = rank + [forgetAction(word), banAction(word)]
+        case .blocked:
+            tail = [rememberAction(word, strengthens: false)]
+        case .unavailable:
+            tail = rank + [banAction(word)]
+        }
+        return UIMenu(children: choices + tail)
+    }
+
+    private func scoreActions(_ word: String) -> [UIAction] {
+        let count = useCount?(word) ?? 0
+        let detail = count == 1 ? "Used 1 time" : "Used \(count) times"
+        let more = UIAction(title: "More often", subtitle: detail, image: UIImage(systemName: "arrow.up")) { [weak self] _ in
+            self?.onMoreOften?(word)
+        }
+        let less = UIAction(title: "Less often", subtitle: detail, image: UIImage(systemName: "arrow.down")) { [weak self] _ in
+            self?.onLessOften?(word)
+        }
+        return [more, less]
     }
 
     private func banAction(_ word: String) -> UIAction {
@@ -293,7 +369,7 @@ private enum PillEmphasis {
 }
 
 /// One tappable suggestion.
-private final class SuggestionSlot: UIControl {
+private final class SuggestionSlot: UIButton {
     private let label = UILabel()
     private let icon = UIImageView()
 

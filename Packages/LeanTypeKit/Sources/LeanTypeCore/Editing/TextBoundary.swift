@@ -95,6 +95,44 @@ public enum TextBoundary {
         return before.suffix(start)
     }
 
+    /// Up to `limit` words ending at the caret, oldest first. The caret may sit in the space
+    /// after the last word. Each word records how many UTF-16 units lie between the caret and
+    /// the end of that word, so a replacement can walk back and return.
+    public struct EarlierWord: Hashable, Sendable {
+        public var text: String
+        public var characters: Int
+        public var utf16After: Int
+    }
+
+    public static func earlierWords(before: String?, limit: Int = 6) -> [EarlierWord] {
+        guard let before, !before.isEmpty, limit > 0 else { return [] }
+        var words: [EarlierWord] = []
+        var index = before.endIndex
+        var utf16After = 0
+        while words.count < limit, index > before.startIndex {
+            while index > before.startIndex {
+                let previous = before.index(before: index)
+                if characterClass(of: before[previous]) == .word { break }
+                utf16After += before[previous].utf16.count
+                index = previous
+            }
+            guard index > before.startIndex else { break }
+            let end = index
+            let gap = utf16After
+            var characters = 0
+            while index > before.startIndex {
+                let previous = before.index(before: index)
+                guard characterClass(of: before[previous]) == .word else { break }
+                characters += 1
+                utf16After += before[previous].utf16.count
+                index = previous
+            }
+            guard characters > 0 else { break }
+            words.append(EarlierWord(text: String(before[index..<end]), characters: characters, utf16After: gap))
+        }
+        return words.reversed()
+    }
+
     /// Whether the text after the cursor carries on the current word (the cursor is mid-word).
     public static func continuesWord(after: String?) -> Bool {
         guard let first = after?.first else { return false }

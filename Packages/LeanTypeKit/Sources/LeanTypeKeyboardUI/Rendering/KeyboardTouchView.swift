@@ -244,6 +244,20 @@ final class KeyboardTouchView: UIView {
         updateAccessibilityLabels()
     }
 
+    /// Delete scrub draws on the backspace key. Any other gesture mark is left for the jewel.
+    func showBackspaceBubble(_ mark: GestureMark?, color: UIColor) {
+        guard let backspace = geometry?.keys.first(where: { $0.key.kind == .backspace }),
+              let view = viewPool[backspace.id]
+        else { return }
+        guard let mark, case let .scrub(scrub) = mark.action, scrub.keyID == backspace.id else {
+            view.hideScrubBubble()
+            return
+        }
+        let width = max(backspace.visualFrame.width, 1)
+        let lean = min(1, max(-1, (mark.contact.x - backspace.visualFrame.midX) / (width * 0.55)))
+        view.showScrubBubble(lean: lean, restoring: scrub.restoring, step: scrub.step, color: color)
+    }
+
     private func setLabelsHidden(_ hidden: Bool) {
         areLabelsHidden = hidden
         let views = visibleIDs.compactMap { viewPool[$0] }

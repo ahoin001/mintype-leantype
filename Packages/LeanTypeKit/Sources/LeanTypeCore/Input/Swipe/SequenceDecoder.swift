@@ -61,7 +61,7 @@ enum WordJoiner {
     /// new letter to keep the old word.
     static func choose(
         extended: SequenceOutcome,
-        alone _: SequenceOutcome,
+        alone: SequenceOutcome,
         fragmentContinues: Bool
     ) -> DecodeResult? {
         if fragmentContinues {
@@ -77,10 +77,22 @@ enum WordJoiner {
             guard !extended.traced.isEmpty else { return nil }
             return DecodeResult(readings: [.init(word: extended.traced, score: provisionalScore)])
         }
-        if let aligned = alignedReading(in: extended) {
-            return DecodeResult(readings: [aligned])
+        guard let aligned = alignedReading(in: extended) else { return nil }
+        // The new beat is already a word of its own, and folding it in is not clearly better.
+        if let own = alone.result.readings.first,
+           own.word.count > 1,
+           aligns(own.word, traced: alone.traced),
+           own.score + DecodeResult.confidenceMargin >= aligned.score {
+            return nil
         }
-        return nil
+        var readings = [aligned]
+        if let own = alone.result.readings.first,
+           own.word.count > 1,
+           own.word.compare(aligned.word, options: .caseInsensitive) != .orderedSame,
+           aligns(own.word, traced: alone.traced) {
+            readings.append(own)
+        }
+        return DecodeResult(readings: readings)
     }
 
     /// The best dictionary word whose letters are exactly the aimed keys, allowing one

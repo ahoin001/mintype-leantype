@@ -11,7 +11,7 @@ final class SwipeCoordinator {
     typealias Decoder = @MainActor (SwipeGesture) async -> DecodeResult
 
     /// How often a gesture in progress asks the decoder for a preview.
-    static let previewSpacing: Duration = .milliseconds(50)
+    static let previewSpacing: Duration = .milliseconds(16)
 
     private let composer: InputComposer
     private let decode: Decoder
@@ -234,11 +234,17 @@ final class SwipeCoordinator {
         previewTask = Task { [weak self] in
             try? await Task.sleep(for: Self.previewSpacing)
             guard let self else { return }
-            previewTask = nil
-            guard token == previewToken, expected == generation, isCollecting else { return }
+            guard token == previewToken, expected == generation, isCollecting else {
+                previewTask = nil
+                return
+            }
             let strokes = finished + active.values
-            guard let gesture = GestureComposer.compose(strokes, taps: pendingTaps(), tuning: evidenceTuning) else { return }
+            guard let gesture = GestureComposer.compose(strokes, taps: pendingTaps(), tuning: evidenceTuning) else {
+                previewTask = nil
+                return
+            }
             let result = await decode(gesture)
+            previewTask = nil
             guard token == previewToken, expected == generation, isCollecting else { return }
             let grown = gesture.path.count
             let missed = result.isEmpty || (result.readings.first?.score ?? 0) < AlignmentCosts.previewFloor

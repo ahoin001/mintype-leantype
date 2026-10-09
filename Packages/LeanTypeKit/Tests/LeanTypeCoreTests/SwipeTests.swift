@@ -766,16 +766,18 @@ struct SwipeTypingTests {
         #expect(model.applyingSwipeRefusals(to: there, trace: "tere").words == ["there", "three", "their"])
     }
 
-    @Test func aSwipeRefusalFadesAfterAFewLaterWords() {
+    @Test func aSwipeRefusalStaysUntilTheWordIsCommittedAgain() {
         let model = LanguageModel(lexicon: TestLexicon.shared)
         model.noteSwipeRefusal(word: "there", trace: "tere")
         let result = DecodeResult(readings: [
             .init(word: "there", score: -0.1),
             .init(word: "three", score: -0.4),
         ])
-        for _ in 0..<SwipeRefusalMemory.lifetime {
+        for _ in 0..<8 {
             model.noteSwipeLanded()
         }
+        #expect(model.applyingSwipeRefusals(to: result, trace: "tere").words.first == "three")
+        model.noteCommitted("there")
         #expect(model.applyingSwipeRefusals(to: result, trace: "tere").words.first == "there")
     }
 
@@ -1063,6 +1065,30 @@ struct SwipeTypingTests {
         #expect(!harness.text.hasPrefix("into"))
     }
 
+    @Test func aFragmentJoinsAQuickSecondSwipeAndAFinishedWordDoesNot() async {
+        let harness = makeHarness()
+        swipe("st", on: harness)
+        await harness.settle()
+        swipe("opping", on: harness)
+        await harness.settle()
+        #expect(harness.text.hasPrefix("stopping"))
+
+        let apart = makeHarness()
+        swipe("hello", on: apart)
+        await apart.settle()
+        swipe("correct", on: apart)
+        await apart.settle()
+        #expect(apart.text.split(separator: " ").first == "hello")
+
+        let slow = makeHarness()
+        swipe("st", on: slow)
+        await slow.settle()
+        slow.wait(0.6)
+        swipe("opping", on: slow)
+        await slow.settle()
+        #expect(!slow.text.hasPrefix("stopping"))
+    }
+
     @Test func aOneLetterWordIsNotPulledIntoTheNextSwipe() async {
         let harness = makeHarness()
         let origin = harness.point(for: "a")
@@ -1250,9 +1276,95 @@ struct SwipeTypingTests {
             observations: [],
             evidence: SwipeEvidence(events: events, aimedLetters: "lvie")
         )
-        let result = decode(gesture, layout: layout)
+        let sink = DecodeTraceSink()
+        let result = decode(gesture, layout: layout, trace: sink)
         #expect(result.words.contains { $0.lowercased() == "live" })
+        #expect(
+            result.words.first?.lowercased() == "live",
+            Comment(rawValue: "words \(result.words) beam \(sink.trace.beamWords) recovered \(sink.trace.recovered)")
+        )
+    }
+
+    @Test func aDelayedSecondThumbStillDecodes() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        let l = layout.center(of: UInt8(ascii: "l"))
+        let v = layout.center(of: UInt8(ascii: "v"))
+        let i = layout.center(of: UInt8(ascii: "i"))
+        let e = layout.center(of: UInt8(ascii: "e"))
+        let events = [
+            SwipeEvent(time: 0, point: l, letter: "l", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.04, point: v, letter: "v", role: .anchor, strokeIndex: 0),
+            SwipeEvent(time: 0.30, point: i, letter: "i", role: .anchor, strokeIndex: 1),
+            SwipeEvent(time: 0.34, point: e, letter: "e", role: .anchor, strokeIndex: 1),
+        ]
+        let gesture = SwipeGesture(
+            path: [l, v, i, e],
+            strokeCount: 2,
+            strokePaths: [[l, v], [i, e]],
+            tracedLetters: "lvie",
+            observations: [],
+            evidence: SwipeEvidence(events: events, aimedLetters: "lvie")
+        )
+        let result = decode(gesture, layout: layout)
         #expect(result.words.first?.lowercased() == "live")
+    }
+
+    @Test func aFollowerBonusBreaksATieAndLosesToADecisivePath() {
+        let close = FollowerPrior.applying([
+            .init(word: "love", score: -1.0),
+            .init(word: "live", score: -1.2),
+        ], expected: ["live"])
+        #expect(close.first?.word == "live")
+        let decisive = FollowerPrior.applying([
+            .init(word: "love", score: -1.0),
+            .init(word: "live", score: -2.0),
+        ], expected: ["live"])
+        #expect(decisive.first?.word == "love")
+        #expect(FollowerPrior.weight < ReadingPolicy.exactLead)
+    }
+
+    @Test func perturbationSetKeepsCleanWordsAndClassifiesTheRest() {
+        let harness = makeHarness()
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("Letter layout missing")
+            return
+        }
+        for word in ["the", "and", "live"] {
+            guard let gesture = exactSwipe(word, layout: layout) else {
+                Issue.record("Gesture missing")
+                continue
+            }
+            let sink = DecodeTraceSink()
+            let result = decode(gesture, layout: layout, trace: sink)
+            #expect(result.words.first?.lowercased() == word)
+            #expect(sink.trace.loss(expecting: word) == .none)
+        }
+        guard let the = exactSwipe("the", layout: layout) else {
+            Issue.record("Gesture missing")
+            return
+        }
+        let shifted = shifted(the, by: CGPoint(x: layout.keyWidth * 0.9, y: 0))
+        let sink = DecodeTraceSink()
+        let result = decode(shifted, layout: layout, trace: sink)
+        #expect(!sink.trace.aimedLetters.isEmpty)
+        let loss = sink.trace.loss(expecting: "the")
+        if result.words.first?.lowercased() == "the" {
+            #expect(loss == .none)
+        } else if (sink.trace.beamWords + sink.trace.readings).contains(where: { $0.lowercased() == "the" }) {
+            #expect(loss == .rank)
+        } else {
+            #expect(loss == .recall)
+        }
+        #expect(DecodeTrace().loss(expecting: "hello", joinedWrong: true) == .boundary)
+        #expect(DecodeTrace().loss(expecting: "hello", misclassified: true) == .classification)
+    }
+
+    @Test func learningHasAFileWithoutFullAccess() {
+        #expect(LearningDirectory.fileURL(named: "habit-memory.json") != nil)
     }
 
     @Test func aCommonPrefixOutranksARarerOne() {
@@ -1497,7 +1609,8 @@ struct SwipeTypingTests {
         _ gesture: SwipeGesture,
         layout: LetterLayout,
         expected: [String] = [],
-        habits: [String: Double] = [:]
+        habits: [String: Double] = [:],
+        trace: DecodeTraceSink? = nil
     ) -> DecodeResult {
         var score = PathScore()
         return AlignmentSearch.decode(
@@ -1509,7 +1622,25 @@ struct SwipeTypingTests {
             costs: .standard,
             expected: expected,
             habits: habits,
+            trace: trace,
             pathScore: &score
+        )
+    }
+
+    private func shifted(_ gesture: SwipeGesture, by delta: CGPoint) -> SwipeGesture {
+        var events = gesture.evidence.events
+        for index in events.indices {
+            events[index].point.x += delta.x
+            events[index].point.y += delta.y
+        }
+        let move: (CGPoint) -> CGPoint = { CGPoint(x: $0.x + delta.x, y: $0.y + delta.y) }
+        return SwipeGesture(
+            path: gesture.path.map(move),
+            strokeCount: gesture.strokeCount,
+            strokePaths: gesture.strokePaths.map { $0.map(move) },
+            tracedLetters: gesture.tracedLetters,
+            observations: gesture.observations,
+            evidence: SwipeEvidence(events: events, aimedLetters: gesture.evidence.aimedLetters)
         )
     }
 
@@ -1920,10 +2051,7 @@ struct SwipeTypingTests {
             evidence: SwipeEvidence(events: events, aimedLetters: "caxtyz")
         )
         let result = decode(gesture, layout: layout)
-        #expect(
-            result.words.contains { $0.lowercased() == "cat" },
-            Comment(rawValue: result.words.joined(separator: ", "))
-        )
+        #expect(result.words.contains { $0.lowercased() == "cat" })
     }
 
     @Test func tappingAPreviewReadingCommitsThatWord() async throws {
@@ -2032,18 +2160,18 @@ struct SwipeTypingTests {
         ])
         #expect(language.preferringFollowers(in: once).words.first == "quit")
 
-        for _ in 0..<3 {
+        for _ in 0..<2 {
             language.noteCommitted("quick")
             language.noteCommitted("the")
         }
         let wider = DecodeResult(readings: [
             .init(word: "quit", score: -1),
-            .init(word: "quick", score: -1.5),
+            .init(word: "quick", score: -1.3),
         ])
         #expect(language.preferringFollowers(in: wider).words.first == "quick")
         let clear = DecodeResult(readings: [
             .init(word: "quit", score: -1),
-            .init(word: "quick", score: -2),
+            .init(word: "quick", score: -3.5),
         ])
         #expect(language.preferringFollowers(in: clear).words.first == "quit")
 
@@ -2073,6 +2201,42 @@ struct SwipeTypingTests {
         #expect(language.preferringFollowers(in: openerClear).words.first == "quit")
     }
 
+    @Test func aFamiliarWordLeadsAPlausibleSwipeAndAClearPathStays() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("hello")
+        language.noteCommitted("nimbus")
+        language.noteCommitted("from")
+        language.noteCommitted("nimbus")
+        language.noteCommitted("the")
+        language.noteCommitted("nimbus")
+        language.noteCommitted("said")
+        let close = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "nimbus", score: -2.2),
+        ])
+        #expect(language.preferringFollowers(in: close).words.first == "nimbus")
+        let clear = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "nimbus", score: -3.5),
+        ])
+        #expect(language.preferringFollowers(in: clear).words.first == "quit")
+
+        language.noteSentenceEnded()
+        #expect(language.preferringFollowers(in: close).words.first == "quit")
+    }
+
+    @Test func aStoredNameKeepsItsCapitalAndAnInteriorCapitalSkipsSentenceShift() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.noteCommitted("Alex", display: "Alex")
+        #expect(language.presenting("alex", shift: .off) == "Alex")
+        #expect(language.presenting("alex", shift: .once) == "Alex")
+        language.noteCommitted("iPhone", display: "iPhone")
+        #expect(language.presenting("iphone", shift: .once) == "iPhone")
+        #expect(language.presenting("iphone", shift: .locked) == "IPHONE")
+        language.noteCommitted("Hello")
+        #expect(language.presenting("hello", shift: .off) == "hello")
+    }
+
     @Test func aSwappedUnknownWordJoinsTheNextDecode() {
         let language = LanguageModel(lexicon: TestLexicon.shared)
         language.isLearningEnabled = true
@@ -2099,6 +2263,53 @@ struct SwipeTypingTests {
         }
         let outcome = language.sequenceDecode(observations, layout: layout)
         #expect(outcome.result.words.contains { $0.lowercased() == "zorbly" })
+    }
+
+    @Test func aReversalDropsTheLastLetterAndABounceDoesNot() {
+        let harness = makeHarness()
+        let letters = ["t", "y", "u"]
+        let points = letters.map { harness.point(for: $0) }
+        var stroke = StrokeBuffer(start: StrokePoint(location: points[0], time: 0))
+        stroke.arrive("t", at: points[0], touch: points[0], time: 0)
+        stroke.append(StrokePoint(location: points[1], time: 0.05))
+        stroke.arrive("y", at: points[1], touch: points[1], time: 0.05)
+        stroke.append(StrokePoint(location: points[2], time: 0.1))
+        stroke.arrive("u", at: points[2], touch: points[2], time: 0.1)
+        let bounce = CGPoint(x: points[2].x - 12, y: points[2].y)
+        stroke.append(StrokePoint(location: bounce, time: 0.12))
+        #expect(stroke.arrivals.map(\.letter).joined() == "tyu")
+        let dx = points[1].x - points[2].x
+        let dy = points[1].y - points[2].y
+        let span = max(hypot(dx, dy), 1)
+        let pulled = CGPoint(x: bounce.x + dx / span * 36, y: bounce.y + dy / span * 36)
+        stroke.append(StrokePoint(location: pulled, time: 0.2))
+        #expect(stroke.arrivals.map(\.letter).joined() == "ty", "span \(span)")
+    }
+
+    @Test func anEarlierWordCanBeReplacedWithoutMovingTheCaret() {
+        let document = InMemoryTextDocument(text: "hello wrong again")
+        let editor = TextEditor(document: document)
+        let words = TextBoundary.earlierWords(before: editor.contextBefore)
+        #expect(words.map(\.text) == ["hello", "wrong", "again"])
+        #expect(editor.replaceEarlierWord(words[1], with: "right"))
+        #expect(document.text == "hello right again")
+        #expect(document.before.hasSuffix("again"))
+    }
+
+    @Test func moreOftenMakesAWordFamiliarAndLessOftenWalksItBack() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.moreOften("nimbus")
+        let close = DecodeResult(readings: [
+            .init(word: "quit", score: -1),
+            .init(word: "nimbus", score: -2.2),
+        ])
+        language.noteCommitted("said")
+        #expect(language.preferringFollowers(in: close).words.first == "nimbus")
+        language.lessOften("nimbus")
+        language.lessOften("nimbus")
+        language.lessOften("nimbus")
+        #expect(language.preferringFollowers(in: close).words.first == "quit")
+        #expect(language.useCount(of: "nimbus") < WordContext.familiarUses)
     }
 }
 

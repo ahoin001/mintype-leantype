@@ -65,6 +65,31 @@ final class DockView: UIView {
         set { suggestions.onBan = newValue }
     }
 
+    var onMoreOften: ((String) -> Void)? {
+        get { suggestions.onMoreOften }
+        set { suggestions.onMoreOften = newValue }
+    }
+
+    var onLessOften: ((String) -> Void)? {
+        get { suggestions.onLessOften }
+        set { suggestions.onLessOften = newValue }
+    }
+
+    var useCount: ((String) -> Int)? {
+        get { suggestions.useCount }
+        set { suggestions.useCount = newValue }
+    }
+
+    var historyChoices: ((String) -> [String])? {
+        get { suggestions.historyChoices }
+        set { suggestions.historyChoices = newValue }
+    }
+
+    var onReplaceHistory: ((Int, String) -> Void)? {
+        get { suggestions.onReplaceHistory }
+        set { suggestions.onReplaceHistory = newValue }
+    }
+
     /// A tap on the wordmark. Opens the delete-tap choice.
     var onWordmarkTap: (() -> Void)?
 

@@ -25,7 +25,7 @@ public struct AppGroupRejectionStore: RejectionStore {
     private let file: CodableFileStore<[RejectedCorrection]>
 
     public init(fileName: String = "RejectedCorrections.json") {
-        file = CodableFileStore { SharedContainer.fileURL(named: fileName) }
+        file = CodableFileStore { LearningDirectory.fileURL(named: fileName) }
     }
 
     public func load() -> [RejectedCorrection] {

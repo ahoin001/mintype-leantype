@@ -21,10 +21,34 @@ struct AlignmentCosts: Sendable {
     var neighborRadius: CGFloat = 1.5
     var neighborLimit: Int = 6
     var resultLimit: Int = 4
+    /// Cost per second of reading a later chain before an earlier one. It saturates.
+    var inversionRate: Double = 2.4
+    var inversionCap: Double = 1.6
+    /// One letter the finger never touched. Above `ReadingPolicy.exactLead`.
+    var omissionCost: Double = 1.15
+    /// Two adjacent letters inside one chain, swapped. Above `ReadingPolicy.exactLead`.
+    var transposeCost: Double = 1.15
+    /// Set on the recovery pass. The first pass never inserts or transposes.
+    var allowsEdits: Bool = false
+    /// Set on the recovery pass so a poor shape is a penalty instead of a drop.
+    var keepWeakFits: Bool = false
     /// A preview below this is withdrawn once the path has grown past it.
     static let previewFloor = -15.0
+    /// A first result at or below this is weak enough to run the recovery pass.
+    static let weakScore = -6.0
 
     static let standard = AlignmentCosts()
+
+    /// The same search, looking farther, and allowed one omission and one transposition.
+    static var recovery: AlignmentCosts {
+        var costs = AlignmentCosts()
+        costs.neighborLimit = 10
+        costs.neighborRadius = 2.5
+        costs.beamWidth = 48
+        costs.allowsEdits = true
+        costs.keepWeakFits = true
+        return costs
+    }
 
     /// Adjacent events from different fingers inside this window may be read in either order.
     /// The penalty shrinks as the gap shrinks.
@@ -46,6 +70,7 @@ enum AlignmentSearch {
         costs: AlignmentCosts,
         expected: [String] = [],
         habits: [String: Double] = [:],
+        trace: DecodeTraceSink? = nil,
         pathScore: inout PathScore
     ) -> DecodeResult {
         let raw = gesture.evidence.events.isEmpty
@@ -55,23 +80,55 @@ enum AlignmentSearch {
         guard !events.isEmpty else { return .empty }
         let steps = StrokeChannel.steps(from: events, keyWidth: layout.keyWidth, keyHeight: layout.keyHeight)
         let crossingScale = crossingScale(of: events)
+        let chains = ThumbChains.make(steps)
+        let aimed = gesture.evidence.aimedLetters.isEmpty ? gesture.tracedLetters : gesture.evidence.aimedLetters
+        trace?.trace.aimedLetters = aimed
 
         var readings: [DecodeResult.Reading] = []
-        for order in orders(of: steps, costs: costs) {
-            let penalty = orderPenalty(order, costs: costs)
-            let ranked = beam(
-                order,
+        if costs.allowsEdits {
+            readings = beam(
+                chains,
                 layout: layout,
                 lexicon: lexicon,
                 personal: personal,
                 bigram: bigram,
                 costs: costs,
                 habits: habits,
+                expected: expected,
                 crossingScale: crossingScale
             )
-                .map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
-            readings = merge(readings, ranked)
+        } else {
+            for order in chainOrders(of: steps, costs: costs) {
+                let penalty = orderPenalty(order, costs: costs)
+                let ranked = linearBeam(
+                    order,
+                    layout: layout,
+                    lexicon: lexicon,
+                    personal: personal,
+                    bigram: bigram,
+                    costs: costs,
+                    habits: habits,
+                    crossingScale: crossingScale
+                ).map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
+                readings = merge(readings, ranked)
+            }
+            let leader = readings.first?.score ?? -.infinity
+            if readings.isEmpty || leader <= AlignmentCosts.weakScore {
+                let chained = beam(
+                    chains,
+                    layout: layout,
+                    lexicon: lexicon,
+                    personal: personal,
+                    bigram: bigram,
+                    costs: costs,
+                    habits: habits,
+                    expected: expected,
+                    crossingScale: crossingScale
+                )
+                readings = merge(chained, readings)
+            }
         }
+        trace?.trace.beamWords = readings.map(\.word)
         readings = rescore(readings, gesture: gesture, layout: layout, costs: costs, pathScore: &pathScore)
         readings = addingExpected(
             readings,
@@ -94,60 +151,46 @@ enum AlignmentSearch {
             habits: habits,
             pathScore: &pathScore
         )
-        let aimed = gesture.evidence.aimedLetters.isEmpty ? gesture.tracedLetters : gesture.evidence.aimedLetters
-        return ReadingPolicy.apply(
+        readings = FollowerPrior.applying(readings, expected: expected)
+        let result = ReadingPolicy.apply(
             DecodeResult(readings: readings),
             aimed: aimed,
             habits: habits,
             limit: costs.resultLimit
         )
+        trace?.trace.readings = result.readings.map(\.word)
+        guard !costs.allowsEdits, isWeak(result, aimed: aimed) else { return result }
+        trace?.trace.recovered = true
+        var wide = AlignmentCosts.recovery
+        wide.swapWindow = costs.swapWindow
+        let recovered = decode(
+            gesture,
+            layout: layout,
+            lexicon: lexicon,
+            personal: personal,
+            bigram: bigram,
+            costs: wide,
+            expected: expected,
+            habits: habits,
+            trace: trace,
+            pathScore: &pathScore
+        )
+        let combined = ReadingPolicy.apply(
+            DecodeResult(readings: merge(result.readings, recovered.readings)),
+            aimed: aimed,
+            habits: habits,
+            limit: costs.resultLimit
+        )
+        trace?.trace.readings = combined.readings.map(\.word)
+        return combined
     }
 
-    // MARK: - Order
-
-    /// Time order, plus a few adjacent swaps of different fingers that landed close together.
-    private static func orders(of steps: [StrokeChannel.Step], costs: AlignmentCosts) -> [[StrokeChannel.Step]] {
-        guard steps.count >= 2, steps.count <= 18 else { return [steps] }
-        var indexes: [[Int]] = [Array(steps.indices)]
-        var seen: Set<String> = [key(indexes[0])]
-        var cursor = 0
-        while cursor < indexes.count, indexes.count < 6 {
-            let order = indexes[cursor]
-            cursor += 1
-            for index in 0..<(order.count - 1) {
-                let left = steps[order[index]]
-                let right = steps[order[index + 1]]
-                guard canSwap(left, right, costs: costs) else { continue }
-                var swapped = order
-                swapped.swapAt(index, index + 1)
-                let name = key(swapped)
-                guard seen.insert(name).inserted else { continue }
-                indexes.append(swapped)
-                if indexes.count == 6 { break }
-            }
-        }
-        return indexes.map { order in order.map { steps[$0] } }
-    }
-
-    /// What this order paid to read two different fingers out of time. Time order pays nothing.
-    private static func orderPenalty(_ steps: [StrokeChannel.Step], costs: AlignmentCosts) -> Double {
-        var penalty = 0.0
-        for index in 1..<steps.count {
-            guard steps[index].time < steps[index - 1].time else { continue }
-            penalty += costs.transpositionPenalty(gap: steps[index - 1].time - steps[index].time)
-        }
-        return penalty
-    }
-
-    private static func canSwap(_ left: StrokeChannel.Step, _ right: StrokeChannel.Step, costs: AlignmentCosts) -> Bool {
-        guard left.strokeIndex != right.strokeIndex else { return false }
-        let tapCrossesChannel = (left.event?.role == .tap && right.isChannel) || (right.event?.role == .tap && left.isChannel)
-        let window = tapCrossesChannel ? costs.swapWindow * 3 : costs.swapWindow
-        guard abs(left.time - right.time) <= window else { return false }
-        // A tap may slide across a graze. It stays before a corner that landed after it.
-        if left.event?.role == .tap, left.time < right.time, right.event != nil { return false }
-        if right.event?.role == .tap, right.time < left.time, left.event != nil { return false }
-        return true
+    /// A poor score, or a tie whose leader is not the aimed spelling.
+    /// A solid aimed hit, even a close one, does not come back through here.
+    private static func isWeak(_ result: DecodeResult, aimed: String) -> Bool {
+        guard let top = result.readings.first else { return true }
+        if top.score <= AlignmentCosts.weakScore { return true }
+        return result.isUnsure && !WordJoiner.aligns(top.word, traced: aimed)
     }
 
     /// Four bits per slot. Moving strokes use slots 0...3. Taps, whose stroke indexes are
@@ -178,10 +221,6 @@ enum AlignmentSearch {
         }
     }
 
-    private static func key(_ order: [Int]) -> String {
-        order.map(String.init).joined(separator: ",")
-    }
-
     // MARK: - Beam
 
     private struct Hypothesis {
@@ -192,6 +231,13 @@ enum AlignmentSearch {
         var lastY: CGFloat
         var placed: Bool
         var lastStroke: Int?
+        var cursors: [UInt8]
+        var omitted: Bool
+        /// The chain whose skipped step must be read next, after a within-chain swap.
+        var debtChain: Int?
+        var debtIndex: UInt8?
+        /// This step ignored an anchor. Kept in the beam even when matching it scores higher.
+        var justSkipped: Bool = false
     }
 
     private struct Scored {
@@ -204,7 +250,52 @@ enum AlignmentSearch {
         var score: Double
     }
 
-    private static func beam(
+    /// Time order, plus a few chain-legal swaps of fingers that landed close together.
+    /// Each order is its own walk, so a skip is not crowded out by the other chain.
+    /// There is no length cliff: a long gesture still tries the same few swaps.
+    private static func chainOrders(of steps: [StrokeChannel.Step], costs: AlignmentCosts) -> [[StrokeChannel.Step]] {
+        guard steps.count >= 2 else { return [steps] }
+        var indexes: [[Int]] = [Array(steps.indices)]
+        var seen: Set<String> = [indexes[0].map(String.init).joined(separator: ",")]
+        var cursor = 0
+        while cursor < indexes.count, indexes.count < 6 {
+            let order = indexes[cursor]
+            cursor += 1
+            for index in 0..<(order.count - 1) where indexes.count < 6 {
+                let left = steps[order[index]]
+                let right = steps[order[index + 1]]
+                guard canSwap(left, right, costs: costs) else { continue }
+                var swapped = order
+                swapped.swapAt(index, index + 1)
+                let name = swapped.map(String.init).joined(separator: ",")
+                guard seen.insert(name).inserted else { continue }
+                indexes.append(swapped)
+            }
+        }
+        return indexes.map { order in order.map { steps[$0] } }
+    }
+
+    private static func orderPenalty(_ steps: [StrokeChannel.Step], costs: AlignmentCosts) -> Double {
+        var penalty = 0.0
+        for index in 1..<steps.count {
+            guard steps[index].time + 0.000_1 < steps[index - 1].time else { continue }
+            penalty += costs.transpositionPenalty(gap: steps[index - 1].time - steps[index].time)
+        }
+        return penalty
+    }
+
+    private static func canSwap(_ left: StrokeChannel.Step, _ right: StrokeChannel.Step, costs: AlignmentCosts) -> Bool {
+        guard left.strokeIndex != right.strokeIndex else { return false }
+        let tapCrossesChannel = (left.event?.role == .tap && right.isChannel) || (right.event?.role == .tap && left.isChannel)
+        let window = tapCrossesChannel ? costs.swapWindow * 3 : costs.swapWindow
+        guard abs(left.time - right.time) <= window else { return false }
+        if left.event?.role == .tap, left.time < right.time, right.event != nil { return false }
+        if right.event?.role == .tap, right.time < left.time, left.event != nil { return false }
+        return true
+    }
+
+    /// One order, walked from first step to last. Skips stay in the beam because nothing else is competing for it.
+    private static func linearBeam(
         _ steps: [StrokeChannel.Step],
         layout: LetterLayout,
         lexicon: MappedLexicon,
@@ -215,18 +306,29 @@ enum AlignmentSearch {
         crossingScale: Double
     ) -> [DecodeResult.Reading] {
         let habitBuckets = habitBuckets(from: habits)
-        var beam = [Hypothesis(letters: [], score: 0, skips: SkipCounts(), lastX: 0, lastY: 0, placed: false, lastStroke: nil)]
-        for step in steps {
+        var walked = [Hypothesis(
+            letters: [],
+            score: 0,
+            skips: SkipCounts(),
+            lastX: 0,
+            lastY: 0,
+            placed: false,
+            lastStroke: nil,
+            cursors: [],
+            omitted: false,
+            debtChain: nil,
+            debtIndex: nil,
+            justSkipped: false
+        )]
+        for (offset, step) in steps.enumerated() {
             var next: [Hypothesis] = []
-            next.reserveCapacity(beam.count * (costs.neighborLimit + 2))
             if let event = step.event {
                 let letters = candidates(for: event, layout: layout, costs: costs)
-                for hypothesis in beam {
+                for hypothesis in walked {
                     for letter in letters {
                         if let grown = extend(hypothesis, with: letter, times: 1, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
                             next.append(grown)
                         }
-                        // A pause is the letter itself. Doubling it would turn a stop on R into "rr".
                         if event.dwell < GestureComposer.dwellDuration,
                            let doubled = extend(hypothesis, with: letter, times: 2, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
                             next.append(doubled)
@@ -237,7 +339,7 @@ enum AlignmentSearch {
                     }
                 }
             } else {
-                for hypothesis in beam {
+                for hypothesis in walked {
                     next.append(skipChannel(hypothesis, costs: costs, crossingScale: crossingScale))
                     var seen = Set<UInt8>()
                     for event in step.channel {
@@ -250,12 +352,12 @@ enum AlignmentSearch {
                     }
                 }
             }
-            beam = prune(next, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
-            if beam.isEmpty { return [] }
+            let width = offset == steps.count - 1 ? costs.beamWidth * 3 : costs.beamWidth
+            walked = prune(next, width: width, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+            if walked.isEmpty { return [] }
         }
-
         var scored: [Scored] = []
-        for hypothesis in beam {
+        for hypothesis in walked {
             consider(hypothesis, lexicon: lexicon, personal: personal, costs: costs, habits: habits, into: &scored)
         }
         scored.sort { $0.score > $1.score }
@@ -272,6 +374,163 @@ enum AlignmentSearch {
             if readings.count == costs.resultLimit * 2 { break }
         }
         return readings
+    }
+
+    private static func beam(
+        _ chains: ThumbChains,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram,
+        costs: AlignmentCosts,
+        habits: [String: Double],
+        expected: [String],
+        crossingScale: Double
+    ) -> [DecodeResult.Reading] {
+        let habitBuckets = habitBuckets(from: habits)
+        guard !chains.chains.isEmpty else { return [] }
+        let start = Hypothesis(
+            letters: [],
+            score: 0,
+            skips: SkipCounts(),
+            lastX: 0,
+            lastY: 0,
+            placed: false,
+            lastStroke: nil,
+            cursors: Array(repeating: 0, count: chains.chains.count),
+            omitted: false,
+            debtChain: nil,
+            debtIndex: nil,
+            justSkipped: false
+        )
+        // The on-time beam is one chain walked in order, so a skip stays in the budget.
+        // A chain read early lives in the other beam and does not crowd that walk out.
+        var timely = [start]
+        var late: [Hypothesis] = []
+        for _ in 0..<chains.eventCount {
+            var nextTimely: [Hypothesis] = []
+            var nextLate: [Hypothesis] = []
+            let parents = timely.map { ($0, true) } + late.map { ($0, false) }
+            for (hypothesis, parentIsTimely) in parents {
+                func keep(_ items: [Hypothesis], onTime: Bool) {
+                    if parentIsTimely && onTime {
+                        nextTimely.append(contentsOf: items)
+                    } else {
+                        nextLate.append(contentsOf: items)
+                    }
+                }
+                if let debtChain = hypothesis.debtChain, let debtIndex = hypothesis.debtIndex,
+                   chains.chains.indices.contains(debtChain),
+                   Int(debtIndex) < chains.chains[debtChain].count {
+                    let step = chains.chains[debtChain][Int(debtIndex)]
+                    var cleared = hypothesis
+                    cleared.debtChain = nil
+                    cleared.debtIndex = nil
+                    keep(expansions(
+                        of: cleared,
+                        step: step,
+                        layout: layout,
+                        lexicon: lexicon,
+                        personal: personal,
+                        bigram: bigram,
+                        costs: costs,
+                        crossingScale: crossingScale,
+                        inversion: 0
+                    ), onTime: true)
+                    continue
+                }
+                if costs.allowsEdits, !hypothesis.omitted {
+                    keep(omissions(
+                        from: hypothesis,
+                        chains: chains,
+                        layout: layout,
+                        lexicon: lexicon,
+                        personal: personal,
+                        bigram: bigram,
+                        costs: costs
+                    ), onTime: true)
+                }
+                let earliest = earliestTime(hypothesis, chains: chains)
+                let tapFence = pendingTapTime(hypothesis, chains: chains)
+                for index in chains.chains.indices {
+                    let cursor = Int(hypothesis.cursors[index])
+                    guard cursor < chains.chains[index].count else { continue }
+                    let step = chains.chains[index][cursor]
+                    // A tap already down is a letter the user placed. A later stroke
+                    // does not jump ahead of it.
+                    if step.event?.isTap != true, let tapFence, step.time > tapFence + 0.000_1 {
+                        continue
+                    }
+                    var advanced = hypothesis
+                    advanced.cursors[index] &+= 1
+                    let inversion = inversionCost(of: step.time, after: earliest, costs: costs)
+                    let onTime = step.time <= earliest + 0.000_1
+                    keep(expansions(
+                        of: advanced,
+                        step: step,
+                        layout: layout,
+                        lexicon: lexicon,
+                        personal: personal,
+                        bigram: bigram,
+                        costs: costs,
+                        crossingScale: crossingScale,
+                        inversion: inversion,
+                        neighbors: onTime
+                    ), onTime: onTime)
+                    let following = cursor + 1
+                    if costs.allowsEdits, hypothesis.debtChain == nil, following < chains.chains[index].count,
+                       chains.chains[index][cursor].event != nil, chains.chains[index][following].event != nil {
+                        let taken = chains.chains[index][following]
+                        var swapped = hypothesis
+                        swapped.cursors[index] = UInt8(min(following + 1, Int(UInt8.max)))
+                        swapped.debtChain = index
+                        swapped.debtIndex = UInt8(cursor)
+                        swapped.score -= costs.transposeCost
+                        keep(expansions(
+                            of: swapped,
+                            step: taken,
+                            layout: layout,
+                            lexicon: lexicon,
+                            personal: personal,
+                            bigram: bigram,
+                            costs: costs,
+                            crossingScale: crossingScale,
+                            inversion: inversionCost(of: taken.time, after: earliest, costs: costs)
+                        ), onTime: false)
+                    }
+                }
+            }
+            timely = keepingSkips(in: nextTimely, pruned: prune(nextTimely, width: costs.beamWidth, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets), lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+            late = keepingSkips(in: nextLate, pruned: prune(nextLate, width: costs.beamWidth, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets), lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+            if timely.isEmpty && late.isEmpty { return [] }
+        }
+
+        var scored: [Scored] = []
+        for hypothesis in timely + late {
+            consider(hypothesis, lexicon: lexicon, personal: personal, costs: costs, habits: habits, into: &scored)
+        }
+        scored.sort { $0.score > $1.score }
+        var seen = Set<String>()
+        var readings: [DecodeResult.Reading] = []
+        for entry in scored {
+            let word: String = switch entry.source {
+            case let .dictionary(index): lexicon.display(at: index)
+            case let .personal(offset): personal[offset].display
+            }
+            if seen.insert(word.lowercased()).inserted {
+                readings.append(DecodeResult.Reading(word: word, score: entry.score))
+            }
+            if readings.count == costs.resultLimit * 2 { break }
+        }
+        return readings
+    }
+
+    /// The letter a later chain actually hit. Neighbors stay on the chain that is on time,
+    /// so a reorder does not crowd the skips out of the beam.
+    private static func aimedLetter(of event: SwipeEvent) -> [UInt8] {
+        guard let traced = event.letter.lowercased().utf8.first,
+              (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(traced) else { return [] }
+        return [traced]
     }
 
     private static func candidates(for event: SwipeEvent, layout: LetterLayout, costs: AlignmentCosts) -> [UInt8] {
@@ -334,8 +593,175 @@ enum AlignmentSearch {
             lastX: center.x,
             lastY: center.y,
             placed: true,
-            lastStroke: event.strokeIndex
+            lastStroke: event.strokeIndex,
+            cursors: hypothesis.cursors,
+            omitted: hypothesis.omitted,
+            debtChain: hypothesis.debtChain,
+            debtIndex: hypothesis.debtIndex,
+            justSkipped: false
         )
+    }
+
+    /// Match or skip one step. `inversion` is what this chain paid to be read out of time.
+    private static func expansions(
+        of hypothesis: Hypothesis,
+        step: StrokeChannel.Step,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram,
+        costs: AlignmentCosts,
+        crossingScale: Double,
+        inversion: Double,
+        neighbors: Bool = true
+    ) -> [Hypothesis] {
+        var results: [Hypothesis] = []
+        if let event = step.event {
+            let letters = neighbors
+                ? candidates(for: event, layout: layout, costs: costs)
+                : aimedLetter(of: event)
+            for letter in letters {
+                if let grown = extend(hypothesis, with: letter, times: 1, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
+                    var grown = grown
+                    grown.score -= inversion
+                    results.append(grown)
+                }
+                if event.dwell < GestureComposer.dwellDuration,
+                   let doubled = extend(hypothesis, with: letter, times: 2, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
+                    var doubled = doubled
+                    doubled.score -= inversion
+                    results.append(doubled)
+                }
+            }
+            if let skipped = skip(hypothesis, event: event, layout: layout, costs: costs, crossingScale: crossingScale) {
+                var skipped = skipped
+                skipped.score -= inversion
+                results.append(skipped)
+            }
+        } else {
+            var skipped = skipChannel(hypothesis, costs: costs, crossingScale: crossingScale)
+            skipped.score -= inversion
+            results.append(skipped)
+            var seen = Set<UInt8>()
+            for event in step.channel {
+                guard let letter = event.letter.lowercased().utf8.first,
+                      (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(letter),
+                      seen.insert(letter).inserted else { continue }
+                if let grown = extend(hypothesis, with: letter, times: 1, event: event, layout: layout, lexicon: lexicon, personal: personal, bigram: bigram, costs: costs) {
+                    var grown = grown
+                    grown.score -= inversion
+                    results.append(grown)
+                }
+            }
+        }
+        return results
+    }
+
+    /// One letter near the next key, charged as a miss rather than a touch.
+    private static func omissions(
+        from hypothesis: Hypothesis,
+        chains: ThumbChains,
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram,
+        costs: AlignmentCosts
+    ) -> [Hypothesis] {
+        var seeds: [UInt8] = []
+        for index in chains.chains.indices {
+            let cursor = Int(hypothesis.cursors[index])
+            guard cursor < chains.chains[index].count, let event = chains.chains[index][cursor].event else { continue }
+            for letter in candidates(for: event, layout: layout, costs: costs) where !seeds.contains(letter) {
+                seeds.append(letter)
+                if seeds.count == 4 { break }
+            }
+            if seeds.count == 4 { break }
+        }
+        let pending = pendingLetters(hypothesis, chains: chains)
+        return seeds.compactMap { letter in
+            guard !pending.contains(letter) else { return nil }
+            var letters = hypothesis.letters
+            letters.append(letter)
+            guard prefixExists(letters, lexicon: lexicon, personal: personal) else { return nil }
+            var score = hypothesis.score - omissionCost(of: letter, costs: costs)
+            if hypothesis.placed, let previous = hypothesis.letters.last {
+                score += costs.bigramWeight * bigram.logProbability(from: previous, to: letter)
+            }
+            return Hypothesis(
+                letters: letters,
+                score: score,
+                skips: hypothesis.skips,
+                lastX: hypothesis.lastX,
+                lastY: hypothesis.lastY,
+                placed: true,
+                lastStroke: hypothesis.lastStroke,
+                cursors: hypothesis.cursors,
+                omitted: true,
+                debtChain: hypothesis.debtChain,
+                debtIndex: hypothesis.debtIndex,
+                justSkipped: false
+            )
+        }
+    }
+
+    /// A vowel is the cheaper omission. Both stay above the exact-lead window.
+    private static func omissionCost(of letter: UInt8, costs: AlignmentCosts) -> Double {
+        switch letter {
+        case UInt8(ascii: "a"), UInt8(ascii: "e"), UInt8(ascii: "i"), UInt8(ascii: "o"), UInt8(ascii: "u"):
+            return costs.omissionCost
+        default:
+            return costs.omissionCost + 0.25
+        }
+    }
+
+    /// The earliest tap that this hypothesis has not consumed yet.
+    private static func pendingTapTime(_ hypothesis: Hypothesis, chains: ThumbChains) -> Double? {
+        var earliest: Double?
+        for index in chains.chains.indices {
+            let cursor = Int(hypothesis.cursors[index])
+            guard cursor < chains.chains[index].count, chains.chains[index][cursor].event?.isTap == true else { continue }
+            let time = chains.chains[index][cursor].time
+            if earliest == nil || time < earliest! { earliest = time }
+        }
+        return earliest
+    }
+
+    /// Letters a still-pending event is already going to type. An omission is a letter
+    /// the finger missed, so it cannot be one of these.
+    private static func pendingLetters(_ hypothesis: Hypothesis, chains: ThumbChains) -> Set<UInt8> {
+        var pending = Set<UInt8>()
+        for index in chains.chains.indices {
+            let cursor = Int(hypothesis.cursors[index])
+            guard cursor < chains.chains[index].count else { continue }
+            for step in chains.chains[index][cursor...] {
+                guard let letter = step.event?.letter.lowercased().utf8.first,
+                      (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(letter) else { continue }
+                pending.insert(letter)
+            }
+        }
+        return pending
+    }
+
+    private static func earliestTime(_ hypothesis: Hypothesis, chains: ThumbChains) -> Double {
+        var earliest = Double.greatestFiniteMagnitude
+        for index in chains.chains.indices {
+            let cursor = Int(hypothesis.cursors[index])
+            guard cursor < chains.chains[index].count else { continue }
+            earliest = min(earliest, chains.chains[index][cursor].time)
+        }
+        return earliest == .greatestFiniteMagnitude ? 0 : earliest
+    }
+
+    private static func inversionCost(of time: Double, after earliest: Double, costs: AlignmentCosts) -> Double {
+        let gap = time - earliest
+        guard gap > 0.000_1 else { return 0 }
+        return min(costs.inversionCap, costs.inversionRate * gap)
+    }
+
+    private static func accepts(fit: Double, costs: AlignmentCosts) -> Bool {
+        guard fit < 0 else { return false }
+        if costs.keepWeakFits { return true }
+        return fit > StrokeFit.miss
     }
 
     private static func skip(
@@ -351,6 +777,7 @@ enum AlignmentSearch {
             var skipped = hypothesis
             skipped.skips = hypothesis.skips.adding(event.strokeIndex)
             skipped.score -= costs.anchorSkip
+            skipped.justSkipped = true
             return skipped
         case .crossing:
             let closeness = max(0, 1 - Double(event.distanceToCenter / max(layout.keyWidth, 1)))
@@ -437,26 +864,56 @@ enum AlignmentSearch {
         }
     }
 
+    /// A skip is several points worse than taking the key, so a full beam drops it.
+    /// The few best skips stay anyway. That is how "cat" survives the keys around it.
+    private static func keepingSkips(
+        in produced: [Hypothesis],
+        pruned: [Hypothesis],
+        lexicon: MappedLexicon,
+        costs: AlignmentCosts,
+        habitBuckets: [[HabitKey]]
+    ) -> [Hypothesis] {
+        var kept = pruned
+        let rescued = produced.filter(\.justSkipped).sorted { lhs, rhs in
+            survival(lhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+                > survival(rhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
+        }.prefix(6)
+        for item in rescued {
+            let already = kept.contains { $0.letters == item.letters && $0.cursors == item.cursors && $0.debtIndex == item.debtIndex }
+            if !already { kept.append(item) }
+        }
+        return kept
+    }
+
     /// Keeps the best spatial score for each prefix, then the widest beam.
     /// The two-letter frequency prior only decides who survives. It is not stored on the
     /// hypothesis, so the final word frequency is added once, in `consider`.
     private static func prune(
         _ hypotheses: [Hypothesis],
+        width: Int,
         lexicon: MappedLexicon,
         costs: AlignmentCosts,
         habitBuckets: [[HabitKey]]
     ) -> [Hypothesis] {
-        var best: [String: Hypothesis] = [:]
-        best.reserveCapacity(hypotheses.count)
+        var grouped: [String: [Hypothesis]] = [:]
+        grouped.reserveCapacity(hypotheses.count)
         for hypothesis in hypotheses {
-            let key = String(decoding: hypothesis.letters, as: UTF8.self)
-            if let existing = best[key], existing.score >= hypothesis.score { continue }
-            best[key] = hypothesis
+            let letters = String(decoding: hypothesis.letters, as: UTF8.self)
+            var group = grouped[letters] ?? []
+            if let index = group.firstIndex(where: { $0.cursors == hypothesis.cursors && $0.debtChain == hypothesis.debtChain && $0.debtIndex == hypothesis.debtIndex }) {
+                if hypothesis.score > group[index].score { group[index] = hypothesis }
+            } else if group.count < 2 {
+                group.append(hypothesis)
+            } else if let worst = group.indices.min(by: { group[$0].score < group[$1].score }),
+                      hypothesis.score > group[worst].score {
+                group[worst] = hypothesis
+            }
+            grouped[letters] = group
         }
-        return best.values.sorted { lhs, rhs in
+        return grouped.values.flatMap { $0 }.sorted { lhs, rhs in
             survival(lhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
                 > survival(rhs, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
-        }.prefix(costs.beamWidth).map { $0 }
+        }.prefix(width).map { $0 }
     }
 
     private static func survival(
@@ -571,8 +1028,12 @@ enum AlignmentSearch {
         for reading in readings {
             let key = LexiconKey.make(reading.word)
             var score = reading.score
-            score += StrokeFit.score(key, gesture: gesture, layout: layout, pathScore: &pathScore)
-            score -= PathScore.lengthCost(gestureLength: totalLength, key: key, layout: layout, weight: costs.lengthWeight)
+            let fit = StrokeFit.score(key, gesture: gesture, layout: layout, pathScore: &pathScore)
+            score += fit
+            // A miss already says the curve does not explain the word. Length is not a second bill.
+            if fit > StrokeFit.miss {
+                score -= PathScore.lengthCost(gestureLength: totalLength, key: key, layout: layout, weight: costs.lengthWeight)
+            }
             adjusted.append(DecodeResult.Reading(word: reading.word, score: score))
         }
         adjusted.sort { $0.score > $1.score }
@@ -618,7 +1079,7 @@ enum AlignmentSearch {
             guard let known = knownWord(word, lexicon: lexicon, personal: personal) else { continue }
             let letters = LexiconKey.make(known.display)
             let fit = StrokeFit.score(letters, gesture: gesture, layout: layout, pathScore: &pathScore)
-            guard fit < 0, fit > -8 else { continue }
+            guard accepts(fit: fit, costs: costs) else { continue }
             let score = fit + costs.frequencyWeight * known.logCount + habitBonus(known.display, habits: habits)
             best[key] = DecodeResult.Reading(word: known.display, score: score)
         }
@@ -663,7 +1124,7 @@ enum AlignmentSearch {
         }
         guard !extra.isEmpty else { return readings }
         let tapped = gesture.evidence.events.contains { $0.role == .tap }
-        let cap = paths.count == 1 ? readings.map(\.score).max().map { $0 - DecodeResult.confidenceMargin - 0.01 } : nil
+        let cap = readings.map(\.score).max().map { $0 - DecodeResult.confidenceMargin - 0.01 }
         let leaderLocation: CGFloat? = {
             guard paths.count == 1, !tapped, let path = paths.first,
                   let leader = readings.max(by: { $0.score < $1.score }) else { return nil }
@@ -811,7 +1272,7 @@ enum AlignmentSearch {
         let key = known.display.lowercased()
         guard seen.insert(key).inserted else { return }
         let fit = StrokeFit.score(LexiconKey.make(known.display), gesture: gesture, layout: layout, pathScore: &pathScore)
-        guard fit < 0, fit > -8 else { return }
+        guard accepts(fit: fit, costs: costs) else { return }
         readings.append(DecodeResult.Reading(
             word: known.display,
             score: fit + costs.frequencyWeight * known.logCount
@@ -856,7 +1317,7 @@ enum AlignmentSearch {
               let rightFirst = right.first, let rightLast = right.last else { return [] }
         let maxLength = left.count + right.count + 2
         let fit = StrokeFit.anchorsFit(thumbs, layout: layout, pathScore: &pathScore)
-        guard fit < 0, fit > StrokeFit.miss else { return [] }
+        guard accepts(fit: fit, costs: costs) else { return [] }
         let ceiling = beamCeiling(readings, left: left, right: right, gesture: gesture, layout: layout, pathScore: &pathScore)
 
         var pairs: [(UInt8, UInt8)] = []
@@ -895,7 +1356,7 @@ enum AlignmentSearch {
         }
         for index in best.indices {
             let shaped = StrokeFit.score(LexiconKey.make(best[index].word), gesture: gesture, layout: layout, pathScore: &pathScore)
-            guard shaped < 0, shaped > StrokeFit.miss else { continue }
+            guard accepts(fit: shaped, costs: costs) else { continue }
             var score = shaped + costs.frequencyWeight * best[index].logCount - costs.lengthWeight * Double(best[index].spare)
             if let ceiling { score = min(score, ceiling - 0.01) }
             best[index].score = score
@@ -984,7 +1445,15 @@ enum ReadingPolicy {
             readings.insert(chosen, at: 0)
         }
         if readings.count > limit {
-            readings = Array(readings.prefix(limit))
+            // The bar shows `limit` words. A reading within one exact-lead of the last slot
+            // stays in the result, so a legal per-thumb skip is not dropped behind neighbors
+            // that merely sat closer. Anything further is cut.
+            let floor = readings[limit - 1].score - (exactLead + 0.15)
+            var kept = Array(readings.prefix(limit))
+            for extra in readings.dropFirst(limit) where extra.score >= floor {
+                kept.append(extra)
+            }
+            readings = kept
         }
         if letters.count > literalLimit,
            let top = readings.first,

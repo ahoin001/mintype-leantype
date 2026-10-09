@@ -2,7 +2,7 @@ import Foundation
 
 /// A word the user taught the keyboard by typing it.
 public struct LearnedWord: Codable, Hashable, Sendable {
-    public let word: String
+    public var word: String
     public var uses: Int
     public var lastUsed: Date
 
@@ -46,6 +46,10 @@ public struct PersonalLexicon: Sendable {
         learned[Self.storageKey(word)] != nil
     }
 
+    public func display(of word: some StringProtocol) -> String? {
+        learned[Self.storageKey(word)]?.word
+    }
+
     public func uses(of word: some StringProtocol) -> Int? {
         learned[Self.storageKey(word)]?.uses
     }
@@ -64,6 +68,16 @@ public struct PersonalLexicon: Sendable {
         return true
     }
 
+    /// Updates the stored spelling when this word is already learned. Returns whether it changed.
+    @discardableResult
+    public mutating func refreshDisplay(_ word: String) -> Bool {
+        let key = Self.storageKey(word)
+        guard var existing = learned[key], existing.word != word else { return false }
+        existing.word = word
+        learned[key] = existing
+        return true
+    }
+
     /// Drops one learned word. Other words stay.
     @discardableResult
     public mutating func forget(_ word: some StringProtocol) -> Bool {
@@ -72,19 +86,22 @@ public struct PersonalLexicon: Sendable {
 
     /// Records a use of `word`. Returns `true` if the list changed shape (a new word).
     @discardableResult
-    public mutating func learn(_ word: String, at date: Date) -> Bool {
+    public mutating func learn(_ word: String, at date: Date, display: String? = nil) -> Bool {
         let key = Self.storageKey(word)
         guard !key.isEmpty else { return false }
+        let shown = display?.trimmingCharacters(in: .whitespacesAndNewlines)
         if var existing = learned[key] {
             existing.uses += 1
             existing.lastUsed = date
+            if let shown, !shown.isEmpty { existing.word = shown }
             learned[key] = existing
             return false
         }
         if learned.count >= Self.capacity, let oldest = learned.min(by: { $0.value.lastUsed < $1.value.lastUsed }) {
             learned[oldest.key] = nil
         }
-        learned[key] = LearnedWord(word: word, lastUsed: date)
+        let spelling = (shown?.isEmpty == false ? shown : nil) ?? word
+        learned[key] = LearnedWord(word: spelling, lastUsed: date)
         return true
     }
 

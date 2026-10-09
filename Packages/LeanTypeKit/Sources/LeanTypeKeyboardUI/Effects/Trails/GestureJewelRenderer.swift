@@ -2,10 +2,12 @@ import LeanTypeCore
 import LeanTypeDesign
 import UIKit
 
-/// The ring, bead, and short trail for a delete scrub or the space-bar trackpad.
+/// The ring, bead, and short trail for a shift scrub or the space-bar trackpad.
 ///
-/// Same rule as a word swipe: the contact stays empty. These gestures travel sideways, so the
-/// ring sits one radius above the thumb. A display link runs only while a jewel is up.
+/// A delete scrub does not come here. It draws on the backspace key, because a ring above
+/// the finger has nothing to do with the key that is deleting. Same rule as a word swipe
+/// for the gestures that do: the contact stays empty, and the ring sits one radius above
+/// the thumb. A display link runs only while a jewel is up.
 @MainActor
 final class GestureJewelRenderer {
     static let lifetime: CFTimeInterval = 0.3

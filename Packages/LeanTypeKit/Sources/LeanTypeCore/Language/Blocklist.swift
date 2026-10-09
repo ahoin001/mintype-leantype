@@ -22,7 +22,7 @@ public struct AppGroupBlocklistStore: BlocklistStore {
     private let file: CodableFileStore<[BlockedSpelling]>
 
     public init(fileName: String = "BlockedWords.json") {
-        file = CodableFileStore { SharedContainer.fileURL(named: fileName) }
+        file = CodableFileStore { LearningDirectory.fileURL(named: fileName) }
     }
 
     public func load() -> [BlockedSpelling] {

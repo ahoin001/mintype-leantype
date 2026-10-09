@@ -26,7 +26,7 @@ public struct AppGroupWordContextStore: WordContextStore {
     private let file: CodableFileStore<[WordPair]>
 
     public init(fileName: String = "WordPairs.json") {
-        file = CodableFileStore { SharedContainer.fileURL(named: fileName) }
+        file = CodableFileStore { LearningDirectory.fileURL(named: fileName) }
     }
 
     public func load() -> [WordPair] {
@@ -45,10 +45,11 @@ public struct AppGroupWordContextStore: WordContextStore {
 @MainActor
 final class WordContext {
     static let capacity = 400
-    /// Uses before a personal pair may beat a shape that is a little further ahead.
-    static let familiarUses = 4
-    /// Still a tie, just wider than `DecodeResult.confidenceMargin`. A clear shape stays first.
-    static let familiarMargin = 0.7
+    /// Uses before a personal pair may lead a plausible swipe. One use still changes nothing.
+    static let familiarUses = 3
+    /// How far ahead the other reading may be. About 1.5 covers a common word's frequency
+    /// edge plus a small miss. A gap around 2.5 stays with the clearer path.
+    static let familiarMargin = 1.5
 
     /// Followers worth offering before this user has written the pair themselves.
     /// The first word in each list is the one to prefer when several are close.
@@ -267,6 +268,9 @@ final class WordContext {
             recent.removeFirst(recent.count - 2)
         }
     }
+
+    /// True after a word has been committed and before the next sentence starts.
+    var hasPrecedingWord: Bool { recent.last != nil }
 
     /// Drops the words just written. Learned pairs stay, so the next sentence can start fresh.
     func noteSentenceEnded() {

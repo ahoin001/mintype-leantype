@@ -98,7 +98,6 @@ public final class KeyboardView: UIView {
             guard let self else { return }
             engine.handle(samples)
             effects.trails.ingest(samples, strokes: engine.state.interaction.strokes)
-            effects.jewel.ingest(engine.state.interaction.jewel)
         }
         keysView.onAccessibilityActivate = { [weak self] id in
             self?.engine.activateKey(id)
@@ -117,6 +116,21 @@ public final class KeyboardView: UIView {
         }
         dock.onBanWord = { [weak self] word in
             self?.engine.banWord(word)
+        }
+        dock.onMoreOften = { [weak self] word in
+            self?.engine.moreOften(word)
+        }
+        dock.onLessOften = { [weak self] word in
+            self?.engine.lessOften(word)
+        }
+        dock.useCount = { [weak self] word in
+            self?.engine.language?.useCount(of: word) ?? 0
+        }
+        dock.historyChoices = { [weak self] word in
+            self?.engine.historyChoices(for: word) ?? []
+        }
+        dock.onReplaceHistory = { [weak self] index, word in
+            self?.engine.replaceHistoryWord(at: index, with: word)
         }
         dock.onWordmarkTap = { [weak self] in
             self?.dock.toggleDeleteMenu()
@@ -333,8 +347,32 @@ extension KeyboardView: KeyboardEngineDelegate {
 
     public func keyboardEngine(_: KeyboardEngine, didUpdateState state: KeyboardViewState) {
         keysView.apply(state: state)
+        routeGestureMark(state.interaction.jewel)
         effects.shiftDidChange(state.shift)
         updateDock()
+    }
+
+    /// A delete scrub stays on the backspace key. Shift scrub and the space-bar trackpad
+    /// still use the jewel above the finger.
+    private func routeGestureMark(_ mark: GestureMark?) {
+        guard effects.level > .off else {
+            effects.jewel.ingest(nil)
+            keysView.showBackspaceBubble(nil, color: theme.accentKey.fill.uiColor)
+            return
+        }
+        let onBackspace: Bool
+        if let mark, case let .scrub(scrub) = mark.action {
+            onBackspace = engine.geometry.keys.first { $0.id == scrub.keyID }?.key.kind == .backspace
+        } else {
+            onBackspace = false
+        }
+        if onBackspace {
+            effects.jewel.ingest(nil)
+            keysView.showBackspaceBubble(mark, color: theme.accentKey.fill.uiColor)
+        } else {
+            keysView.showBackspaceBubble(nil, color: theme.accentKey.fill.uiColor)
+            effects.jewel.ingest(mark)
+        }
     }
 
     public func keyboardEngine(_: KeyboardEngine, didEmit event: KeyboardEvent) {

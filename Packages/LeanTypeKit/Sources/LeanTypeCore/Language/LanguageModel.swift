@@ -30,7 +30,7 @@ public final class LanguageModel {
 
     private let store: (any LearnedWordsStore)?
     private let rejections: RejectionMemory
-    private let swipeRefusals = SwipeRefusalMemory()
+    private let swipeRefusals: SwipeRefusalMemory
     private let blocklist: Blocklist
     private let context: WordContext
     private let habits: HabitMemory
@@ -51,11 +51,13 @@ public final class LanguageModel {
         wordContext contextStore: (any WordContextStore)? = nil,
         habits habitStore: (any HabitStore)? = nil,
         strokes strokeStore: (any StrokeStore)? = nil,
-        blocklist blocklistStore: (any BlocklistStore)? = nil
+        blocklist blocklistStore: (any BlocklistStore)? = nil,
+        swipeRefusals refusalStore: (any SwipeRefusalStore)? = nil
     ) {
         self.lexicon = lexicon
         self.store = store
         rejections = RejectionMemory(store: rejectionStore)
+        swipeRefusals = SwipeRefusalMemory(store: refusalStore)
         blocklist = Blocklist(store: blocklistStore)
         context = WordContext(store: contextStore)
         let memory = HabitMemory(store: habitStore)
@@ -75,7 +77,8 @@ public final class LanguageModel {
         wordContext: (any WordContextStore)? = nil,
         habits: (any HabitStore)? = nil,
         strokes: (any StrokeStore)? = nil,
-        blocklist: (any BlocklistStore)? = nil
+        blocklist: (any BlocklistStore)? = nil,
+        swipeRefusals: (any SwipeRefusalStore)? = nil
     ) -> LanguageModel? {
         guard let lexicon = try? MappedLexicon.bundled() else { return nil }
         return LanguageModel(
@@ -85,7 +88,8 @@ public final class LanguageModel {
             wordContext: wordContext,
             habits: habits,
             strokes: strokes,
-            blocklist: blocklist
+            blocklist: blocklist,
+            swipeRefusals: swipeRefusals
         )
     }
 
@@ -114,7 +118,7 @@ public final class LanguageModel {
 
     /// One alignment of a whole gesture: taps, anchors, and the keys a stroke only crossed.
     func align(_ gesture: SwipeGesture, layout: LetterLayout, costs: AlignmentCosts = .standard) async -> DecodeResult {
-        let expected = context.expectedWords()
+        let expected = context.hasPrecedingWord ? context.expectedWords() : []
         let bonuses = habitBonuses
         let result = await aligner.decode(
             gesture,
@@ -158,7 +162,7 @@ public final class LanguageModel {
             personal: personalEntries,
             bigram: preparedBigram(),
             costs: costs,
-            expected: context.expectedWords(),
+            expected: context.hasPrecedingWord ? context.expectedWords() : [],
             habits: habitBonuses,
             pathScore: &pathScore
         )
@@ -173,9 +177,16 @@ public final class LanguageModel {
     /// the order when that same word would have led a similar stroke.
     private func finish(_ result: DecodeResult, trace: String) -> DecodeResult {
         swipeRefusals.applying(
-            to: blocklist.applying(to: rejections.applying(to: context.applying(to: result))),
+            to: blocklist.applying(to: rejections.applying(to: ranking(result))),
             trace: trace
         )
+    }
+
+    /// A familiar word can still lead. The follower bonus is applied in the search,
+    /// and again here only when a caller asks for it on a result the search did not score.
+    private func ranking(_ result: DecodeResult) -> DecodeResult {
+        guard context.hasPrecedingWord else { return result }
+        return habits.applyingFamiliar(to: result)
     }
 
     private static func strokeTrace(of gesture: SwipeGesture) -> String {
@@ -190,15 +201,49 @@ public final class LanguageModel {
     }
 
     /// The word that just landed, so the next swipe can prefer what usually follows it.
-    func noteCommitted(_ word: String) {
+    func noteCommitted(_ word: String, display: String? = nil) {
         context.noteCommitted(word)
-        habits.note(word)
+        habits.note(word, display: display)
+        if let display, personal.refreshDisplay(display) {
+            personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
+            unsavedChanges += 1
+        }
         habitBonuses = habits.bonuses()
+        swipeRefusals.forget(word: word)
+    }
+
+    /// The capitalization to show for `word` under `shift`. Shift off keeps a stored name.
+    /// A capital past the first letter, such as "iPhone", is not rewritten at a sentence start.
+    /// Caps lock still uppercases the whole word.
+    func presenting(_ word: String, shift: ShiftState) -> String {
+        let shown = storedDisplay(of: word) ?? word
+        switch shift {
+        case .off:
+            return shown
+        case .locked:
+            return shown.uppercased()
+        case .once:
+            if shown.dropFirst().contains(where: \.isUppercase) { return shown }
+            return shown.prefix(1).uppercased() + shown.dropFirst()
+        }
+    }
+
+    private func storedDisplay(of word: String) -> String? {
+        if let habit = habits.display(of: word), habit != habit.lowercased() { return habit }
+        if let personal = personal.display(of: word), personal != personal.lowercased() { return personal }
+        return nil
     }
 
     /// Words the next stroke is likely to be, from the words just written.
     func expectedWords() -> [String] {
         context.expectedWords()
+    }
+
+    /// The one word the strip may offer after a committed word. Sentence starters are not offered
+    /// when nothing has been written yet.
+    func offeredFollower() -> String? {
+        guard context.hasPrecedingWord, let next = context.expectedWords().first, !next.isEmpty else { return nil }
+        return next
     }
 
     /// The ranking bump earned by committing `word`. Zero until the second commit.
@@ -213,7 +258,10 @@ public final class LanguageModel {
 
     /// What a swipe would rank once the preceding word is taken into account.
     func preferringFollowers(in result: DecodeResult) -> DecodeResult {
-        context.applying(to: result)
+        let boosted = result.replacingReadings(
+            FollowerPrior.applying(result.readings, expected: context.expectedWords())
+        )
+        return ranking(boosted)
     }
 
     /// Remembers that the user wanted `preferred` instead of the `rejected` correction.
@@ -224,6 +272,29 @@ public final class LanguageModel {
     /// The stroke the user just redrew by picking a different word.
     func rememberStroke(_ word: String, path: [CGPoint], layout: LetterLayout) {
         strokes.remember(word, path: path, layout: layout)
+    }
+
+    /// Stores the curve when `word` is already one this user commits often.
+    func rememberFrequentStroke(_ word: String, path: [CGPoint], layout: LetterLayout) {
+        guard habits.uses(of: word) >= WordContext.familiarUses else { return }
+        strokes.remember(word, path: path, layout: layout)
+    }
+
+    public func useCount(of word: String) -> Int {
+        habits.uses(of: word)
+    }
+
+    /// Counts `word` enough times to lead a close swipe.
+    func moreOften(_ word: String) {
+        habits.reinforce(word)
+        habitBonuses = habits.bonuses()
+    }
+
+    /// Walks the count back one step and drops a stored curve for `word`.
+    func lessOften(_ word: String) {
+        habits.diminish(word)
+        strokes.forget(word)
+        habitBonuses = habits.bonuses()
     }
 
     /// The user deleted this swipe the moment it landed. The next similar stroke tries another word.
@@ -261,9 +332,9 @@ public final class LanguageModel {
 
     /// Notes that the user typed `word` on purpose. Dictionary words are ignored, except rare
     /// ones autocorrect would otherwise keep "fixing".
-    public func learn(_ word: String) {
+    public func learn(_ word: String, display: String? = nil) {
         guard isLearningEnabled, Self.isLearnable(word), needsLearning(word) else { return }
-        personal.learn(word, at: Date())
+        personal.learn(word, at: Date(), display: display)
         personalEntries = personal.entries(logCountRange: lexicon.logCountRange)
         unsavedChanges += 1
         if unsavedChanges >= Self.saveInterval {

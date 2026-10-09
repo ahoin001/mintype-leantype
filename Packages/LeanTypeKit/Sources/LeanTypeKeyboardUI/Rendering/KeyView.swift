@@ -18,6 +18,10 @@ final class KeyView: UIView {
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
+    /// The scrub bubble and its highlight. Nil unless a delete scrub is in progress.
+    private var bubble: CAShapeLayer?
+    private var highlight: CAShapeLayer?
+    private var bubbleStep = 0
 
     init(style: KeyStyle) {
         self.style = style
@@ -103,6 +107,69 @@ final class KeyView: UIView {
         hintLabel?.alpha = alpha
     }
 
+    /// A bubble inside the delete key. `lean` is −1 while the finger is left of the key
+    /// (deleting) and +1 while it is to the right (putting letters back). The bubble tracks
+    /// that directly; the keycap itself stays put.
+    func showScrubBubble(lean: CGFloat, restoring: Bool, step: Int, color: UIColor) {
+        let bubble = ensureBubble(color: color)
+        let clamped = min(1, max(-1, lean))
+        let radius = min(bounds.width, bounds.height) * 0.36
+        let reach = max(0, bounds.midX - radius - 3)
+        let reduced = UIAccessibility.isReduceMotionEnabled
+        let pose = scrubPose(lean: clamped, restoring: restoring, reduced: reduced)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bubble.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+        bubble.cornerRadius = radius
+        bubble.position = CGPoint(x: bounds.midX + clamped * reach, y: bounds.midY)
+        bubble.opacity = 1
+        if bubble.animation(forKey: "gulp") == nil {
+            bubble.transform = pose
+        }
+        highlight?.bounds = CGRect(x: 0, y: 0, width: radius * 0.7, height: radius * 0.7)
+        highlight?.cornerRadius = radius * 0.35
+        highlight?.position = CGPoint(x: radius * 0.62, y: radius * 0.58)
+        CATransaction.commit()
+
+        guard !reduced, step != bubbleStep else { return }
+        bubbleStep = step
+        let kick: CGFloat = restoring ? 1.2 : 0.74
+        let from = CATransform3DScale(pose, kick, restoring ? kick : 1.06, 1)
+        let gulp = CABasicAnimation(keyPath: "transform")
+        gulp.fromValue = from
+        gulp.toValue = pose
+        gulp.duration = Motion.keyRelease
+        gulp.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        bubble.add(gulp, forKey: "gulp")
+    }
+
+    /// The bubble settles back into the key.
+    func hideScrubBubble() {
+        bubbleStep = 0
+        guard let bubble else { return }
+        self.bubble = nil
+        highlight = nil
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            bubble.removeFromSuperlayer()
+            return
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = bubble.presentation()?.opacity ?? bubble.opacity
+        fade.toValue = 0
+        fade.duration = Motion.keyRelease
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        fade.fillMode = .forwards
+        fade.isRemovedOnCompletion = false
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            bubble.removeFromSuperlayer()
+        }
+        bubble.opacity = 0
+        bubble.add(fade, forKey: "out")
+        CATransaction.commit()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         label.frame = bounds.insetBy(dx: 2, dy: 0)
@@ -142,6 +209,34 @@ final class KeyView: UIView {
                 self.transform = transform
             }
         }
+    }
+
+    /// Deleting flattens the bubble toward the left. Restoring rounds it up on the right.
+    /// Reduced motion keeps a circle so the slide is the only change.
+    private func scrubPose(lean: CGFloat, restoring: Bool, reduced: Bool) -> CATransform3D {
+        guard !reduced else { return CATransform3DIdentity }
+        let amount = abs(lean)
+        let wide: CGFloat = restoring ? 0.88 : 1.2
+        let tall: CGFloat = restoring ? 1.16 : 0.76
+        return CATransform3DMakeScale(1 + (wide - 1) * amount, 1 + (tall - 1) * amount, 1)
+    }
+
+    private func ensureBubble(color: UIColor) -> CAShapeLayer {
+        if let bubble { 
+            bubble.backgroundColor = color.withAlphaComponent(0.5).cgColor
+            return bubble
+        }
+        let bubble = CAShapeLayer()
+        bubble.backgroundColor = color.withAlphaComponent(0.5).cgColor
+        bubble.cornerCurve = .continuous
+        let shine = CAShapeLayer()
+        shine.backgroundColor = UIColor.white.withAlphaComponent(0.38).cgColor
+        shine.cornerCurve = .continuous
+        bubble.addSublayer(shine)
+        layer.insertSublayer(bubble, below: icon.layer)
+        self.bubble = bubble
+        highlight = shine
+        return bubble
     }
 
     /// A press scales evenly and at once. The keycap itself never stretches.

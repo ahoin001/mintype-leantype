@@ -40,7 +40,7 @@ public struct AppGroupStrokeStore: StrokeStore {
     private let file: CodableFileStore<[StrokePrototype]>
 
     public init(fileName: String = "StrokePrototypes.json") {
-        file = CodableFileStore { SharedContainer.fileURL(named: fileName) }
+        file = CodableFileStore { LearningDirectory.fileURL(named: fileName) }
     }
 
     public func load() -> [StrokePrototype] {
@@ -86,6 +86,16 @@ final class StrokeMemory {
             prototypes.removeLast(prototypes.count - Self.capacity)
         }
         store?.save(prototypes)
+    }
+
+    /// Drops the curve stored for `word`. Other curves stay.
+    func forget(_ word: String) {
+        let word = word.lowercased()
+        let before = prototypes.count
+        prototypes.removeAll { $0.word == word }
+        if prototypes.count != before {
+            store?.save(prototypes)
+        }
     }
 
     /// Moves a remembered word first when this finger repeats its curve, far enough ahead

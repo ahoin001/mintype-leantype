@@ -153,6 +153,8 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     public var extendFinishedWords: Bool
     /// Lift commits the word and starts a leash. Explicit space keeps one word open until space.
     public var swipeCommitMode: SwipeCommitMode
+    /// Nil follows the typing rhythm. A number is the leash, in seconds, clamped when used.
+    public var leashDuration: Double?
     /// Remember words the dictionary doesn't know. Only takes effect with Full Access.
     public var learnWordsEnabled: Bool
     public var height: KeyboardHeight
@@ -178,6 +180,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         autocorrectEnabled: Bool = true,
         extendFinishedWords: Bool = true,
         swipeCommitMode: SwipeCommitMode = .lift,
+        leashDuration: Double? = nil,
         learnWordsEnabled: Bool = true,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
@@ -200,6 +203,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.autocorrectEnabled = autocorrectEnabled
         self.extendFinishedWords = extendFinishedWords
         self.swipeCommitMode = swipeCommitMode
+        self.leashDuration = leashDuration
         self.learnWordsEnabled = learnWordsEnabled
         self.height = height
         self.oneHandedMode = oneHandedMode
@@ -226,6 +230,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case autocorrectEnabled
         case extendFinishedWords
         case swipeCommitMode
+        case leashDuration
         case learnWordsEnabled
         case height
         case oneHandedMode
@@ -256,6 +261,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         autocorrectEnabled = lenient.value(.autocorrectEnabled, defaults.autocorrectEnabled)
         extendFinishedWords = lenient.value(.extendFinishedWords, defaults.extendFinishedWords)
         swipeCommitMode = lenient.value(.swipeCommitMode, defaults.swipeCommitMode)
+        leashDuration = lenient.value(.leashDuration, defaults.leashDuration)
         learnWordsEnabled = lenient.value(.learnWordsEnabled, defaults.learnWordsEnabled)
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)

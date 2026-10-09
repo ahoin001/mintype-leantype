@@ -55,7 +55,9 @@ public final class TextEditor {
     public var contextAfter: String? { document.contextAfter }
 
     public var isDocumentEmpty: Bool {
-        (document.contextBefore ?? "").isEmpty && (document.contextAfter ?? "").isEmpty
+        (document.contextBefore ?? "").isEmpty
+            && (document.contextAfter ?? "").isEmpty
+            && document.typedComposing.isEmpty
     }
 
     /// The word right before the cursor, if the cursor is at the end of one.
@@ -175,6 +177,22 @@ public final class TextEditor {
         )
         document.insert(value.inserted)
         remember(value)
+        return true
+    }
+
+    /// Replaces one earlier word and puts the caret back where it was.
+    @discardableResult
+    public func replaceEarlierWord(_ word: TextBoundary.EarlierWord, with replacement: String) -> Bool {
+        guard !replacement.isEmpty, word.characters > 0 else { return false }
+        forgetEverything()
+        document.adjustCursor(byUTF16Offset: -word.utf16After)
+        for _ in 0..<word.characters {
+            document.deleteBackward()
+        }
+        document.insert(replacement)
+        if word.utf16After != 0 {
+            document.adjustCursor(byUTF16Offset: word.utf16After)
+        }
         return true
     }
 
@@ -325,7 +343,9 @@ public final class TextEditor {
     }
 
     private func deleteRun(length: (String?) -> Int) -> String? {
-        let before = document.contextBefore
+        // Held letters are part of the word on screen. The count has to include them,
+        // because each backward delete spends one step on that composing text first.
+        let before = contextBefore
         if hasSelection {
             forgetEverything()
             document.deleteBackward()

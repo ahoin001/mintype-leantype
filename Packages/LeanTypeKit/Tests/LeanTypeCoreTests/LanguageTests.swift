@@ -309,7 +309,8 @@ struct EngineLanguageTests {
     @Test func aFinishedWordStaysOnTheStripUntilTheNextLetter() {
         let (harness, _) = makeHarness()
         harness.type("hello ")
-        #expect(harness.state.candidates.candidates == [Candidate("hello", role: .settled)])
+        #expect(harness.state.candidates.candidates.first == Candidate("hello", role: .settled))
+        #expect(harness.state.candidates.candidates.contains { $0 == Candidate("i", role: .follow) })
         #expect(harness.state.candidates.highlightedIndex == nil)
         harness.engine.acceptCandidate(0)
         #expect(harness.text == "hello ")
@@ -411,6 +412,43 @@ struct EngineLanguageTests {
         harness.type("teh ")
         #expect(harness.text == "teh ")
         #expect(harness.state.candidates.isEmpty)
+    }
+
+    @Test func anIdleBarListsTheWordsBeforeTheCaret() {
+        let (harness, _) = makeHarness(text: "one two three ")
+        let words = harness.state.candidates.candidates.map(\.text)
+        #expect(words == ["one", "two", "three"])
+        #expect(harness.state.candidates.isHistory)
+        harness.engine.acceptCandidate(0)
+        #expect(harness.text == "one two three ")
+    }
+
+    @Test func mergedFragmentLettersOfferStopping() {
+        let (harness, _) = makeHarness()
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        guard let layout = LetterLayout(geometry: harness.engine.geometry) else {
+            Issue.record("layout")
+            return
+        }
+        func observations(_ word: String, start: Double) -> [StrokeObservation] {
+            var time = start
+            return LexiconKey.make(word).map { scalar in
+                time += 0.05
+                let letter = String(UnicodeScalar(scalar))
+                return StrokeObservation(
+                    time: time,
+                    point: layout.center(of: scalar),
+                    directionX: 1,
+                    directionY: 0,
+                    letter: letter
+                )
+            }
+        }
+        let merged = observations("st", start: 0) + observations("oping", start: 0.3)
+        let outcome = language.sequenceDecode(merged, layout: layout)
+        let aligned = WordJoiner.alignedReading(in: outcome)?.word
+        #expect(outcome.traced == "stoping")
+        #expect(aligned == "stopping", "words \(outcome.result.words.prefix(8))")
     }
 }
 

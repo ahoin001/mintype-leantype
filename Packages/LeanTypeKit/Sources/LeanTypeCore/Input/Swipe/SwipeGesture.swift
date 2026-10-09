@@ -43,8 +43,18 @@ struct StrokeBuffer {
     static let retreatLookback: CGFloat = 120
 
     private(set) var points: [StrokePoint] = []
-    private(set) var arrivals: [KeyArrival] = []
-    /// Distance spent reversing since the last forward sample.
+    /// Letters currently part of the word. A one-key reversal hides the tail until the finger
+    /// walks further back, which is a return trip and keeps every letter.
+    var arrivals: [KeyArrival] {
+        guard let finger = undoneFinger else { return entered }
+        return withoutTail(beyond: finger)
+    }
+    /// Every letter this stroke has entered, in order.
+    private var entered: [KeyArrival] = []
+    /// Set while a short reversal is hiding the last letter.
+    private var undoneFinger: CGPoint?
+    /// The longest the stroke has been. A retreat is measured from here.
+    private var peak: CGFloat = 0
     init(start: StrokePoint) {
         points.reserveCapacity(Self.capacity)
         points.append(start)
@@ -65,6 +75,7 @@ struct StrokeBuffer {
             return
         }
         push(point)
+        noteForwardReach()
     }
 
     /// Records the final location. A small pullback keeps the word; a real reversal shortens it.
@@ -77,8 +88,9 @@ struct StrokeBuffer {
 
     /// The first time this stroke enters `letter`. Repeating the current letter does nothing.
     mutating func arrive(_ letter: String, at center: CGPoint, touch: CGPoint? = nil, time: Double) {
-        guard arrivals.last?.letter != letter else { return }
-        arrivals.append(KeyArrival(letter: letter, center: center, touch: touch ?? center, time: time))
+        guard entered.last?.letter != letter else { return }
+        let arrival = KeyArrival(letter: letter, center: center, touch: touch ?? center, time: time)
+        entered.append(arrival)
     }
 
     // MARK: - Private
@@ -127,16 +139,51 @@ struct StrokeBuffer {
         return total
     }
 
-    /// Drops the part of the stroke the finger has backed away from, so the shape match sees
-    /// the shorter path. The letters already entered stay: a return through them is read later
-    /// as the keys the thumb aimed at, not erased.
+    /// Drops the part of the stroke the finger has backed away from, and the letters that
+    /// sat on that tail. The first letter stays, and so does the letter at the turnaround.
+    /// A pull-back shorter than one key never reaches here, so a bounce keeps its letter.
     private mutating func rewind(to finger: StrokePoint) {
+        let before = points.count
         while points.count > 1 {
             let last = points[points.count - 1].location
             if hypot(last.x - finger.location.x, last.y - finger.location.y) <= Self.retreatStep { break }
             points.removeLast()
         }
+        if points.count < before {
+            // About one key hides the last letter. Further than that, the finger is walking
+            // back through the word, and the return-trip reading still needs every letter.
+            let retreated = peak - arcLength
+            undoneFinger = retreated <= Self.retreatStep * 1.75 ? finger.location : nil
+        }
         push(finger)
+    }
+
+    /// Forward motion commits the stroke's new reach. A letter hidden by a short reversal
+    /// stays gone once the finger sets off past where it turned around.
+    private mutating func noteForwardReach() {
+        let reached = arcLength
+        guard reached > peak else { return }
+        if undoneFinger != nil {
+            entered = arrivals
+            undoneFinger = nil
+        }
+        peak = reached
+    }
+
+    /// Letters whose touch sits on the shortened stroke stay. The first letter and the
+    /// letter nearest the finger stay even when their touch is a key center, not a sample.
+    private func withoutTail(beyond finger: CGPoint) -> [KeyArrival] {
+        guard let first = entered.first, entered.count > 1 else { return entered }
+        let turnaround = entered.min {
+            hypot($0.touch.x - finger.x, $0.touch.y - finger.y) < hypot($1.touch.x - finger.x, $1.touch.y - finger.y)
+        }
+        return entered.filter { arrival in
+            arrival == first || arrival == turnaround || pathStillReaches(arrival.touch)
+        }
+    }
+
+    private func pathStillReaches(_ touch: CGPoint) -> Bool {
+        points.contains { hypot($0.location.x - touch.x, $0.location.y - touch.y) <= Self.retreatStep * 0.55 }
     }
 
     private mutating func push(_ point: StrokePoint) {

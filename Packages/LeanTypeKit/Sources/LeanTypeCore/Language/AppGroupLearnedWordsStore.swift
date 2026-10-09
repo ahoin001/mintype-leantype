@@ -7,7 +7,7 @@ public struct AppGroupLearnedWordsStore: LearnedWordsStore {
     private let file: CodableFileStore<[LearnedWord]>
 
     public init(fileName: String = "LearnedWords.json") {
-        file = CodableFileStore { SharedContainer.fileURL(named: fileName) }
+        file = CodableFileStore { LearningDirectory.fileURL(named: fileName) }
     }
 
     public func load() -> [LearnedWord] { file.load() ?? [] }

@@ -53,12 +53,15 @@ public final class KeyboardEngine {
     private var openWord: OpenWord?
     /// The word just before this one, kept so a letter tapped during the latest stroke can
     /// pull the two back together ("es" + "tagged" + N becomes "estranged").
+    /// The first letter of the open word was capitalized by sentence shift, not by the user.
+    private var sentenceCapitalOnWord = false
     private var rejoin: Rejoin?
     /// When the open word stops accepting another beat. Infinity while a finger that landed
     /// in time is still down.
     private var openDeadline: TimeInterval?
     /// Rolling inter-key interval for this session. Scales the leash and the swap window.
     private var rhythm = TypingRhythm()
+    private var lastReportedLeash = TypingRhythm.coldLeash
     /// Fingers currently on the glass.
     private var liveTouches: Set<TouchID> = []
     /// Exact text lifted by an upward flick on space, so delete or another flick can put it back.
@@ -343,6 +346,28 @@ public final class KeyboardEngine {
         refreshTextState()
     }
 
+    public func moreOften(_ word: String) {
+        language?.moreOften(word)
+        refreshTextState()
+    }
+
+    public func lessOften(_ word: String) {
+        language?.lessOften(word)
+        refreshTextState()
+    }
+
+    public func historyChoices(for word: String) -> [String] {
+        words.historyChoices(for: word)
+    }
+
+    public func replaceHistoryWord(at index: Int, with replacement: String) {
+        let earlier = TextBoundary.earlierWords(before: editor.contextBefore)
+        guard earlier.indices.contains(index) else { return }
+        guard editor.replaceEarlierWord(earlier[index], with: replacement) else { return }
+        language?.noteCommitted(replacement, display: displayToRemember(replacement))
+        refreshTextState()
+    }
+
     /// Re-reads the personal list after the app, or this keyboard, changed it.
     public func reloadLearnedWords() {
         language?.reloadLearnedWords()
@@ -531,6 +556,9 @@ public final class KeyboardEngine {
 
     /// Keeps `letter` with the word being typed. A pause commits it; a swipe takes it instead.
     private func holdLetter(_ letter: String, at point: CGPoint?, time: Double) {
+        if editor.currentWord.isEmpty, shift.isSentenceCapital {
+            sentenceCapitalOnWord = true
+        }
         editor.appendTypedComposing(letter)
         words.noteLetter(at: point, time: time)
         scheduleComposingFlush()
@@ -583,7 +611,12 @@ public final class KeyboardEngine {
     /// Ends the current word, autocorrecting it if appropriate. Returns whether a correction
     /// was applied (in which case `trailing` was inserted with it).
     private func finishWord(trailing: String) -> Bool {
-        let corrected = words.finishWord(trailing: trailing, autocorrects: autocorrects)
+        let typed = String(editor.currentWord)
+        let corrected = words.finishWord(
+            trailing: trailing,
+            autocorrects: autocorrects,
+            display: displayToRemember(typed)
+        )
         if corrected {
             emit(.correctionApplied)
             flow.noteCorrection()
@@ -592,6 +625,7 @@ public final class KeyboardEngine {
     }
 
     private func completeWord(_ source: KeyboardEvent.WordSource) {
+        sentenceCapitalOnWord = false
         emit(.wordCommitted(source))
         flow.noteWordCompleted()
     }
@@ -625,14 +659,15 @@ public final class KeyboardEngine {
                let joined = joinedReading(existing: typed, adding: observations, merged: merged, strokePaths: strokePaths),
                acceptsJoin(joined) {
                 let shown = String(editor.currentWord)
-                let prior = OpenChunk(events: typed, readings: [shown], score: WordJoiner.provisionalScore)
+                let prior = OpenBeat(events: typed, readings: [shown], score: WordJoiner.provisionalScore)
                 erasePlacedLetters(typed.count)
                 committed = publishSwipe(
                     joined,
                     events: observations,
                     strokes: strokes,
                     countsAsNewWord: true,
-                    priorChunks: shown.isEmpty ? [] : [prior]
+                    priorChunks: shown.isEmpty ? [] : [prior],
+                    paths: strokePaths
                 )
             } else {
                 closeOpenWord()
@@ -644,30 +679,47 @@ public final class KeyboardEngine {
             let finished = isFinishedWord(displayed, events: open.events)
             let started = observations.map(\.time).min() ?? scheduler.now
             let merged = (open.events + observations).inReadingOrder()
-            let existing = sequenceOutcome(open.events)
-            if mayExtend(finished: finished, ownReading: choice.hasOwnReading, at: started),
-               let joined = joinedReading(existing: existing, adding: observations, merged: merged, strokePaths: strokePaths),
+            let paths = open.paths + strokePaths.map(OpenBeat.capped)
+            let existing = sequenceOutcome(open.events, strokePaths: open.paths)
+            if mayExtend(finished: finished, ownReading: choice.hasOwnReading, at: started, adding: observations.count),
+               let joined = joinedReading(existing: existing, adding: observations, merged: merged, strokePaths: paths, addedPaths: strokePaths),
                acceptsJoin(joined) {
-                committed = revise(open, with: joined, batch: observations, strokes: strokes)
+                committed = revise(open, with: joined, batch: observations, strokes: strokes, paths: strokePaths)
             } else if settings.swipeCommitMode == .explicitSpace,
                       mayExtend(finished: finished, ownReading: false, at: started) {
                 let letters = BeatChooser.collapse(merged.map(\.letter).joined())
                 let provisional = DecodeResult(readings: [.init(word: letters, score: WordJoiner.provisionalScore)], boundaryConfidence: 0.15)
-                committed = revise(open, with: provisional, batch: observations, strokes: strokes)
+                committed = revise(open, with: provisional, batch: observations, strokes: strokes, paths: strokePaths)
+            } else if leashAllows(at: started),
+                      // The second stroke did not spell the word it was given, so it may be the
+                      // rest of this one. "st" then "opping" is "stopping". A stroke that already
+                      // spells its own word, such as "correct" or "to", stays a new word.
+                      !WordJoiner.aligns(readings.first ?? "", traced: BeatChooser.collapse(observations.map(\.letter).joined())),
+                      let reading = WordJoiner.alignedReading(in: sequenceOutcome(merged, strokePaths: paths)),
+                      reading.word.lowercased().hasPrefix(displayed.lowercased()),
+                      reading.word.count > displayed.count {
+                committed = revise(
+                    open,
+                    with: DecodeResult(readings: [reading]),
+                    batch: observations,
+                    strokes: strokes,
+                    paths: strokePaths
+                )
             } else {
                 // A fragment can still be pulled back by a later letter. A word that is already
                 // right cannot: the next beat must not rewrite it.
                 if !finished, !choice.hasOwnReading, let word = editor.recentCommit?.word {
                     let events = open.events
+                    let paths = open.paths
                     closeOpenWord()
-                    rejoin = Rejoin(events: events, word: word)
+                    rejoin = Rejoin(events: events, paths: paths, word: word)
                 } else {
                     closeOpenWord()
                 }
-                committed = publishBeat(readings, unsure: unsure, strokes: strokes, observations: observations)
+                committed = publishBeat(readings, unsure: unsure, strokes: strokes, observations: observations, paths: strokePaths)
             }
         } else {
-            committed = publishBeat(readings, unsure: unsure, strokes: strokes, observations: observations)
+            committed = publishBeat(readings, unsure: unsure, strokes: strokes, observations: observations, paths: strokePaths)
         }
         if committed, !trailing.isEmpty {
             closeOpenWord()
@@ -715,9 +767,9 @@ public final class KeyboardEngine {
         if let started = events.map(\.time).min(), let previous = openWord?.events.map(\.time).max() {
             elapsed = max(0, started - previous)
         } else {
-            elapsed = rhythm.leash
+            elapsed = activeLeash
         }
-        let time = min(1, elapsed / max(rhythm.leash, 0.05))
+        let time = min(1, elapsed / max(activeLeash, 0.05))
         if aimed.count <= 2 || !aligns {
             return min(0.55, 0.12 + 0.7 * time)
         }
@@ -728,9 +780,10 @@ public final class KeyboardEngine {
         _ readings: [String],
         unsure: Bool,
         strokes: Int,
-        observations: [StrokeObservation]
+        observations: [StrokeObservation],
+        paths: [[CGPoint]] = []
     ) -> Bool {
-        let outcome = sequenceOutcome(observations)
+        let outcome = sequenceOutcome(observations, strokePaths: paths)
         let score = outcome.result.readings.first?.score ?? -6
         let wordsToCommit = readings.isEmpty ? [outcome.traced] : readings
         guard let first = wordsToCommit.first, !first.isEmpty else { return false }
@@ -739,7 +792,8 @@ public final class KeyboardEngine {
             events: observations,
             strokes: strokes,
             countsAsNewWord: true,
-            unsure: unsure
+            unsure: unsure,
+            paths: paths
         )
     }
 
@@ -785,9 +839,9 @@ public final class KeyboardEngine {
             return false
         }
         let merged = (open.events + batch).inReadingOrder()
-        let existing = sequenceOutcome(open.events)
-        if let joined = joinedReading(existing: existing, adding: batch, merged: merged, strokePaths: []), acceptsJoin(joined) {
-            return revise(open, with: joined, batch: batch, strokes: 0)
+        let existing = sequenceOutcome(open.events, strokePaths: open.paths)
+        if let joined = joinedReading(existing: existing, adding: batch, merged: merged, strokePaths: open.paths), acceptsJoin(joined) {
+            return revise(open, with: joined, batch: batch, strokes: 0, paths: [])
         }
         if !finished, reassemble(adding: batch) { return true }
         closeOpenWord()
@@ -802,7 +856,7 @@ public final class KeyboardEngine {
         let started = batch.map(\.time).min() ?? scheduler.now
         guard leashAllows(at: started) else { return false }
         let merged = (prior.events + open.events + batch).inReadingOrder()
-        let outcome = sequenceOutcome(merged)
+        let outcome = sequenceOutcome(merged, strokePaths: prior.paths + open.paths)
         guard let best = WordJoiner.alignedReading(in: outcome) else { return false }
         guard LexiconKey.make(best.word).count + 1 >= merged.count else { return false }
         let suffix = (prior.word + " " + current.word + " ").lowercased()
@@ -813,7 +867,7 @@ public final class KeyboardEngine {
         }
         rejoin = nil
         let result = DecodeResult(readings: [.init(word: best.word, score: best.score)])
-        let priorChunk = OpenChunk(events: prior.events, readings: [prior.word], score: WordJoiner.provisionalScore)
+        let priorChunk = OpenBeat(events: prior.events, paths: prior.paths, readings: [prior.word], score: WordJoiner.provisionalScore)
         return publishSwipe(
             result,
             events: batch,
@@ -827,23 +881,25 @@ public final class KeyboardEngine {
         existing typed: [StrokeObservation],
         adding: [StrokeObservation],
         merged: [StrokeObservation],
-        strokePaths: [[CGPoint]]
+        strokePaths: [[CGPoint]],
+        addedPaths: [[CGPoint]]? = nil
     ) -> DecodeResult? {
         let outcome = sequenceOutcome(typed)
-        return joinedReading(existing: outcome, adding: adding, merged: merged, strokePaths: strokePaths)
+        return joinedReading(existing: outcome, adding: adding, merged: merged, strokePaths: strokePaths, addedPaths: addedPaths)
     }
 
     private func joinedReading(
         existing: SequenceOutcome,
         adding: [StrokeObservation],
         merged: [StrokeObservation],
-        strokePaths: [[CGPoint]]
+        strokePaths: [[CGPoint]],
+        addedPaths: [[CGPoint]]? = nil
     ) -> DecodeResult? {
         guard words.letterLayout != nil else { return nil }
         let extended = sequenceOutcome(merged, strokePaths: strokePaths)
         return WordJoiner.choose(
             extended: extended,
-            alone: sequenceOutcome(adding),
+            alone: sequenceOutcome(adding, strokePaths: addedPaths ?? strokePaths),
             fragmentContinues: fragmentContinues(existing: existing, extended: extended)
         )
     }
@@ -878,7 +934,8 @@ public final class KeyboardEngine {
         strokes: Int,
         countsAsNewWord: Bool,
         unsure: Bool? = nil,
-        priorChunks: [OpenChunk] = []
+        priorChunks: [OpenBeat] = [],
+        paths: [[CGPoint]] = []
     ) -> Bool {
         guard let word = result.readings.first?.word, !word.isEmpty else { return false }
         let cased = result.words.map(applyShift(to:))
@@ -888,9 +945,18 @@ public final class KeyboardEngine {
         editor.commitWord(cased[0])
         noteRhythm(priorChunks.flatMap(\.events) + events)
         let literal = BeatChooser.collapse((priorChunks.flatMap(\.events) + events).map(\.letter).joined())
-        words.swipeCommitted(cased, unsure: tentative, literal: literal, advancesRefusalClock: countsAsNewWord)
+        words.swipeCommitted(
+            cased,
+            unsure: tentative,
+            literal: literal,
+            advancesRefusalClock: countsAsNewWord,
+            display: displayToRemember(cased[0])
+        )
+        if let layout = words.letterLayout, recentStrokePath.count >= 2 {
+            words.language?.rememberFrequentStroke(cased[0], path: recentStrokePath, layout: layout)
+        }
         var chunks = priorChunks
-        chunks.append(OpenChunk(events: events, readings: cased, score: score))
+        chunks.append(OpenBeat(events: events, paths: paths, readings: cased, score: score))
         openWord = OpenWord(chunks: chunks)
         noteWordOpened()
         insertionCount += 1
@@ -900,16 +966,16 @@ public final class KeyboardEngine {
         return true
     }
 
-    private func revise(_ open: OpenWord, with result: DecodeResult, batch: [StrokeObservation], strokes: Int) -> Bool {
+    private func revise(_ open: OpenWord, with result: DecodeResult, batch: [StrokeObservation], strokes: Int, paths: [[CGPoint]] = []) -> Bool {
         guard let word = result.readings.first?.word, !word.isEmpty else { return false }
         let cased = result.words.map(applyShift(to:))
         guard editor.replaceRecentCommitWord(with: cased[0]) else { return false }
         let score = result.readings[0].score
         let tentative = result.isUnsure || score <= WordJoiner.provisionalScore
         var open = open
-        open.chunks.append(OpenChunk(events: batch, readings: cased, score: score))
+        open.chunks.append(OpenBeat(events: batch, paths: paths, readings: cased, score: score))
         let literal = BeatChooser.collapse(open.chunks.flatMap(\.events).map(\.letter).joined())
-        words.swipeCommitted(cased, unsure: tentative, literal: literal)
+        words.swipeCommitted(cased, unsure: tentative, literal: literal, display: displayToRemember(cased[0]))
         openWord = open
         noteWordOpened()
         if strokes > 0 {
@@ -936,23 +1002,25 @@ public final class KeyboardEngine {
     /// A finished word stays open for a quick tap that lengthens it. It locks when the next
     /// beat is already a word, when that tap is turned off, or when the leash has closed.
     /// A fragment stays open only while the leash is open; a finger still down holds the leash.
-    private func mayExtend(finished: Bool, ownReading: Bool, at time: Double) -> Bool {
+    private func mayExtend(finished: Bool, ownReading: Bool, at time: Double, adding: Int = 1) -> Bool {
         guard leashAllows(at: time) else { return false }
         if settings.swipeCommitMode == .explicitSpace { return true }
         if finished {
-            return settings.extendFinishedWords && !ownReading
+            // A finished word can still take a letter or two ("the" + "n"). A whole
+            // second word does not fold in here.
+            return settings.extendFinishedWords && !ownReading && adding <= 2
         }
         return true
     }
 
     private func withinLeash(_ started: Double, after previous: Double) -> Bool {
         if settings.swipeCommitMode == .explicitSpace { return true }
-        return started - previous <= rhythm.leash
+        return started - previous <= activeLeash
     }
 
     private func freshLeashDeadline() -> TimeInterval {
         if settings.swipeCommitMode == .explicitSpace { return .infinity }
-        return scheduler.now + rhythm.leash
+        return scheduler.now + activeLeash
     }
 
     private func leashAllows(at time: Double) -> Bool {
@@ -1005,6 +1073,13 @@ public final class KeyboardEngine {
         case let .insert(word):
             consumePickedUpWord()
             editor.insert(word)
+            return (true, true)
+        case let .follow(word):
+            let shown = applyShift(to: word)
+            let before = editor.contextBefore ?? ""
+            let lead = before.isEmpty || before.hasSuffix(" ") || before.hasSuffix("\n") ? "" : " "
+            editor.insert(lead + shown + " ")
+            words.language?.noteCommitted(shown)
             return (true, true)
         case let .swap(word):
             words.noteSwap(preferred: word, rejected: editor.recentCommit?.word)
@@ -1139,6 +1214,17 @@ public final class KeyboardEngine {
             rhythm.note(gap: next - previous)
         }
         swipe.evidenceTuning = rhythm.evidenceTuning
+        let recommended = rhythm.leash
+        if abs(recommended - lastReportedLeash) > 0.01 {
+            lastReportedLeash = recommended
+            SharedContainer.saveRecommendedLeash(recommended)
+        }
+    }
+
+    /// A manual leash stays inside the rhythm's clamp. Auto follows the rhythm.
+    private var activeLeash: TimeInterval {
+        guard let manual = settings.leashDuration else { return rhythm.leash }
+        return min(0.55, max(0.16, manual))
     }
 
     private func decode(_ gesture: SwipeGesture) async -> DecodeResult {
@@ -1165,11 +1251,24 @@ public final class KeyboardEngine {
     }
 
     private func applyShift(to word: String) -> String {
-        switch shift.state {
-        case .off: word
-        case .once: word.prefix(1).uppercased() + word.dropFirst()
-        case .locked: word.uppercased()
+        if let language = words.language {
+            return language.presenting(word, shift: shift.state)
         }
+        switch shift.state {
+        case .off: return word
+        case .once: return word.prefix(1).uppercased() + word.dropFirst()
+        case .locked: return word.uppercased()
+        }
+    }
+
+    /// A capital past the first letter is the user's. A leading capital is theirs only when
+    /// sentence shift did not add it. Caps lock is not a spelling to store.
+    private func displayToRemember(_ word: String) -> String? {
+        guard shift.state != .locked else { return nil }
+        if word.dropFirst().contains(where: \.isUppercase) { return word }
+        guard word.first?.isUppercase == true else { return nil }
+        if shift.isSentenceCapital || sentenceCapitalOnWord { return nil }
+        return word
     }
 
     private func visualFrame(of kind: KeyKind) -> CGRect? {
@@ -1240,22 +1339,49 @@ public final class KeyboardEngine {
 /// The swiped word before the one on screen, in case the next letter belongs to both.
 private struct Rejoin {
     var events: [StrokeObservation]
+    var paths: [[CGPoint]]
     var word: String
 }
 
-/// One thumb action that still belongs to the word on screen, and the reading it produced.
-private struct OpenChunk {
+/// One thumb action that still belongs to the word on screen: the keys, and the curve that hit them.
+private struct OpenBeat {
+    static let pointCap = 48
+
     var events: [StrokeObservation]
+    var paths: [[CGPoint]]
     var readings: [String]
     var score: Double
+
+    init(events: [StrokeObservation], paths: [[CGPoint]] = [], readings: [String], score: Double) {
+        self.events = events
+        self.paths = paths.map(Self.capped)
+        self.readings = readings
+        self.score = score
+    }
+
+    static func capped(_ path: [CGPoint]) -> [CGPoint] {
+        guard path.count > pointCap else { return path }
+        let step = max(1, Int((Double(path.count) / Double(pointCap)).rounded(.up)))
+        var kept: [CGPoint] = []
+        kept.reserveCapacity(pointCap)
+        for index in stride(from: 0, to: path.count, by: step) {
+            kept.append(path[index])
+        }
+        if let last = path.last, kept.last != last { kept.append(last) }
+        return kept
+    }
 }
 
 /// The swiped word that a later tap or swipe can still rewrite.
 private struct OpenWord {
-    var chunks: [OpenChunk]
+    var chunks: [OpenBeat]
 
     var events: [StrokeObservation] {
         chunks.flatMap(\.events).inReadingOrder()
+    }
+
+    var paths: [[CGPoint]] {
+        chunks.flatMap(\.paths)
     }
 
     var score: Double {

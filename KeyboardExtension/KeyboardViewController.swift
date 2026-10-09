@@ -22,7 +22,8 @@ final class KeyboardViewController: UIInputViewController {
         wordContext: AppGroupWordContextStore(),
         habits: AppGroupHabitStore(),
         strokes: AppGroupStrokeStore(),
-        blocklist: AppGroupBlocklistStore()
+        blocklist: AppGroupBlocklistStore(),
+        swipeRefusals: AppGroupSwipeRefusalStore()
     )
     private let crashMonitor = ExtensionCrashMonitor()
 

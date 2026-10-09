@@ -113,6 +113,8 @@ struct SettingsView: View {
                             selection: $model.settings.swipeCommitMode,
                             options: [("On lift", .lift), ("On space", .explicitSpace)]
                         )
+                        PebbleDivider()
+                        leashRow
                     }
                     PebbleDivider()
                     PebbleToggleRow(
@@ -209,6 +211,36 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { data.refresh() }
+    }
+
+    private var leashRow: some View {
+        let recommended = SharedContainer.recommendedLeash()
+        let suggested = String(format: "Suggested %.2f s from your typing.", recommended)
+        return VStack(alignment: .leading, spacing: 8) {
+            PebbleToggleRow(
+                systemImage: "timer",
+                title: "Join window",
+                detail: model.settings.leashDuration == nil
+                    ? "Follows your pace. \(suggested)"
+                    : suggested,
+                isOn: Binding(
+                    get: { model.settings.leashDuration == nil },
+                    set: { follow in
+                        model.settings.leashDuration = follow ? nil : recommended
+                    }
+                )
+            )
+            if model.settings.leashDuration != nil {
+                Slider(
+                    value: Binding(
+                        get: { model.settings.leashDuration ?? recommended },
+                        set: { model.settings.leashDuration = min(0.55, max(0.16, $0)) }
+                    ),
+                    in: 0.16...0.55
+                )
+                .padding(.leading, 48)
+            }
+        }
     }
 
     private var learnedWordsDetail: String {
