@@ -51,6 +51,10 @@ public final class KeyboardEngine {
     private var insertionCount = 0
     private var lastSpaceTime: TimeInterval?
     private var lastObservedContext: String?
+    /// The context a caret move just produced, so the host echo is not an outside edit.
+    private var ownCursorContext: String?
+    /// True while a caret move is in progress, including a host callback from that move.
+    private var movingCursor = false
     /// The latest swiped word, still open to another tap or swipe. Nil once it locks.
     private var openWord: OpenWord?
     /// The word just before this one, kept so a letter tapped during the latest stroke can
@@ -66,6 +70,8 @@ public final class KeyboardEngine {
     private var lastReportedLeash = TypingRhythm.coldLeash
     /// Fingers currently on the glass.
     private var liveTouches: Set<TouchID> = []
+    /// Fingers that went down on the space bar. They move the caret and do not hold a word open.
+    private var spaceTouches: Set<TouchID> = []
     /// Exact text lifted by an upward flick on space, so delete or another flick can put it back.
     private var pickedUpText: String?
     /// Holds freshly typed letters until the word is finished or a swipe takes them.
@@ -93,9 +99,6 @@ public final class KeyboardEngine {
         let coordinator = SwipeCoordinator(composer: composer) { [weak self] gesture in
             await self?.decode(gesture) ?? .empty
         }
-        coordinator.onPreviewThumbs = { [weak self] thumbs in
-            self?.words.notePreviewThumbs(thumbs)
-        }
         coordinator.onPreview = { [weak self] result in
             guard let self else { return }
             if let result {
@@ -103,7 +106,7 @@ public final class KeyboardEngine {
                 if words.showPreview(result) {
                     emit(.swipePreviewChanged)
                 }
-                if let word = words.previewLeader {
+                if !editor.preservesPreviewEdits, let word = words.previewLeader {
                     editor.setPreviewComposing(applyShift(to: word))
                 }
             } else {
@@ -206,10 +209,13 @@ public final class KeyboardEngine {
     /// so a manual shift choice only resets when the visible context actually differs.
     public func documentDidChange() {
         let context = editor.contextBefore
-        if Self.isOwnEcho(previous: lastObservedContext, current: context, inserted: editor.recentCommit?.inserted) {
+        if movingCursor || context == ownCursorContext
+            || Self.isOwnEcho(previous: lastObservedContext, current: context, inserted: editor.recentCommit?.inserted) {
+            if !movingCursor { ownCursorContext = nil }
             refreshTextState()
             return
         }
+        ownCursorContext = nil
         _ = restorePickedUpWord()
         closeOpenWord()
         shift.noteContextChanged()
@@ -258,6 +264,7 @@ public final class KeyboardEngine {
         pickedUpText = nil
         words.clearPickedUp()
         liveTouches = []
+        spaceTouches = []
         let initial = Self.initialLayer(for: traits)
         if initial != layer {
             layer = initial
@@ -272,18 +279,22 @@ public final class KeyboardEngine {
             switch sample.phase {
             case .began:
                 liveTouches.insert(sample.id)
-                if openWord != nil, let openDeadline, sample.timestamp <= openDeadline {
+                if geometry.key(at: sample.location)?.key.kind == .space {
+                    spaceTouches.insert(sample.id)
+                } else if openWord != nil, let openDeadline, sample.timestamp <= openDeadline {
                     self.openDeadline = .infinity
                 }
             case .ended, .cancelled:
                 liveTouches.remove(sample.id)
+                spaceTouches.remove(sample.id)
             case .moved:
                 break
             }
         }
         touchEngine.handle(samples)
         if openWord != nil {
-            if liveTouches.isEmpty {
+            let holding = liveTouches.subtracting(spaceTouches)
+            if holding.isEmpty {
                 if openDeadline == .infinity {
                     openDeadline = freshLeashDeadline()
                 }
@@ -299,6 +310,7 @@ public final class KeyboardEngine {
         swipe.reset()
         composer.reset()
         liveTouches = []
+        spaceTouches = []
     }
 
     /// Direct activation for assistive technologies (VoiceOver), bypassing gestures.
@@ -364,33 +376,11 @@ public final class KeyboardEngine {
         refreshTextState()
     }
 
-    public func historyChoices(for word: String) -> [String] {
-        words.historyChoices(for: word)
-    }
-
-    public func replaceHistoryWord(at index: Int, with replacement: String) {
-        let earlier = TextBoundary.earlierWords(before: editor.contextBefore)
-        guard earlier.indices.contains(index), let context = editor.contextBefore else { return }
-        let word = earlier[index]
-        let units = word.utf16After + word.text.utf16.count
-        guard let suffix = context.suffix(utf16Count: units) else { return }
-        guard editor.replaceEarlierWord(word, with: replacement, confirming: suffix) else { return }
-        language?.noteCommitted(replacement, display: displayToRemember(replacement))
-        refreshTextState()
-    }
-
-    /// `detectPatterns` found something. The string itself is not read until Paste is tapped.
-    public func notePasteboardAvailable(_ available: Bool) {
-        guard words.pasteboardMayContainText != available else { return }
-        words.pasteboardMayContainText = available
-        publishState()
-    }
-
     public func historyMenu(for chip: Int) -> [HistoryMenuRow] {
         words.menuRows(for: chip, in: state.candidates)
     }
 
-    /// A hold-menu row, a case swipe, or a gap double-tap.
+    /// A hold-menu row or a gap double-tap.
     public func performStripAction(_ action: Candidate.StripAction) {
         closeOpenWord()
         _ = performStrip(action, text: "")
@@ -477,12 +467,16 @@ public final class KeyboardEngine {
             changed = undoRecentCommit()
         case let .moveCursor(direction):
             closeOpenWord()
-            let restored = restorePickedUpWord()
-            changed = editor.moveCursor(by: direction) || restored
+            movingCursor = true
+            changed = editor.moveCursor(by: direction)
+            movingCursor = false
+            if changed { ownCursorContext = editor.contextBefore }
         case let .moveCursorByWord(direction):
             closeOpenWord()
-            let restored = restorePickedUpWord()
-            changed = editor.moveCursorByWord(direction) || restored
+            movingCursor = true
+            changed = editor.moveCursorByWord(direction)
+            movingCursor = false
+            if changed { ownCursorContext = editor.contextBefore }
         case let .commitSwipe(readings, unsure, strokes, observations, strokePaths):
             changed = commitSwipe(readings, unsure: unsure, strokes: strokes, observations: observations, strokePaths: strokePaths)
         case let .acceptCandidate(index):
@@ -994,11 +988,15 @@ public final class KeyboardEngine {
         priorChunks: [OpenBeat] = [],
         paths: [[CGPoint]] = []
     ) -> Bool {
-        guard let word = result.readings.first?.word, !word.isEmpty else { return false }
-        let cased = result.words.map(applyShift(to:))
-        let score = result.readings[0].score
-        let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
+        let edited = editor.consumeEditedPreview()
+        if edited == nil {
+            guard let word = result.readings.first?.word, !word.isEmpty else { return false }
+        }
         editor.clearPreviewComposing()
+        if let edited, edited.isEmpty { return false }
+        let cased = edited.map { [$0] } ?? result.words.map(applyShift(to:))
+        let score = result.readings.first?.score ?? 0
+        let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
         editor.commitWord(cased[0])
         if let layout = words.letterLayout {
             let accepted = priorChunks.flatMap(\.events) + events

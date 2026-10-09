@@ -37,24 +37,20 @@ public struct Candidate: Hashable, Sendable {
         case blockLearned
         case insertText
         case replaceSuffix(match: String, with: String)
-        case dismissHint
         case clipboard(ClipboardCommand)
     }
 
     public let text: String
     public let role: Role
     public let action: StripAction?
-    /// The top two readings were close. The chip draws a dotted underline and no glow.
+    /// The top two readings were close. The chip draws a dotted underline.
     public let unsure: Bool
-    /// Thumb index for each letter of a tentative word. Empty when the host text is plain.
-    public let letterThumbs: [Int]
 
-    public init(_ text: String, role: Role, action: StripAction? = nil, unsure: Bool = false, letterThumbs: [Int] = []) {
+    public init(_ text: String, role: Role, action: StripAction? = nil, unsure: Bool = false) {
         self.text = text
         self.role = role
         self.action = action
         self.unsure = unsure
-        self.letterThumbs = letterThumbs
     }
 }
 

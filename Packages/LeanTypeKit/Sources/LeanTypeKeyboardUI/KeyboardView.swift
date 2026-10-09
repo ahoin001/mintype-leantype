@@ -76,8 +76,8 @@ public final class KeyboardView: UIView {
     private let coach = CoachHints()
     private var pendingHint: CoachHints.Hint?
     private var hintHide: Timer?
-    private var didCheckPasteboard = false
-
+    private var spaceGulpScale: CGFloat = 1
+    private var spaceGulpID = 0
     public init(engine: KeyboardEngine, theme: Theme, feedback: FeedbackCoordinator) {
         self.engine = engine
         self.theme = theme
@@ -127,23 +127,11 @@ public final class KeyboardView: UIView {
         dock.useCount = { [weak self] word in
             self?.engine.language?.useCount(of: word) ?? 0
         }
-        dock.historyChoices = { [weak self] word in
-            self?.engine.historyChoices(for: word) ?? []
-        }
-        dock.onReplaceHistory = { [weak self] index, word in
-            self?.engine.replaceHistoryWord(at: index, with: word)
-        }
         dock.menuRows = { [weak self] chip in
             self?.engine.historyMenu(for: chip) ?? []
         }
         dock.onMenuAction = { [weak self] action in
             self?.engine.performStripAction(action)
-        }
-        dock.borrowTextLayer = { [weak self] in
-            self?.effects.stage.pool.text()
-        }
-        dock.recycleTextLayer = { [weak self] layer in
-            self?.effects.stage.pool.recycle(layer)
         }
         dock.onWordmarkTap = { [weak self] in
             self?.dock.toggleDeleteMenu()
@@ -363,29 +351,26 @@ extension KeyboardView: KeyboardEngineDelegate {
         routeGestureMark(state.interaction.jewel)
         effects.shiftDidChange(state.shift)
         updateDock()
-        if state.candidates.isHistory { refreshPasteAvailability() }
     }
 
-    /// Asks whether the pasteboard has text without reading it. The string is read only if Paste is tapped.
-    private func refreshPasteAvailability() {
-        guard !didCheckPasteboard else { return }
-        didCheckPasteboard = true
-        UIPasteboard.general.detectPatterns(for: [.probableWebURL, .probableWebSearch, .number]) { result in
-            let available = ((try? result.get()) ?? []).isEmpty == false
-            DispatchQueue.main.async { [weak self] in
-                self?.engine.notePasteboardAvailable(available)
-            }
-        }
-    }
-
-    /// A delete scrub stays on the backspace key. Shift scrub and the space-bar trackpad
-    /// still use the jewel above the finger.
+    /// A delete scrub stays on the backspace key. The space-bar trackpad stays on the space bar.
+    /// Shift scrub still uses the jewel above the finger.
     private func routeGestureMark(_ mark: GestureMark?) {
+        let color = theme.accentKey.fill.uiColor
         guard effects.level > .off else {
             effects.jewel.ingest(nil)
-            keysView.showBackspaceBubble(nil, color: theme.accentKey.fill.uiColor)
+            keysView.showBackspaceBubble(nil, color: color)
+            keysView.showSpaceBubble(nil, color: color, gulpScale: 1, gulpID: 0)
             return
         }
+        if let mark, case .trackpad = mark.action {
+            effects.jewel.ingest(nil)
+            keysView.showBackspaceBubble(nil, color: color)
+            keysView.showSpaceBubble(mark, color: color, gulpScale: spaceGulpScale, gulpID: spaceGulpID)
+            spaceGulpScale = 1
+            return
+        }
+        keysView.showSpaceBubble(nil, color: color, gulpScale: 1, gulpID: 0)
         let onBackspace: Bool
         if let mark, case let .scrub(scrub) = mark.action {
             onBackspace = engine.geometry.keys.first { $0.id == scrub.keyID }?.key.kind == .backspace
@@ -394,14 +379,18 @@ extension KeyboardView: KeyboardEngineDelegate {
         }
         if onBackspace {
             effects.jewel.ingest(nil)
-            keysView.showBackspaceBubble(mark, color: theme.accentKey.fill.uiColor)
+            keysView.showBackspaceBubble(mark, color: color)
         } else {
-            keysView.showBackspaceBubble(nil, color: theme.accentKey.fill.uiColor)
+            keysView.showBackspaceBubble(nil, color: color)
             effects.jewel.ingest(mark)
         }
     }
 
     public func keyboardEngine(_: KeyboardEngine, didEmit event: KeyboardEvent) {
+        if case let .cursorStep(_, byWord) = event, engine.state.interaction.isTrackpadActive {
+            spaceGulpScale = max(spaceGulpScale, byWord ? 1.2 : 1.08)
+            spaceGulpID += 1
+        }
         dock.note(event)
         noteCoach(event)
         for observer in observers {

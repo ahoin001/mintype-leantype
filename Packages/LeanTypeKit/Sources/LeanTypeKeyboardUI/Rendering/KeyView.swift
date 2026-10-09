@@ -18,7 +18,7 @@ final class KeyView: UIView {
     private var restingColor: UIColor?
     private var pressedColor: UIColor?
     private var shadowBounds: CGRect = .zero
-    /// The scrub bubble and its highlight. Nil unless a delete scrub is in progress.
+    /// The scrub or trackpad bubble and its highlight. Nil unless that gesture is in progress.
     private var bubble: CAShapeLayer?
     private var highlight: CAShapeLayer?
     private var bubbleStep = 0
@@ -144,6 +144,43 @@ final class KeyView: UIView {
         bubble.add(gulp, forKey: "gulp")
     }
 
+    /// A bubble on the space bar. `centerX` is in the key's coordinates and already clamped.
+    /// `lean` is −1 at the left (flat, caret moving left) and +1 at the right (round).
+    func showTrackpadBubble(centerX: CGFloat, lean: CGFloat, gulpScale: CGFloat, gulpID: Int, pulse: Bool, color: UIColor) {
+        let bubble = ensureBubble(color: color, aboveContent: true)
+        let clamped = min(1, max(-1, lean))
+        let radius = min(bounds.width, bounds.height) * 0.36
+        let reduced = UIAccessibility.isReduceMotionEnabled
+        let pose = trackpadPose(lean: clamped, reduced: reduced)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bubble.bounds = CGRect(x: 0, y: 0, width: radius * 2, height: radius * 2)
+        bubble.cornerRadius = radius
+        bubble.position = CGPoint(x: centerX, y: bounds.midY)
+        bubble.opacity = 1
+        if bubble.animation(forKey: "gulp") == nil {
+            bubble.transform = pose
+        }
+        highlight?.bounds = CGRect(x: 0, y: 0, width: radius * 0.7, height: radius * 0.7)
+        highlight?.cornerRadius = radius * 0.35
+        highlight?.position = CGPoint(x: radius * 0.62, y: radius * 0.58)
+        CATransaction.commit()
+
+        let scale = pulse ? 1.16 : gulpScale
+        let token = pulse ? gulpID &+ 1_000_000 : gulpID
+        guard !reduced, scale > 1, token != bubbleStep else { return }
+        bubbleStep = token
+        let kick: CGFloat = pulse ? 1.16 : scale
+        let from = CATransform3DScale(pose, kick, kick, 1)
+        let gulp = CABasicAnimation(keyPath: "transform")
+        gulp.fromValue = from
+        gulp.toValue = pose
+        gulp.duration = Motion.keyRelease
+        gulp.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        bubble.add(gulp, forKey: "gulp")
+    }
+
     /// The bubble settles back into the key.
     func hideScrubBubble() {
         bubbleStep = 0
@@ -221,7 +258,16 @@ final class KeyView: UIView {
         return CATransform3DMakeScale(1 + (wide - 1) * amount, 1 + (tall - 1) * amount, 1)
     }
 
-    private func ensureBubble(color: UIColor) -> CAShapeLayer {
+    /// Left flattens the bubble. Right rounds it up. Reduced motion keeps a circle.
+    private func trackpadPose(lean: CGFloat, reduced: Bool) -> CATransform3D {
+        guard !reduced else { return CATransform3DIdentity }
+        let amount = abs(lean)
+        let wide: CGFloat = lean < 0 ? 1.22 : 0.86
+        let tall: CGFloat = lean < 0 ? 0.74 : 1.18
+        return CATransform3DMakeScale(1 + (wide - 1) * amount, 1 + (tall - 1) * amount, 1)
+    }
+
+    private func ensureBubble(color: UIColor, aboveContent: Bool = false) -> CAShapeLayer {
         if let bubble { 
             bubble.backgroundColor = color.withAlphaComponent(0.5).cgColor
             return bubble
@@ -233,7 +279,11 @@ final class KeyView: UIView {
         shine.backgroundColor = UIColor.white.withAlphaComponent(0.38).cgColor
         shine.cornerCurve = .continuous
         bubble.addSublayer(shine)
-        layer.insertSublayer(bubble, below: icon.layer)
+        if aboveContent {
+            layer.addSublayer(bubble)
+        } else {
+            layer.insertSublayer(bubble, below: icon.layer)
+        }
         self.bubble = bubble
         highlight = shine
         return bubble

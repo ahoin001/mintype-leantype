@@ -80,16 +80,6 @@ final class DockView: UIView {
         set { suggestions.useCount = newValue }
     }
 
-    var historyChoices: ((String) -> [String])? {
-        get { suggestions.historyChoices }
-        set { suggestions.historyChoices = newValue }
-    }
-
-    var onReplaceHistory: ((Int, String) -> Void)? {
-        get { suggestions.onReplaceHistory }
-        set { suggestions.onReplaceHistory = newValue }
-    }
-
     var menuRows: ((Int) -> [HistoryMenuRow])? {
         get { suggestions.menuRows }
         set { suggestions.menuRows = newValue }
@@ -98,16 +88,6 @@ final class DockView: UIView {
     var onMenuAction: ((Candidate.StripAction) -> Void)? {
         get { suggestions.onMenuAction }
         set { suggestions.onMenuAction = newValue }
-    }
-
-    var borrowTextLayer: (() -> CATextLayer?)? {
-        get { suggestions.borrowTextLayer }
-        set { suggestions.borrowTextLayer = newValue }
-    }
-
-    var recycleTextLayer: ((CATextLayer) -> Void)? {
-        get { suggestions.recycleTextLayer }
-        set { suggestions.recycleTextLayer = newValue }
     }
 
     /// A tap on the wordmark. Opens the delete-tap choice.

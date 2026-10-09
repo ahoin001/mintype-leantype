@@ -19,10 +19,28 @@ public protocol TextDocument: AnyObject {
     var typedComposing: String { get }
     /// The swipe's current reading, shown until the finger lifts. It is not part of the word.
     var previewComposing: String { get }
-    func setTypedComposing(_ text: String)
-    func setPreviewComposing(_ text: String)
+    /// How many characters of the active mark sit before the caret. The end, until a trackpad step moves in.
+    var markCaret: Int { get }
+    func setTypedComposing(_ text: String, caret: Int)
+    func setPreviewComposing(_ text: String, caret: Int)
+    func setMarkCaret(_ index: Int)
     /// Moves the held letters into the document.
     func flushTypedComposing()
+}
+
+public extension TextDocument {
+    /// The marked string on screen: held letters, or the swipe ghost when nothing is held.
+    var activeMark: String {
+        typedComposing.isEmpty ? previewComposing : typedComposing
+    }
+
+    func setTypedComposing(_ text: String) {
+        setTypedComposing(text, caret: text.count)
+    }
+
+    func setPreviewComposing(_ text: String) {
+        setPreviewComposing(text, caret: text.count)
+    }
 }
 
 /// A complete in-memory document used by tests and the companion app's live preview.
@@ -32,6 +50,7 @@ public final class InMemoryTextDocument: TextDocument {
     public private(set) var after: String
     public private(set) var typedComposing = ""
     public private(set) var previewComposing = ""
+    public private(set) var markCaret = 0
     public var onChange: ((InMemoryTextDocument) -> Void)?
 
     public var text: String {
@@ -58,9 +77,10 @@ public final class InMemoryTextDocument: TextDocument {
     }
 
     public func deleteBackward() {
-        guard typedComposing.isEmpty else {
-            typedComposing.removeLast()
-            onChange?(self)
+        if !typedComposing.isEmpty, markCaret > 0 {
+            var characters = Array(typedComposing)
+            characters.remove(at: markCaret - 1)
+            setTypedComposing(String(characters), caret: markCaret - 1)
             return
         }
         guard !before.isEmpty else { return }
@@ -86,22 +106,34 @@ public final class InMemoryTextDocument: TextDocument {
         onChange?(self)
     }
 
-    public func setTypedComposing(_ text: String) {
-        guard typedComposing != text else { return }
+    public func setTypedComposing(_ text: String, caret: Int) {
+        let next = min(max(0, caret), text.count)
+        guard typedComposing != text || markCaret != next else { return }
         typedComposing = text
+        markCaret = next
         onChange?(self)
     }
 
-    public func setPreviewComposing(_ text: String) {
-        guard previewComposing != text else { return }
+    public func setPreviewComposing(_ text: String, caret: Int) {
+        let next = min(max(0, caret), text.count)
+        guard previewComposing != text || markCaret != next else { return }
         previewComposing = text
+        markCaret = next
+        onChange?(self)
+    }
+
+    public func setMarkCaret(_ index: Int) {
+        let next = min(max(0, index), activeMark.count)
+        guard markCaret != next else { return }
+        markCaret = next
         onChange?(self)
     }
 
     public func flushTypedComposing() {
         let text = typedComposing
-        typedComposing = ""
         guard !text.isEmpty else { return }
+        typedComposing = ""
+        markCaret = previewComposing.count
         before += text
         onChange?(self)
     }
@@ -109,6 +141,7 @@ public final class InMemoryTextDocument: TextDocument {
     public func replaceAll(with text: String) {
         typedComposing = ""
         previewComposing = ""
+        markCaret = 0
         before = text
         after = ""
         onChange?(self)

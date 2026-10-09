@@ -15,15 +15,10 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     var onMoreOften: ((String) -> Void)?
     var onLessOften: ((String) -> Void)?
     var useCount: ((String) -> Int)?
-    var historyChoices: ((String) -> [String])?
-    var onReplaceHistory: ((Int, String) -> Void)?
     var menuRows: ((Int) -> [HistoryMenuRow])?
     var onMenuAction: ((Candidate.StripAction) -> Void)?
-    var borrowTextLayer: (() -> CATextLayer?)?
-    var recycleTextLayer: ((CATextLayer) -> Void)?
 
     private let scroller = UIScrollView()
-    private let edgeMask = CAGradientLayer()
     private let popover = StripPopover()
     private var slots: [SuggestionSlot] = []
     private var contentWidth: CGFloat = 0
@@ -35,8 +30,6 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     private var pillFollowsLayout = true
     /// Set by a commit or a correction, then consumed by the next pill placement.
     private var emphasis = PillEmphasis.travel
-    private var pinNewest = false
-    private var userDidScroll = false
     private var pressedChip: Int?
 
     override init(frame: CGRect) {
@@ -46,29 +39,17 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         scroller.alwaysBounceHorizontal = false
         scroller.clipsToBounds = true
         addSubview(scroller)
-        edgeMask.colors = [
-            UIColor.clear.cgColor,
-            UIColor.black.cgColor,
-            UIColor.black.cgColor,
-            UIColor.clear.cgColor,
-        ]
-        edgeMask.locations = [0, 0.06, 0.94, 1]
-        edgeMask.startPoint = CGPoint(x: 0, y: 0.5)
-        edgeMask.endPoint = CGPoint(x: 1, y: 0.5)
-        layer.mask = edgeMask
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(holdChip(_:)))
         hold.minimumPressDuration = 0.35
         addGestureRecognizer(hold)
-        let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(swipeCase(_:)))
-        swipeUp.direction = .up
-        addGestureRecognizer(swipeUp)
-        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(swipeCase(_:)))
-        swipeDown.direction = .down
-        addGestureRecognizer(swipeDown)
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapGap(_:)))
         doubleTap.numberOfTapsRequired = 2
+        doubleTap.delaysTouchesEnded = false
         addGestureRecognizer(doubleTap)
-        scroller.delegate = self
+        let singleTap = UITapGestureRecognizer(target: self, action: #selector(tapChip(_:)))
+        singleTap.require(toFail: doubleTap)
+        singleTap.delaysTouchesEnded = false
+        addGestureRecognizer(singleTap)
         pill.isUserInteractionEnabled = false
         pill.layer.cornerCurve = .continuous
         pill.alpha = 0
@@ -78,10 +59,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             let slot = SuggestionSlot()
             slot.addAction(UIAction { [weak self] _ in
                 guard let self else { return }
-                if self.state.isHistory || self.state.isDrilled,
-                   StripMotion.ignoresHistoryTap(isTentative: self.state.isTentative) {
-                    return
-                }
+                if self.state.isHistory || self.state.isDrilled { return }
                 self.onSelect?(index)
             }, for: .touchUpInside)
             slots.append(slot)
@@ -129,23 +107,19 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             cancelEmphasis()
             return
         }
-        let wasLand = emphasis == .land
+        let centerNewest = newState.isHistory && !newState.isDrilled
         state = newState
-        pinNewest = newState.isHistory && !newState.isDrilled
-        userDidScroll = false
-        let reduceMotion = UIAccessibility.isReduceMotionEnabled
-        let animated = !reduceMotion && window != nil
+        let animated = !UIAccessibility.isReduceMotionEnabled && window != nil
         render(animated: animated)
         pillFollowsLayout = false
         setNeedsLayout()
         layoutIfNeeded()
         placePill(animated: animated)
-        if wasLand { flyLatestWord(reduceMotion: reduceMotion) }
+        if centerNewest { centerNewestWord() }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        edgeMask.frame = bounds
         positionSlots()
         if pillFollowsLayout {
             placePill(animated: false)
@@ -182,9 +156,6 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         }
         scroller.isScrollEnabled = (state.isHistory || state.isDrilled) && contentWidth > bounds.width + 1
         scroller.contentSize = CGSize(width: contentWidth, height: bounds.height)
-        if pinNewest, !userDidScroll {
-            centerNewestWord()
-        }
     }
 
     private func render(animated: Bool) {
@@ -194,19 +165,12 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             let candidate = state.candidates[index]
             let isHighlighted = state.highlightedIndex == index
             let symbol = Self.symbol(for: candidate)
-            let wordChip: Bool = {
-                if case .openHistory = candidate.action { return true }
-                if case .openDocumentWord = candidate.action { return true }
-                return false
-            }()
             let apply = {
                 slot.configure(
                     text: Self.title(for: candidate, quoted: self.state.highlightedIndex != nil),
                     symbol: symbol,
                     isHighlighted: isHighlighted,
                     unsure: candidate.unsure,
-                    glows: wordChip && !candidate.unsure,
-                    letterThumbs: candidate.letterThumbs,
                     theme: theme
                 )
             }
@@ -405,41 +369,16 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         scroller.contentOffset.x = min(max(0, target), maxOffset)
     }
 
-    private func flyLatestWord(reduceMotion: Bool) {
-        guard let index = state.highlightedIndex ?? state.candidates.indices.last,
-              slots.indices.contains(index), !slots[index].isHidden else { return }
-        let slot = slots[index]
-        if StripMotion.fadesInsteadOfTraveling(reduceMotion: reduceMotion) {
-            slot.alpha = 0
-            UIView.animate(withDuration: Motion.stripFade, delay: 0, options: [.allowUserInteraction]) {
-                slot.alpha = 1
-            }
-            return
-        }
-        guard let layer = borrowTextLayer?() else { return }
-        let text = state.candidates[index].text as NSString
-        layer.string = text
-        layer.fontSize = 16
-        layer.alignmentMode = .center
-        layer.foregroundColor = slot.labelColor?.cgColor
-        layer.contentsScale = self.layer.contentsScale
-        let start = CGRect(x: bounds.midX - 30, y: -18, width: 60, height: 22)
-        let end = slot.frame
-        layer.frame = start
-        scroller.layer.addSublayer(layer)
-        let plan = Morph.plan(from: start, to: end, kind: .settle, duration: Motion.wordFlight, travels: true)
-        let animation = EffectAnimation.keyframes(
-            "position",
-            plan.samples.map { NSValue(cgPoint: CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
-        )
-        EffectAnimation.play([animation], on: layer, duration: Motion.wordFlight) { [weak self] in
-            self?.recycleTextLayer?(layer)
-        }
-    }
-
     private func chipIndex(at point: CGPoint) -> Int? {
         let local = scroller.convert(point, from: self)
         return slots.firstIndex { !$0.isHidden && $0.frame.contains(local) }
+    }
+
+    @objc private func tapChip(_ gesture: UITapGestureRecognizer) {
+        guard state.isHistory || state.isDrilled else { return }
+        guard !StripMotion.ignoresHistoryTap(isTentative: state.isTentative) else { return }
+        guard let index = chipIndex(at: gesture.location(in: self)) else { return }
+        onSelect?(index)
     }
 
     @objc private func holdChip(_ gesture: UILongPressGestureRecognizer) {
@@ -469,23 +408,6 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         }
     }
 
-    @objc private func swipeCase(_ gesture: UISwipeGestureRecognizer) {
-        guard let index = chipIndex(at: gesture.location(in: self)),
-              state.candidates.indices.contains(index) else { return }
-        let action = state.candidates[index].action
-        let upper = gesture.direction == .up
-        switch action {
-        case let .openHistory(entry):
-            onMenuAction?(.capitalize(entry: entry, upper: upper))
-        case let .openDocumentWord(entry):
-            let word = state.candidates[index].text
-            let shown = upper ? word.prefix(1).uppercased() + word.dropFirst() : word.lowercased()
-            onMenuAction?(.replaceDocumentWord(index: entry, text: shown))
-        default:
-            break
-        }
-    }
-
     @objc private func doubleTapGap(_ gesture: UITapGestureRecognizer) {
         let point = scroller.convert(gesture.location(in: self), from: self)
         let visible = slots.enumerated().filter { !$0.element.isHidden && $0.offset < state.candidates.count }
@@ -499,12 +421,6 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             }
             return
         }
-    }
-}
-
-extension SuggestionStrip: UIScrollViewDelegate {
-    func scrollViewWillBeginDragging(_: UIScrollView) {
-        userDidScroll = true
     }
 }
 
@@ -522,7 +438,6 @@ private final class SuggestionSlot: UIButton {
     private let underline = CAShapeLayer()
 
     var labelText: String? { label.text }
-    var labelColor: UIColor? { label.textColor }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -552,41 +467,17 @@ private final class SuggestionSlot: UIButton {
         didSet { alpha = isHighlighted ? 0.55 : 1 }
     }
 
-    func configure(
-        text: String,
-        symbol: String?,
-        isHighlighted emphasized: Bool,
-        unsure: Bool,
-        glows: Bool,
-        letterThumbs: [Int],
-        theme: Theme
-    ) {
+    func configure(text: String, symbol: String?, isHighlighted emphasized: Bool, unsure: Bool, theme: Theme) {
         label.font = Typography.rounded(size: 16, weight: emphasized ? .semibold : .regular)
         let ink = emphasized ? theme.accentKey.label.uiColor : theme.letterKey.label.uiColor
-        if letterThumbs.count == text.count, text.count > 1 {
-            let other = theme.secondaryLabel.uiColor
-            let attributed = NSMutableAttributedString(string: text)
-            for (index, character) in text.enumerated() {
-                let thumb = letterThumbs.indices.contains(index) ? letterThumbs[index] : 0
-                let color = thumb % 2 == 0 ? ink : other
-                let range = NSRange(location: index, length: String(character).utf16.count)
-                attributed.addAttribute(.foregroundColor, value: color, range: range)
-            }
-            label.attributedText = attributed
-        } else {
-            label.attributedText = nil
-            label.text = text
-            label.textColor = ink
-        }
+        label.attributedText = nil
+        label.text = text
+        label.textColor = ink
         icon.image = symbol.flatMap { UIImage(systemName: $0) }
         icon.tintColor = theme.secondaryLabel.uiColor
         icon.isHidden = symbol == nil
         underline.isHidden = !unsure
         underline.strokeColor = theme.secondaryLabel.uiColor.cgColor
-        layer.shadowColor = theme.accentKey.fill.cgColor
-        layer.shadowOpacity = glows ? 0.28 : 0
-        layer.shadowRadius = glows ? 6 : 0
-        layer.shadowOffset = .zero
         setNeedsLayout()
     }
 
@@ -627,9 +518,14 @@ private final class StripPopover: UIView {
         let width = max(frame.width, 120)
         let rowHeight: CGFloat = 36
         let height = rowHeight * CGFloat(rows.count)
-        let canvas = host.window ?? host
+        let canvas = keyboardSurface(from: host)
         let anchor = host.convert(frame, to: canvas)
-        self.frame = CGRect(x: anchor.midX - width / 2, y: anchor.minY - height - 6, width: width, height: height)
+        var originX = anchor.midX - width / 2
+        var originY = anchor.minY - height - 6
+        if originY < 0 { originY = anchor.maxY + 6 }
+        originX = min(max(0, originX), max(0, canvas.bounds.width - width))
+        originY = min(max(0, originY), max(0, canvas.bounds.height - height))
+        self.frame = CGRect(x: originX, y: originY, width: width, height: height)
         for (index, row) in rows.enumerated() {
             row.frame = CGRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: rowHeight)
             addSubview(row)
@@ -668,5 +564,15 @@ private final class StripPopover: UIView {
         }, completion: { _ in
             self.removeFromSuperview()
         })
+    }
+
+    /// The keyboard view, so the menu stays inside the extension and cannot cover the app.
+    private func keyboardSurface(from host: UIView) -> UIView {
+        var view: UIView? = host
+        while let current = view {
+            if current is KeyboardView { return current }
+            view = current.superview
+        }
+        return host
     }
 }

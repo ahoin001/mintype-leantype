@@ -41,6 +41,18 @@ public final class TextEditor {
     private var deletionAnchor: Substring?
     private var commit: (value: RecentCommit, anchor: Substring?)?
     private var spaceAnchor: Substring?
+    /// The swipe ghost was edited from the caret, so lift commits those letters.
+    private var previewEdited = false
+
+    /// The pending swipe ghost was changed. Later previews leave it alone until lift.
+    public var preservesPreviewEdits: Bool { previewEdited }
+
+    /// The edited ghost, once. Empty when every letter was deleted.
+    public func consumeEditedPreview() -> String? {
+        guard previewEdited else { return nil }
+        previewEdited = false
+        return document.previewComposing
+    }
 
     public init(document: any TextDocument) {
         self.document = document
@@ -103,6 +115,7 @@ public final class TextEditor {
     }
 
     public func clearPreviewComposing() {
+        previewEdited = false
         document.setPreviewComposing("")
     }
 
@@ -264,10 +277,7 @@ public final class TextEditor {
 
     @discardableResult
     public func deleteCharacter() -> String? {
-        if let last = document.typedComposing.last {
-            document.setTypedComposing(String(document.typedComposing.dropLast()))
-            return String(last)
-        }
+        if let removed = deleteInsideMark() { return removed }
         if hasSelection {
             forgetEverything()
             document.deleteBackward()
@@ -282,6 +292,24 @@ public final class TextEditor {
         document.deleteBackward()
         record([last], as: .character, continuingHistory: continuesHistory)
         return String(last)
+    }
+
+    /// Deletes the character before the caret inside the marked word. The document stays put.
+    private func deleteInsideMark() -> String? {
+        let typed = document.typedComposing
+        let mark = typed.isEmpty ? document.previewComposing : typed
+        let caret = min(document.markCaret, mark.count)
+        guard !mark.isEmpty, caret > 0 else { return nil }
+        var characters = Array(mark)
+        let removed = characters.remove(at: caret - 1)
+        let text = String(characters)
+        if !typed.isEmpty {
+            document.setTypedComposing(text, caret: caret - 1)
+        } else {
+            document.setPreviewComposing(text, caret: caret - 1)
+            previewEdited = true
+        }
+        return String(removed)
     }
 
     // MARK: - Restoration
@@ -308,35 +336,123 @@ public final class TextEditor {
 
     /// Moves the cursor one character in `direction` (negative is left). Returns `false` at
     /// either end of the available context so callers can stop accumulating movement.
+    /// A step that stays inside a pending mark only moves that caret.
     @discardableResult
     public func moveCursor(by direction: Int) -> Bool {
+        switch travelMark(direction, byWord: false) {
+        case .absent, .continueOutside:
+            break
+        case let .handled(moved):
+            return moved
+        }
+        return moveDocumentCaret(direction, byWord: false)
+    }
+
+    /// Moves the cursor to the start of the previous word or the end of the next one.
+    /// Inside a pending mark, the first step lands on the near end of that mark.
+    @discardableResult
+    public func moveCursorByWord(_ direction: Int) -> Bool {
+        switch travelMark(direction, byWord: true) {
+        case .absent, .continueOutside:
+            break
+        case let .handled(moved):
+            return moved
+        }
+        return moveDocumentCaret(direction, byWord: true)
+    }
+
+    private enum MarkTravel {
+        case absent
+        case handled(Bool)
+        /// The swipe ghost was cleared. The same step continues in the document.
+        case continueOutside
+    }
+
+    private func travelMark(_ direction: Int, byWord: Bool) -> MarkTravel {
+        let mark = document.activeMark
+        guard !mark.isEmpty, direction != 0 else { return .absent }
+        let caret = min(document.markCaret, mark.count)
+        if byWord {
+            if direction < 0, caret > 0 {
+                document.setMarkCaret(0)
+                return .handled(true)
+            }
+            if direction > 0, caret < mark.count {
+                document.setMarkCaret(mark.count)
+                return .handled(true)
+            }
+        } else {
+            let next = caret + (direction < 0 ? -1 : 1)
+            if (0...mark.count).contains(next) {
+                document.setMarkCaret(next)
+                return .handled(true)
+            }
+        }
+        return leaveMark(toward: direction, byWord: byWord)
+    }
+
+    /// Typed letters flush once. A swipe ghost is cleared without being inserted.
+    private func leaveMark(toward direction: Int, byWord: Bool) -> MarkTravel {
+        let typed = document.typedComposing
+        if !typed.isEmpty {
+            forgetEverything()
+            document.flushTypedComposing()
+            return .handled(movePastFlushed(typed, direction: direction, byWord: byWord))
+        }
+        if !document.previewComposing.isEmpty {
+            document.setPreviewComposing("")
+            return .continueOutside
+        }
+        return .absent
+    }
+
+    /// The flushed word is now behind the caret. Finish the step that crossed out of it.
+    private func movePastFlushed(_ typed: String, direction: Int, byWord: Bool) -> Bool {
+        let before = document.contextBefore ?? ""
+        let after = document.contextAfter ?? ""
+        let stem = before.hasSuffix(typed) ? String(before.dropLast(typed.count)) : before
         let offset: Int
         if direction < 0 {
+            if byWord {
+                let length = TextBoundary.wordMovementLength(before: stem)
+                offset = -(typed.utf16.count + stem.suffix(length).utf16.count)
+            } else if let character = stem.last {
+                offset = -(typed.utf16.count + character.utf16.count)
+            } else {
+                let back = typed.utf16.count
+                if back > 0 { document.adjustCursor(byUTF16Offset: -back) }
+                return false
+            }
+        } else if byWord {
+            offset = after.prefix(TextBoundary.wordMovementLength(after: after)).utf16.count
+        } else if let character = after.first {
+            offset = character.utf16.count
+        } else {
+            return false
+        }
+        guard offset != 0 else { return false }
+        document.adjustCursor(byUTF16Offset: offset)
+        return true
+    }
+
+    private func moveDocumentCaret(_ direction: Int, byWord: Bool) -> Bool {
+        let offset: Int
+        if byWord {
+            if direction < 0 {
+                let before = document.contextBefore ?? ""
+                offset = -before.suffix(TextBoundary.wordMovementLength(before: before)).utf16.count
+            } else if direction > 0 {
+                let after = document.contextAfter ?? ""
+                offset = after.prefix(TextBoundary.wordMovementLength(after: after)).utf16.count
+            } else {
+                return false
+            }
+        } else if direction < 0 {
             guard let character = document.contextBefore?.last else { return false }
             offset = -character.utf16.count
         } else if direction > 0 {
             guard let character = document.contextAfter?.first else { return false }
             offset = character.utf16.count
-        } else {
-            return false
-        }
-        forgetEverything()
-        document.adjustCursor(byUTF16Offset: offset)
-        return true
-    }
-
-    /// Moves the cursor to the start of the previous word or the end of the next one.
-    @discardableResult
-    public func moveCursorByWord(_ direction: Int) -> Bool {
-        let offset: Int
-        if direction < 0 {
-            let before = document.contextBefore ?? ""
-            let length = TextBoundary.wordMovementLength(before: before)
-            offset = -before.suffix(length).utf16.count
-        } else if direction > 0 {
-            let after = document.contextAfter ?? ""
-            let length = TextBoundary.wordMovementLength(after: after)
-            offset = after.prefix(length).utf16.count
         } else {
             return false
         }

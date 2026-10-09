@@ -258,6 +258,57 @@ final class KeyboardTouchView: UIView {
         view.showScrubBubble(lean: lean, restoring: scrub.restoring, step: scrub.step, color: color)
     }
 
+    /// The space-bar trackpad draws on the space bar. `gulpScale` above 1 plays one gulp for `gulpID`.
+    func showSpaceBubble(_ mark: GestureMark?, color: UIColor, gulpScale: CGFloat, gulpID: Int) {
+        guard let space = geometry?.keys.first(where: { $0.key.kind == .space }),
+              let view = viewPool[space.id]
+        else { return }
+        guard let mark, case .trackpad = mark.action else {
+            spaceEdge = 0
+            view.hideScrubBubble()
+            return
+        }
+        let bar = space.visualFrame
+        let keyboardWidth = geometry?.size.width ?? bar.maxX
+        let edge: Int
+        if mark.contact.x <= Self.edgeZone {
+            edge = -1
+        } else if mark.contact.x >= keyboardWidth - Self.edgeZone {
+            edge = 1
+        } else {
+            edge = 0
+        }
+        let radius = min(bar.width, bar.height) * 0.36
+        let inset = radius + 3
+        let centerX: CGFloat
+        let lean: CGFloat
+        let pulse: Bool
+        if edge != 0 {
+            centerX = edge < 0 ? inset : max(inset, bar.width - inset)
+            lean = CGFloat(edge)
+            pulse = edge != spaceEdge
+            spaceEdge = edge
+        } else {
+            spaceEdge = 0
+            let x = min(max(mark.contact.x, bar.minX + inset), bar.maxX - inset)
+            centerX = x - bar.minX
+            let span = max(bar.width / 2, 1)
+            lean = min(1, max(-1, (x - bar.midX) / span))
+            pulse = false
+        }
+        view.showTrackpadBubble(
+            centerX: centerX,
+            lean: lean,
+            gulpScale: edge == 0 ? gulpScale : 1,
+            gulpID: gulpID,
+            pulse: pulse,
+            color: color
+        )
+    }
+
+    private static let edgeZone: CGFloat = 22
+    private var spaceEdge = 0
+
     private func setLabelsHidden(_ hidden: Bool) {
         areLabelsHidden = hidden
         let views = visibleIDs.compactMap { viewPool[$0] }

@@ -106,26 +106,6 @@ struct WordHistory: Equatable, Sendable {
         return entries[index...].map(\.suffix).joined()
     }
 
-    mutating func replace(at index: Int, with text: String, contextBefore: String?) {
-        guard var entry = entry(index), let match = suffix(from: index), let contextBefore, contextBefore.hasSuffix(match) else {
-            entries.removeAll()
-            return
-        }
-        let old = entries[index...].map(\.suffix).joined()
-        entry.text = text
-        entry.unsure = false
-        if !entry.readings.contains(where: { $0.word.compare(text, options: .caseInsensitive) == .orderedSame }) {
-            entry.readings.insert(HistoryReading(word: text, score: (entry.readings.first?.score ?? 0) + 0.01), at: 0)
-        }
-        entries[index] = entry
-        let updated = entries[index...].map(\.suffix).joined()
-        guard contextBefore.hasSuffix(old) else {
-            entries.removeAll()
-            return
-        }
-        _ = updated
-    }
-
     private static func startsSentence(_ entry: HistoryEntry, in context: String, precededBy: String) -> Bool {
         let ending = precededBy + entry.suffix
         guard context.hasSuffix(ending) else { return false }
@@ -430,49 +410,11 @@ extension String {
 }
 
 enum HistoryEditLog {
-    struct Record: Codable, Equatable {
+    struct Record: Equatable {
         var milliseconds: Double
     }
 
     static func record(elapsed seconds: Double) -> Record {
-        let record = Record(milliseconds: seconds * 1000)
-        guard let url = LearningDirectory.fileURL(named: "history-edits.jsonl"),
-              let data = try? JSONEncoder().encode(record)
-        else { return record }
-        var line = data
-        line.append(UInt8(ascii: "\n"))
-        if FileManager.default.fileExists(atPath: url.path) {
-            guard let handle = try? FileHandle(forWritingTo: url) else { return record }
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
-        } else {
-            try? line.write(to: url)
-        }
-        return record
-    }
-}
-
-/// How many times the idle bar may still introduce itself. The count sits with the other local files.
-enum StripHintStore {
-    static let introductions = 4
-
-    struct State: Codable, Equatable {
-        var remaining: Int
-    }
-
-    static func remaining() -> Int {
-        guard let url = LearningDirectory.fileURL(named: "strip-hint.json"),
-              let data = try? Data(contentsOf: url),
-              let state = try? JSONDecoder().decode(State.self, from: data)
-        else { return introductions }
-        return state.remaining
-    }
-
-    static func save(_ remaining: Int) {
-        guard let url = LearningDirectory.fileURL(named: "strip-hint.json"),
-              let data = try? JSONEncoder().encode(State(remaining: remaining))
-        else { return }
-        try? data.write(to: url)
+        Record(milliseconds: seconds * 1000)
     }
 }

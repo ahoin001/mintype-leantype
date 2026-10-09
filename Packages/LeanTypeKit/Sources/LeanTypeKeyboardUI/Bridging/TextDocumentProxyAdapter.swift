@@ -12,13 +12,21 @@ public final class TextDocumentProxyAdapter: TextDocument {
 
     public private(set) var typedComposing = ""
     public private(set) var previewComposing = ""
+    public private(set) var markCaret = 0
     private var marked = ""
+    private var markedCaret = 0
 
     public var contextBefore: String? {
         guard var before = proxy.documentContextBeforeInput else { return nil }
         let mark = typedComposing.isEmpty ? previewComposing : typedComposing
-        if !mark.isEmpty, before.hasSuffix(mark) {
-            before.removeLast(mark.count)
+        guard !mark.isEmpty else { return before }
+        var prefix = Substring(mark)
+        while !prefix.isEmpty {
+            if before.hasSuffix(prefix) {
+                before.removeLast(prefix.count)
+                break
+            }
+            prefix.removeLast()
         }
         return before
     }
@@ -31,9 +39,10 @@ public final class TextDocumentProxyAdapter: TextDocument {
     }
 
     public func deleteBackward() {
-        guard typedComposing.isEmpty else {
-            typedComposing.removeLast()
-            publishMark()
+        if !typedComposing.isEmpty, markCaret > 0 {
+            var characters = Array(typedComposing)
+            characters.remove(at: markCaret - 1)
+            setTypedComposing(String(characters), caret: markCaret - 1)
             return
         }
         proxy.deleteBackward()
@@ -44,29 +53,41 @@ public final class TextDocumentProxyAdapter: TextDocument {
         proxy.adjustTextPosition(byCharacterOffset: offset)
     }
 
-    public func setTypedComposing(_ text: String) {
+    public func setTypedComposing(_ text: String, caret: Int) {
         typedComposing = text
+        markCaret = min(max(0, caret), text.count)
         publishMark()
     }
 
-    public func setPreviewComposing(_ text: String) {
+    public func setPreviewComposing(_ text: String, caret: Int) {
         previewComposing = text
+        markCaret = min(max(0, caret), text.count)
+        publishMark()
+    }
+
+    public func setMarkCaret(_ index: Int) {
+        markCaret = min(max(0, index), activeMark.count)
         publishMark()
     }
 
     public func flushTypedComposing() {
         let text = typedComposing
+        guard !text.isEmpty else { return }
         typedComposing = ""
+        markCaret = previewComposing.count
         publishMark()
-        if !text.isEmpty { proxy.insertText(text) }
+        proxy.insertText(text)
     }
 
+    /// An empty string clears a swipe ghost. `unmarkText` would commit it.
     private func publishMark() {
         let shown = typedComposing.isEmpty ? previewComposing : typedComposing
-        guard shown != marked else { return }
+        let caret = min(markCaret, shown.count)
+        let utf16 = shown.prefix(caret).utf16.count
+        guard shown != marked || utf16 != markedCaret else { return }
         marked = shown
-        let end = shown.utf16.count
-        proxy.setMarkedText(shown, selectedRange: NSRange(location: end, length: 0))
+        markedCaret = utf16
+        proxy.setMarkedText(shown, selectedRange: NSRange(location: utf16, length: 0))
     }
 }
 

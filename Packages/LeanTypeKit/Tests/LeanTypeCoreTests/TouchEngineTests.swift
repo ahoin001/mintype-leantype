@@ -108,6 +108,73 @@ struct SpaceTrackpadTests {
         #expect(harness.text == "ab")
         #expect(harness.document.after.isEmpty)
     }
+
+    @Test func draggingThroughHeldLettersDoesNotCommitThem() {
+        let harness = EngineHarness(text: "then ")
+        harness.document.setTypedComposing("ec")
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: -SpaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -SpaceSession.baseStep, dy: 0), over: 0.2, steps: 2)
+
+        #expect(harness.document.before == "then ")
+        #expect(harness.document.typedComposing == "ec")
+        #expect(harness.document.markCaret == 1)
+
+        harness.engine.perform(.deleteCharacter)
+        #expect(harness.document.typedComposing == "c")
+        #expect(harness.document.before == "then ")
+
+        harness.up(id)
+        harness.engine.documentDidChange()
+        #expect(harness.document.before == "then ")
+        #expect(harness.document.after.isEmpty)
+        #expect(!harness.document.text.contains("ecec"))
+    }
+
+    @Test func draggingThroughASwipePreviewDoesNotInsertIt() {
+        let harness = EngineHarness(text: "say ")
+        harness.document.setPreviewComposing("hello")
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: -SpaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -SpaceSession.baseStep * 2, dy: 0), over: 0.3, steps: 3)
+
+        #expect(harness.document.before == "say ")
+        #expect(harness.document.previewComposing == "hello")
+        #expect(harness.document.markCaret == 3)
+
+        harness.engine.perform(.deleteCharacter)
+        #expect(harness.document.previewComposing == "helo")
+        #expect(harness.document.before == "say ")
+
+        harness.up(id)
+        #expect(harness.document.before == "say ")
+        #expect(harness.document.text.filter { $0 == "h" }.count == 1)
+    }
+
+    @Test func leavingAPreviewClearsItWithoutInserting() {
+        let harness = EngineHarness(text: "say ")
+        harness.document.setPreviewComposing("hello")
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: -SpaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -SpaceSession.baseStep * 8, dy: 0), over: 0.6, steps: 8)
+        harness.up(id)
+
+        #expect(harness.document.previewComposing.isEmpty)
+        #expect(!harness.document.before.contains("hello"))
+        #expect(!harness.document.text.contains("hellohello"))
+    }
+
+    @Test func leavingHeldLettersFlushesThemOnce() {
+        let harness = EngineHarness(text: "then ")
+        harness.document.setTypedComposing("ec")
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: -SpaceSession.activationDistance, dy: 0))
+        harness.move(id, by: CGVector(dx: -SpaceSession.baseStep * 4, dy: 0), over: 0.4, steps: 4)
+        harness.up(id)
+
+        #expect(harness.document.typedComposing.isEmpty)
+        #expect(harness.document.text.components(separatedBy: "ec").count == 2)
+    }
 }
 
 @MainActor

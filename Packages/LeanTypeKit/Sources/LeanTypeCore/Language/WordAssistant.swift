@@ -47,13 +47,8 @@ final class WordAssistant {
     private var drill: HistoryDrill?
     private var pendingUndo: HistoryUndo?
     private var learnedNotice: String?
-    private var previewThumbs: [Int] = []
     private var snippets = SnippetBook.load()
     private var emojiRecents = EmojiWords.loadRecents()
-    private var hintRemaining = StripHintStore.remaining()
-    private var hintCounted = false
-    /// Set by the engine when `detectPatterns` says the pasteboard has something. The string is not read here.
-    var pasteboardMayContainText = false
     /// Letters the last swipe aimed at, so deleting that word can refuse it for a similar stroke.
     private var swipeTrace: String?
     /// Aimed letters from the swipe, kept on the strip when they are not the committed word.
@@ -348,7 +343,6 @@ final class WordAssistant {
         preview = nil
         chosenPreview = nil
         previewHeldUntil = nil
-        previewThumbs = []
         touches = []
         touchTimes = []
         settledWord = nil
@@ -475,7 +469,6 @@ final class WordAssistant {
         preview = nil
         chosenPreview = nil
         previewHeldUntil = nil
-        previewThumbs = []
         cached = nil
     }
 
@@ -485,10 +478,6 @@ final class WordAssistant {
 
     // MARK: - Suggestions
 
-    func notePreviewThumbs(_ thumbs: [Int]) {
-        previewThumbs = thumbs
-    }
-
     func candidates(suggests: Bool, autocorrects: Bool, variant: KeyboardVariant = .standard, blocksHistory: Bool = false) -> CandidateState {
         sealHistory()
         if blocksHistory || editor.contextBefore == nil {
@@ -497,7 +486,7 @@ final class WordAssistant {
         }
         if let preview {
             let shown = preview.readings.prefix(CandidateState.capacity).enumerated().map { index, reading in
-                Candidate(reading.word, role: .alternative, unsure: preview.isUnsure && index == 0, letterThumbs: index == 0 ? previewThumbs : [])
+                Candidate(reading.word, role: .alternative, unsure: preview.isUnsure && index == 0)
             }
             // Close calls get no pill, so the preview never looks like the word a space will lock in.
             return CandidateState(shown, highlightedIndex: preview.isUnsure ? nil : 0, isTentative: true)
@@ -690,12 +679,6 @@ final class WordAssistant {
             return nil
         case .closeDrill:
             closeDrill()
-            return nil
-        case .dismissHint:
-            hintRemaining = 0
-            StripHintStore.save(0)
-            hintCounted = true
-            cached = nil
             return nil
         case .retireLearned, .forgetLearned:
             if action == .forgetLearned, let learnedNotice {
@@ -919,12 +902,6 @@ final class WordAssistant {
             for (index, entry) in history.entries.enumerated() {
                 chips.append(Candidate(entry.text, role: .history, action: .openHistory(index), unsure: entry.unsure))
             }
-            if !hintCounted, hintRemaining > 0 {
-                chips.append(Candidate("Tap a word to fix it", role: .history, action: .dismissHint))
-                hintRemaining -= 1
-                hintCounted = true
-                StripHintStore.save(hintRemaining)
-            }
         } else {
             let words = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
             for (index, word) in words.enumerated() {
@@ -970,9 +947,6 @@ final class WordAssistant {
             }
         case .standard, .numeric:
             break
-        }
-        if pasteboardMayContainText {
-            chips.append(Candidate("Paste", role: .history, action: .clipboard(.paste)))
         }
         return chips
     }
