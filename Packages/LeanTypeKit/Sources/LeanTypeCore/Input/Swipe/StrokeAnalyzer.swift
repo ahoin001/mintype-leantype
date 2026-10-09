@@ -156,25 +156,41 @@ enum GestureComposer {
     ) -> SwipeGesture? {
         let strokes = strokes.filter { !$0.points.isEmpty }
         guard !strokes.isEmpty || !taps.isEmpty else { return nil }
-        // Two thumbs draw. A third contact is a tap, so a palm cannot open another chain.
-        let chains = Array(strokes.prefix(2))
-        var taps = taps
-        for stroke in strokes.dropFirst(2) {
-            guard let letter = stroke.arrivals.first?.letter else { continue }
-            taps.append(StrokeObservation(
-                time: stroke.start.time,
-                point: stroke.start.location,
-                directionX: 0,
-                directionY: 0,
-                letter: letter,
-                isTap: true
-            ))
+        // One chain per thumb. A later stroke with the same thumb extends that chain.
+        // A third thumb, which the session only produces for a finger that landed while
+        // both thumbs were already drawing, stays a tap of the letter it started on.
+        var byThumb: [Int: [StrokeBuffer]] = [:]
+        for stroke in strokes {
+            byThumb[stroke.thumb, default: []].append(stroke)
         }
-        let moving = chains.max { length($0) < length($1) }
-        let path = moving?.points.map(\.location) ?? []
-        let strokePaths = chains.map { $0.points.map(\.location) }
-        var events = chains.enumerated().flatMap { index, stroke in
-            strokeEvents(in: stroke, strokeIndex: index, tuning: tuning)
+        let thumbs = byThumb.keys.sorted()
+        let chainThumbs = Array(thumbs.prefix(2))
+        var taps = taps
+        for thumb in thumbs.dropFirst(2) {
+            for stroke in byThumb[thumb] ?? [] {
+                guard let letter = stroke.arrivals.first?.letter else { continue }
+                taps.append(StrokeObservation(
+                    time: stroke.start.time,
+                    point: stroke.start.location,
+                    directionX: 0,
+                    directionY: 0,
+                    letter: letter,
+                    isTap: true
+                ))
+            }
+        }
+        let chains: [[StrokeBuffer]] = chainThumbs.map { thumb in
+            (byThumb[thumb] ?? []).sorted { $0.start.time < $1.start.time }
+        }
+        let strokePaths = chains.map { buffers in
+            buffers.flatMap { $0.points.map(\.location) }
+        }
+        let path = strokePaths.max { StrokeAnalyzer.length(of: $0) < StrokeAnalyzer.length(of: $1) } ?? []
+        var events: [SwipeEvent] = []
+        for (index, buffers) in chains.enumerated() {
+            for buffer in buffers {
+                events.append(contentsOf: strokeEvents(in: buffer, strokeIndex: index, tuning: tuning))
+            }
         }
         for (offset, tap) in taps.enumerated() {
             events.append(event(from: tap, finger: offset))

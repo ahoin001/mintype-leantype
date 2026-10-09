@@ -437,6 +437,25 @@ struct SwipeTypingTests {
         #expect(harness.recorder.events.contains(.wordCommitted(.swipe)))
     }
 
+    /// Left thumb f–r, right thumb i, left e, right n, left d, with a lift between each piece.
+    @Test func anAlternatingPairSpellsFriend() async {
+        let harness = makeHarness()
+        func piece(_ letters: [String]) {
+            let id = harness.down(at: harness.point(for: letters[0]))
+            for letter in letters.dropFirst() {
+                harness.move(id, to: harness.point(for: letter), over: 0.06)
+            }
+            harness.up(id)
+        }
+        piece(["f", "r"])
+        piece(["i"])
+        piece(["e"])
+        piece(["n"])
+        piece(["d"])
+        await harness.settle()
+        #expect(harness.text == "friend ")
+    }
+
     @Test func strokesShowAsTrails() {
         let harness = makeHarness()
         let id = harness.down(at: harness.point(for: "q"))
@@ -2333,19 +2352,32 @@ struct SwipeTypingTests {
     }
 
     @Test func aThirdStrokeIsATapAndDwellFollowsTheKey() {
-        func stroke(_ letter: String, x: CGFloat) -> StrokeBuffer {
-            var buffer = StrokeBuffer(start: StrokePoint(location: CGPoint(x: x, y: 0), time: 0))
-            buffer.append(StrokePoint(location: CGPoint(x: x + 40, y: 0), time: 0.1))
-            buffer.arrive(letter, at: CGPoint(x: x, y: 0), time: 0)
+        func stroke(_ letter: String, x: CGFloat, thumb: Int, time: Double) -> StrokeBuffer {
+            var buffer = StrokeBuffer(start: StrokePoint(location: CGPoint(x: x, y: 0), time: time), thumb: thumb)
+            buffer.append(StrokePoint(location: CGPoint(x: x + 40, y: 0), time: time + 0.1))
+            buffer.arrive(letter, at: CGPoint(x: x, y: 0), time: time)
             return buffer
         }
-        let gesture = GestureComposer.compose([
-            stroke("a", x: 0),
-            stroke("b", x: 80),
-            stroke("c", x: 160),
+        let continued = GestureComposer.compose([
+            stroke("f", x: 0, thumb: 0, time: 0),
+            stroke("e", x: 30, thumb: 0, time: 0.4),
+            stroke("i", x: 180, thumb: 1, time: 0.2),
         ])
-        #expect(gesture?.strokeCount == 2)
-        #expect(gesture?.evidence.events.contains { $0.letter == "c" && $0.role == .tap } == true)
+        #expect(continued?.strokeCount == 2)
+        #expect(continued?.tracedLetters.contains("f") == true)
+        #expect(continued?.tracedLetters.contains("e") == true)
+        #expect(continued?.evidence.events.contains { $0.letter == "e" && $0.role == .tap } != true)
+        let third = GestureComposer.compose([
+            stroke("a", x: 0, thumb: 0, time: 0),
+            stroke("b", x: 80, thumb: 1, time: 0.1),
+            stroke("c", x: 160, thumb: 2, time: 0.2),
+        ])
+        #expect(third?.strokeCount == 2)
+        #expect(third?.evidence.events.contains { $0.letter == "c" && $0.role == .tap } == true)
+        #expect(ThumbLanes(active: [0, 1]).assigned(0) == nil)
+        #expect(ThumbLanes(active: [0]).assigned(0) == 1)
+        #expect(ThumbLanes(active: [0]).assigned(1) == 1)
+        #expect(ThumbLanes(active: []).assigned(0) == 0)
         let narrow = EvidenceTuning.standard.scaled(to: StrokeBuffer.referenceKeyWidth / 2)
         #expect(narrow.dwellRadius == GestureComposer.dwellRadius / 2)
         #expect(narrow.dwellTravel == GestureComposer.dwellTravel / 2)
@@ -2466,6 +2498,7 @@ private final class DecodeHold {
 extension EngineHarness {
     /// Lets asynchronous swipe decoding finish and commit.
     func settle() async {
+        engine.releaseHeldBeat()
         var attempts = 0
         while engine.composer.hasPendingCommits, attempts < 500 {
             attempts += 1

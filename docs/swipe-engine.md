@@ -100,12 +100,16 @@ The finger that travels starts the gesture and enlists the other:
 - A partner still on its key becomes a held letter. It is one character in this
   word, timestamped at touch-down, and it is not a point on the polyline.
 - If that held finger later travels, the hold is dropped and it becomes a stroke of
-  the same beat, unless two strokes are already open.
+  the same beat.
 - If it lifts without traveling, the letter is kept as a tap in the beat.
+- A thumb that lifts and lands again extends its own chain. The side of the key,
+  split halfway from Q to P, says which thumb it is. The letters of both visits
+  stay on that chain, in time.
 
-Decode uses at most two stroke chains. `GestureComposer` keeps the first two strokes
-as chains. Each later stroke becomes a tap of its first aimed letter. `SwipeSession`
-also refuses to open a third chain, so a palm cannot multiply the search.
+Decode uses at most two chains, one per thumb. A second finger that lands while one
+thumb is already drawing takes the other chain, even when it starts on the same side
+of the keyboard. A finger that lands while both thumbs are already drawing is a tap
+of the letter it started on. A palm cannot open a third chain.
 
 ### Cancel, and a long rest
 
@@ -127,11 +131,14 @@ open is kept. A slow tap with no other finger down is still that letter.
 - Left thumb holds K for half a second while the right thumb draws a word, and the
   accent row is closed. K is not in the word. Holding K alone, however slowly, types
   `k`.
-- Three fingers land and travel. The first two are chains. The third is a tap of
-  the letter it started on.
+- Three fingers travel at once. The two thumbs are chains. The third is a tap of the
+  letter it started on.
+- Left thumb draws `f` then `r` and lifts. Right thumb taps `i`, left taps `e`, right
+  taps `n`, left taps `d`, each before the leash ends. The field gets `friend `.
+  The spelling is the time order of those aimed letters. A lift does not end the beat.
 
-Locked by `aRollJustPastTheKeyStaysATapUntilItClearsTheSlop` and
-`aThirdStrokeIsATapAndDwellFollowsTheKey`.
+Locked by `aRollJustPastTheKeyStaysATapUntilItClearsTheSlop`,
+`aThirdStrokeIsATapAndDwellFollowsTheKey`, and `anAlternatingPairSpellsFriend`.
 
 ## One beat, then the leash
 
@@ -145,8 +152,12 @@ The ticket is taken from the first stroke's tap session. A letter tapped before 
 swipe can land before the swiped word. A letter tapped after waits until the decoder
 returns, because the composer will not apply a later intent in front of an open ticket.
 
-The beat commits when the last finger lifts: no active stroke and no held letter
-(`SwipeCoordinator.finishIfIdle`).
+The last finger lifting does not decode yet. The beat stays open for the leash, and
+the preview stays up (`SwipeCoordinator.finishIfIdle`). A new stroke or tap in that
+window joins this beat and restarts the wait. Space, return, and punctuation commit
+the beat first and then type the key. The wait uses the same leash as a finished
+word: 340 ms cold, then 160–550 ms from `TypingRhythm`. It is before decode. It does
+not change the rules below for a word that has already committed.
 
 After a beat commits, the word stays **open** for a leash. Cold start is
 `KeyboardEngine.wordLeash` (340 ms). After four inter-key gaps, `TypingRhythm` scales
@@ -305,10 +316,15 @@ Adjacent bounces are collapsed again (`BeatChooser.collapse`): `ghghgh` becomes 
 `AlignmentSearch.decode` walks a prefix index (`indices(withPrefix:)`). A hypothesis
 dies when the letters so far are not a prefix of a dictionary or personal word.
 
-The first pass walks time order, plus up to six chain-legal adjacent swaps, each as
-its own linear beam. Order inside one chain stays fixed. A chain beam runs only when
-that list is empty or the leader scores at or below −6. Recovery, when it runs, is
-the chain beam with one omission and one within-chain transposition.
+The first pass walks the aimed anchors in time order. That is the spelling of an
+alternating pair: `f`, `r`, `i`, `e`, `n`, `d`. A hypothesis is a word only after
+every anchor has been taken or skipped. If the 12 ms clock expires first, the result
+is those aimed letters, not a shorter dictionary word such as `fr`.
+
+When the two thumbs overlap in time and the clock still has time, a chain beam can
+read one thumb as a block. That is `some` beside `thing`. It can join the list. It
+does not outrank a time-order word that already consumed the anchors. Recovery, when
+it runs, is the chain beam with one omission and one within-chain transposition.
 
 Each word letter is a tap, an anchor, or a letter taken from a channel. The costs
 below are `AlignmentCosts.standard` unless a row says otherwise.
@@ -327,12 +343,12 @@ below are `AlignmentCosts.standard` unless a row says otherwise.
 | Insert a crossing | Extra `0.35 ×` distance from the center, capped at 1.5 key widths. The middle of a key is cheap to take; a distant graze is not |
 | Letter bigram | weight 0.30, from the lexicon, inside the word only |
 | Motion | weight 0.45, travel direction versus the step from the previous key, same stroke only |
-| Cross-thumb order | a swapped order pays `transpositionPenalty` for the gap. The chain beam, when it runs, charges `min(1.6, 2.4 × seconds)`. There is no 18-event cliff |
+| Cross-thumb order | Time order is the cheap path. When the thumbs overlap, the chain beam may also read each thumb as a block and charges `min(1.6, 2.4 × seconds)` to read one early. That reading does not pass a finished time-order word |
 | One omission | recovery pass only. Costs 1.15. One per hypothesis |
 | Within-chain transpose | recovery pass only. Costs 1.15. The skipped step is still matched |
 | Frequency | `0.22 ×` the word's place in the lexicon's log-count range, not the raw log count |
 | Results kept | 4 on the bar, plus any reading within 1.15 of that last slot |
-| Weak score | −6. At or below this, the chain beam or recovery may run |
+| Weak score | −6. At or below this, recovery may run |
 | Recovery | empty, score ≤ −6, or unsure and the leader does not line up with the aimed letters. Wider neighbors (10 within 2.5 key widths), beam 48, edits on, weak shape kept as a penalty. Skipped when the 12 ms budget is already gone |
 
 The frequency fraction is deliberate. A raw log count outweighed the path, so a common
@@ -755,17 +771,21 @@ Locked by `theNiceUndoesAShortJoin` and `functionWordsDoNotSwallowTheNextBeat`.
 - The retreat window is one key of lookback at the reference width, scaled with the
   key. A zigzag that really does walk back through the same keys inside that window
   loses those letters.
-- Cross-hand order is a chain-legal swap inside the rhythm's window, walked as its
-  own beam, or the chain beam when that window cannot reach. Order inside one thumb
-  stays fixed.
-- The leash starts at 340 ms and then follows the typist. `the` + a quick `n` becomes
-  `then`, and `ice` inside the same leash can give that `n` back. A second word that
-  is already confident (`to`, `correct`) is not eaten. Explicit space turns the
-  choice off. A gap longer than three quarters of the leash is not reconsidered.
+- Each thumb has one chain, including after a lift. A third finger down at the same
+  time is a tap. Order inside one thumb stays fixed. Alternating thumbs spell in
+  time order (`friend`). Overlapping thumbs can also be read as two blocks, and
+  that reading does not pass a finished time-order word.
+- The leash starts at 340 ms and then follows the typist. The same window holds an
+  unfinished beat after the last lift, and, after the word commits, `the` + a quick
+  `n` becomes `then`. `ice` inside the same leash can give that `n` back. A second
+  word that is already confident (`to`, `correct`) is not eaten once the beat has
+  committed. Explicit space turns that choice off. A gap longer than three quarters
+  of the leash is not reconsidered.
 - A preview withdraws only after the path has already produced one and then grown
   into a miss. The first samples still keep the previous pill.
 - Joining still requires the aimed letters in order. A crossing can fill a hole.
-  A tap and a stroke that land inside the swap window can be read either way.
+  Two thumbs that overlap can also be read as blocks; that reading stays behind a
+  time-order word that already used every anchor.
 - The shape lead stays under the tie margin on purpose. Loosening `exactLead` would
   let a habit or a graze replace an aimed spelling.
 - Stroke memory promotes past `exactLead` as well, and only after the user has
@@ -774,7 +794,8 @@ Locked by `theNiceUndoesAShortJoin` and `functionWordsDoNotSwallowTheNextBeat`.
 - The fast-flick stretch starts at 750 pt/s. Below that the Gaussian stays round.
   Stretching ordinary traces reshuffles close spellings such as `live` / `love`.
 - The 12 ms cutoff is a release stall guard. A debug or coverage run does not apply
-  it. An injected clock is how the cutoff is tested.
+  it. An injected clock is how the cutoff is tested. A search that stops before every
+  anchor is taken returns the aimed letters, not a shorter dictionary word.
 
 ## Where to look
 

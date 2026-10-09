@@ -60,8 +60,12 @@ struct StrokeBuffer {
     private var peak: CGFloat = 0
     /// This stroke's key width. Retreat distances scale with it.
     private var keyWidth: CGFloat
-    init(start: StrokePoint, keyWidth: CGFloat = referenceKeyWidth) {
+    /// Which thumb drew this stroke. A later stroke with the same thumb extends that chain.
+    var thumb: Int
+
+    init(start: StrokePoint, keyWidth: CGFloat = referenceKeyWidth, thumb: Int = 0) {
         self.keyWidth = max(keyWidth, 1)
+        self.thumb = thumb
         points.reserveCapacity(Self.capacity)
         points.append(start)
     }

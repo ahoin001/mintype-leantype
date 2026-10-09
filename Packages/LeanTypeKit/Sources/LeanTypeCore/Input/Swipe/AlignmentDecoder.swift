@@ -145,24 +145,19 @@ enum AlignmentSearch {
                 clock: budget
             )
         } else {
-            for order in chainOrders(of: steps, costs: costs) {
-                if budget.isPastDeadline { break }
-                let penalty = orderPenalty(order, costs: costs)
-                let ranked = linearBeam(
-                    order,
-                    layout: layout,
-                    lexicon: lexicon,
-                    personal: personal,
-                    bigram: bigram,
-                    costs: costs,
-                    habits: habits,
-                    crossingScale: crossingScale,
-                    clock: budget
-                ).map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
-                readings = merge(readings, ranked)
-            }
-            let leader = readings.first?.score ?? -.infinity
-            if !budget.isPastDeadline, readings.isEmpty || leader <= AlignmentCosts.weakScore {
+            let ranked = linearBeam(
+                steps,
+                layout: layout,
+                lexicon: lexicon,
+                personal: personal,
+                bigram: bigram,
+                costs: costs,
+                habits: habits,
+                crossingScale: crossingScale,
+                clock: budget
+            )
+            readings = ranked
+            if thumbsOverlap(steps), !budget.isPastDeadline {
                 let chained = beam(
                     chains,
                     layout: layout,
@@ -175,7 +170,7 @@ enum AlignmentSearch {
                     crossingScale: crossingScale,
                     clock: budget
                 )
-                readings = merge(chained, readings)
+                readings = mergeWithoutOutranking(readings, with: chained)
             }
         }
         trace?.trace.beamWords = readings.map(\.word)
@@ -301,48 +296,51 @@ enum AlignmentSearch {
         var score: Double
     }
 
-    /// Time order, plus a few chain-legal swaps of fingers that landed close together.
-    /// Each order is its own walk, so a skip is not crowded out by the other chain.
-    /// There is no length cliff: a long gesture still tries the same few swaps.
-    private static func chainOrders(of steps: [StrokeChannel.Step], costs: AlignmentCosts) -> [[StrokeChannel.Step]] {
-        guard steps.count >= 2 else { return [steps] }
-        var indexes: [[Int]] = [Array(steps.indices)]
-        var seen: Set<String> = [indexes[0].map(String.init).joined(separator: ",")]
-        var cursor = 0
-        while cursor < indexes.count, indexes.count < 6 {
-            let order = indexes[cursor]
-            cursor += 1
-            for index in 0..<(order.count - 1) where indexes.count < 6 {
-                let left = steps[order[index]]
-                let right = steps[order[index + 1]]
-                guard canSwap(left, right, costs: costs) else { continue }
-                var swapped = order
-                swapped.swapAt(index, index + 1)
-                let name = swapped.map(String.init).joined(separator: ",")
-                guard seen.insert(name).inserted else { continue }
-                indexes.append(swapped)
+    /// True when both thumbs' events overlap in time, so a block reading is worth a second search.
+    private static func thumbsOverlap(_ steps: [StrokeChannel.Step]) -> Bool {
+        var spans: [Int: (start: Double, end: Double)] = [:]
+        for step in steps where step.strokeIndex >= 0 {
+            if var span = spans[step.strokeIndex] {
+                span.start = min(span.start, step.time)
+                span.end = max(span.end, step.time)
+                spans[step.strokeIndex] = span
+            } else {
+                spans[step.strokeIndex] = (step.time, step.time)
             }
         }
-        return indexes.map { order in order.map { steps[$0] } }
-    }
-
-    private static func orderPenalty(_ steps: [StrokeChannel.Step], costs: AlignmentCosts) -> Double {
-        var penalty = 0.0
-        for index in 1..<steps.count {
-            guard steps[index].time + 0.000_1 < steps[index - 1].time else { continue }
-            penalty += costs.transpositionPenalty(gap: steps[index - 1].time - steps[index].time)
+        let ranges = Array(spans.values)
+        guard ranges.count >= 2 else { return false }
+        for index in ranges.indices {
+            for other in ranges.indices where other > index {
+                if ranges[index].start <= ranges[other].end, ranges[other].start <= ranges[index].end {
+                    return true
+                }
+            }
         }
-        return penalty
+        return false
     }
 
-    private static func canSwap(_ left: StrokeChannel.Step, _ right: StrokeChannel.Step, costs: AlignmentCosts) -> Bool {
-        guard left.strokeIndex != right.strokeIndex else { return false }
-        let tapCrossesChannel = (left.event?.role == .tap && right.isChannel) || (right.event?.role == .tap && left.isChannel)
-        let window = tapCrossesChannel ? costs.swapWindow * 3 : costs.swapWindow
-        guard abs(left.time - right.time) <= window else { return false }
-        if left.event?.role == .tap, left.time < right.time, right.event != nil { return false }
-        if right.event?.role == .tap, right.time < left.time, left.event != nil { return false }
+    /// Every anchor on every chain has been taken or skipped.
+    private static func finished(_ hypothesis: Hypothesis, chains: ThumbChains) -> Bool {
+        guard hypothesis.debtChain == nil else { return false }
+        for index in chains.chains.indices {
+            if Int(hypothesis.cursors[index]) < chains.chains[index].count { return false }
+        }
         return true
+    }
+
+    /// A block reading can join the list. It cannot pass a time-order word that already used every anchor.
+    private static func mergeWithoutOutranking(
+        _ primary: [DecodeResult.Reading],
+        with extra: [DecodeResult.Reading]
+    ) -> [DecodeResult.Reading] {
+        guard let leader = primary.first else { return extra }
+        let capped = extra.map { reading in
+            let same = reading.word.compare(leader.word, options: .caseInsensitive) == .orderedSame
+            guard !same, reading.score >= leader.score else { return reading }
+            return DecodeResult.Reading(word: reading.word, score: leader.score - 0.01)
+        }
+        return merge(primary, capped)
     }
 
     /// One order, walked from first step to last. Skips stay in the beam because nothing else is competing for it.
@@ -372,8 +370,12 @@ enum AlignmentSearch {
             debtIndex: nil,
             justSkipped: false
         )]
+        var consumedAll = true
         for (offset, step) in steps.enumerated() {
-            if clock.shouldStop() { break }
+            if clock.shouldStop() {
+                consumedAll = false
+                break
+            }
             var next: [Hypothesis] = []
             if let event = step.event {
                 let letters = candidates(for: event, layout: layout, costs: costs)
@@ -409,6 +411,7 @@ enum AlignmentSearch {
             walked = prune(next, width: width, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
             if walked.isEmpty { return [] }
         }
+        guard consumedAll else { return [] }
         var scored: [Scored] = []
         for hypothesis in walked {
             consider(hypothesis, lexicon: lexicon, personal: personal, costs: costs, habits: habits, into: &scored)
@@ -461,8 +464,12 @@ enum AlignmentSearch {
         // A chain read early lives in the other beam and does not crowd that walk out.
         var timely = [start]
         var late: [Hypothesis] = []
+        var consumedAll = true
         for _ in 0..<chains.eventCount {
-            if clock.shouldStop() { break }
+            if clock.shouldStop() {
+                consumedAll = false
+                break
+            }
             var nextTimely: [Hypothesis] = []
             var nextLate: [Hypothesis] = []
             let parents = timely.map { ($0, true) } + late.map { ($0, false) }
@@ -558,6 +565,10 @@ enum AlignmentSearch {
             timely = keepingSkips(in: nextTimely, pruned: prune(nextTimely, width: costs.beamWidth, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets), lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
             late = keepingSkips(in: nextLate, pruned: prune(nextLate, width: costs.beamWidth, lexicon: lexicon, costs: costs, habitBuckets: habitBuckets), lexicon: lexicon, costs: costs, habitBuckets: habitBuckets)
             if timely.isEmpty && late.isEmpty { return [] }
+        }
+        if !consumedAll {
+            timely = timely.filter { finished($0, chains: chains) }
+            late = late.filter { finished($0, chains: chains) }
         }
 
         var scored: [Scored] = []

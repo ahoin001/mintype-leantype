@@ -20,6 +20,10 @@ final class SwipeCoordinator {
     /// A preview of the word being drawn, or `nil` when the gesture ended. Empty results are
     /// not delivered: the previous preview stays up.
     var onPreview: ((DecodeResult?) -> Void)?
+    /// The last finger lifted. The engine keeps the beat open for the leash, then calls `finishNow`.
+    var onBeatIdle: (() -> Void)?
+    /// A new stroke or tap joined the beat, so the leash wait should be cancelled.
+    var onBeatContinued: (() -> Void)?
 
     private var active: [TouchID: StrokeBuffer] = [:]
     private var finished: [StrokeBuffer] = []
@@ -41,6 +45,10 @@ final class SwipeCoordinator {
     /// Letter fingers still deciding between a tap and a stroke. Weak, so a session the touch
     /// engine has already dropped cannot keep the coordinator alive.
     private var undecided: [ObjectIdentifier: WeakSession] = [:]
+    /// The fingers are up and the beat is waiting out the leash before it decodes.
+    private var holdingBeat = false
+    /// Space, return, or punctuation that should follow the word once it commits.
+    private var trailing: [KeyboardIntent] = []
 
     private struct WeakSession {
         weak var session: SwipeSession?
@@ -51,11 +59,17 @@ final class SwipeCoordinator {
         self.decode = decode
     }
 
-    /// A stroke or a held letter is still down. The word waits until both have lifted.
-    var isCollecting: Bool { !active.isEmpty || !held.isEmpty }
+    /// A stroke, a held letter, or a beat waiting out the leash. The word waits for the last of these.
+    var isCollecting: Bool { !active.isEmpty || !held.isEmpty || holdingBeat }
 
-    /// Moving strokes already in this beat. A third finger stays a tap.
+    /// Moving strokes already in this beat, including ones that have lifted.
     var strokeChainCount: Int { active.count + finished.count }
+
+    /// A new travel may open a chain. The thumb that already lifted can start again.
+    /// A second finger down at once takes the other chain. A third finger stays a tap.
+    func chainThumb(preferring side: Int) -> Int? {
+        ThumbLanes(active: Set(active.values.map(\.thumb))).assigned(side)
+    }
 
     func registerUndecided(_ session: SwipeSession) {
         undecided[ObjectIdentifier(session)] = WeakSession(session: session)
@@ -99,16 +113,18 @@ final class SwipeCoordinator {
     }
 
     /// The held finger started to travel, so it becomes a stroke of the same beat.
-    func promoteHold(_ id: TouchID, track: TouchTrack, keyWidth: CGFloat) {
+    func promoteHold(_ id: TouchID, track: TouchTrack, keyWidth: CGFloat, thumb: Int) {
         held.removeValue(forKey: id)
         accentHolds.remove(id)
-        join(track, keyWidth: keyWidth)
+        join(track, keyWidth: keyWidth, thumb: thumb)
     }
 
     /// A tap that landed and lifted while this beat was open.
     func noteTap(_ observation: StrokeObservation) {
+        noteContinued()
         liftedTaps.append(observation)
         schedulePreview()
+        finishIfIdle()
     }
 
     /// Fingers that were waiting when this gesture began become strokes of it.
@@ -121,7 +137,7 @@ final class SwipeCoordinator {
     }
 
     /// Starts a gesture with `track` as its first stroke, holding `ticket` for the word.
-    func begin(_ track: TouchTrack, ticket: InputComposer.Ticket, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth) {
+    func begin(_ track: TouchTrack, ticket: InputComposer.Ticket, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth, thumb: Int = 0) {
         if let previous = self.ticket {
             composer.cancel(previous)
         }
@@ -130,12 +146,13 @@ final class SwipeCoordinator {
         held.removeAll()
         accentHolds.removeAll()
         self.ticket = ticket
-        add(track, keyWidth: keyWidth)
+        add(track, keyWidth: keyWidth, thumb: thumb)
     }
 
     /// Adds `track` as another stroke of the gesture in progress.
-    func join(_ track: TouchTrack, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth) {
-        add(track, keyWidth: keyWidth)
+    func join(_ track: TouchTrack, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth, thumb: Int = 0) {
+        noteContinued()
+        add(track, keyWidth: keyWidth, thumb: thumb)
     }
 
     func moved(_ track: TouchTrack) {
@@ -170,6 +187,8 @@ final class SwipeCoordinator {
         held.removeAll()
         accentHolds.removeAll()
         liftedTaps.removeAll()
+        holdingBeat = false
+        trailing.removeAll()
         if let ticket {
             composer.cancel(ticket)
         }
@@ -179,8 +198,8 @@ final class SwipeCoordinator {
 
     // MARK: - Private
 
-    private func add(_ track: TouchTrack, keyWidth: CGFloat) {
-        var stroke = StrokeBuffer(start: Self.point(track.start), keyWidth: keyWidth)
+    private func add(_ track: TouchTrack, keyWidth: CGFloat, thumb: Int) {
+        var stroke = StrokeBuffer(start: Self.point(track.start), keyWidth: keyWidth, thumb: thumb)
         if track.current.timestamp > track.start.timestamp {
             stroke.append(Self.point(track.current))
         }
@@ -189,7 +208,46 @@ final class SwipeCoordinator {
 
     private func finishIfIdle() {
         guard active.isEmpty, held.isEmpty else { return }
+        guard ticket != nil, !finished.isEmpty || !liftedTaps.isEmpty else {
+            holdingBeat = false
+            if let ticket {
+                composer.cancel(ticket)
+                self.ticket = nil
+            }
+            return
+        }
+        holdingBeat = true
+        if let onBeatIdle {
+            onBeatIdle()
+        } else {
+            finishGesture()
+        }
+    }
+
+    /// Commits the open beat now. Fingers still down are included. Returns false when there is nothing to commit.
+    @discardableResult
+    func finishNow(then intents: [KeyboardIntent] = []) -> Bool {
+        let pending = ticket != nil && (holdingBeat || !active.isEmpty || !finished.isEmpty || !held.isEmpty || !liftedTaps.isEmpty)
+        guard pending else { return false }
+        trailing.append(contentsOf: intents)
+        noteContinued()
+        for stroke in active.values {
+            var stroke = stroke
+            stroke.finish(at: stroke.end)
+            finished.append(stroke)
+        }
+        active.removeAll()
+        liftedTaps.append(contentsOf: held.values)
+        held.removeAll()
+        accentHolds.removeAll()
         finishGesture()
+        return true
+    }
+
+    private func noteContinued() {
+        guard holdingBeat else { return }
+        holdingBeat = false
+        onBeatContinued?()
     }
 
     private func pendingTaps() -> [StrokeObservation] {
@@ -199,15 +257,22 @@ final class SwipeCoordinator {
     private func finishGesture() {
         let strokes = finished
         let taps = liftedTaps
+        let extra = trailing
         finished.removeAll()
         liftedTaps.removeAll()
+        trailing.removeAll()
+        holdingBeat = false
         guard let ticket else { return }
         self.ticket = nil
 
         invalidatePreview()
         guard let gesture = GestureComposer.compose(strokes, taps: taps, tuning: evidenceTuning),
               gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
-            composer.cancel(ticket)
+            if extra.isEmpty {
+                composer.cancel(ticket)
+            } else {
+                composer.commit(ticket, extra)
+            }
             onPreview?(nil)
             return
         }
@@ -223,7 +288,7 @@ final class SwipeCoordinator {
                 return
             }
             decodeTask = nil
-            commit(result, gesture: gesture, ticket: ticket)
+            commit(result, gesture: gesture, ticket: ticket, then: extra)
             onPreview?(nil)
             onFinish?()
         }
@@ -231,18 +296,25 @@ final class SwipeCoordinator {
 
     /// The decoded word, or the letters the thumbs aimed at when nothing matched.
     /// A return trip is already gone from those letters, so it cannot be typed.
-    private func commit(_ result: DecodeResult, gesture: SwipeGesture, ticket: InputComposer.Ticket) {
+    private func commit(_ result: DecodeResult, gesture: SwipeGesture, ticket: InputComposer.Ticket, then extra: [KeyboardIntent]) {
+        var intents: [KeyboardIntent]
         if !result.isEmpty {
-            composer.commit(ticket, [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount, observations: gesture.observations, strokePaths: gesture.strokePaths)])
-            return
-        }
-        let traced = gesture.tracedLetters
-        if traced.isEmpty {
-            composer.cancel(ticket)
-        } else if traced.count == 1 {
-            composer.commit(ticket, [.insert(traced)])
+            intents = [.commitSwipe(result.words, unsure: result.isUnsure, strokes: gesture.strokeCount, observations: gesture.observations, strokePaths: gesture.strokePaths)]
         } else {
-            composer.commit(ticket, [.commitSwipe([traced], unsure: true, strokes: gesture.strokeCount, observations: gesture.observations, strokePaths: gesture.strokePaths)])
+            let traced = gesture.tracedLetters
+            if traced.isEmpty {
+                intents = []
+            } else if traced.count == 1 {
+                intents = [.insert(traced)]
+            } else {
+                intents = [.commitSwipe([traced], unsure: true, strokes: gesture.strokeCount, observations: gesture.observations, strokePaths: gesture.strokePaths)]
+            }
+        }
+        intents.append(contentsOf: extra)
+        if intents.isEmpty {
+            composer.cancel(ticket)
+        } else {
+            composer.commit(ticket, intents)
         }
     }
 
@@ -293,3 +365,17 @@ final class SwipeCoordinator {
         StrokePoint(location: sample.location, time: sample.timestamp)
     }
 }
+
+    /// Which thumbs are drawing right now. A thumb that has lifted is not active, so it can start again.
+    /// A second finger that lands while one thumb is drawing takes the other chain, even on the same side.
+    struct ThumbLanes: Equatable, Sendable {
+        var active: Set<Int>
+
+        func assigned(_ preferred: Int) -> Int? {
+            if active.count >= 2 { return nil }
+            if !active.contains(preferred) { return preferred }
+            let other = preferred == 0 ? 1 : 0
+            if active.contains(other) { return nil }
+            return other
+        }
+    }

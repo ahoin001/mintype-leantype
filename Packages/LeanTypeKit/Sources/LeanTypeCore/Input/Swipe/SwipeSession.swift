@@ -89,8 +89,13 @@ final class SwipeSession: InteractionSession {
                 tap.moved(track)
             }
         case .holding:
-            if hasBecomeStroke(track), coordinator.strokeChainCount < 2 {
-                coordinator.promoteHold(track.id, track: track, keyWidth: origin.visualFrame.width)
+            if hasBecomeStroke(track), let thumb = coordinator.chainThumb(preferring: thumbIndex(of: track.start.location)) {
+                coordinator.promoteHold(
+                    track.id,
+                    track: track,
+                    keyWidth: origin.visualFrame.width,
+                    thumb: thumb
+                )
                 phase = .stroking
                 noteArrival(track, includeStart: true)
             }
@@ -205,20 +210,27 @@ final class SwipeSession: InteractionSession {
 
     private func beginStroke(from tap: CharacterTapSession, track: TouchTrack) {
         coordinator.unregisterUndecided(self)
-        if coordinator.strokeChainCount >= 2 {
+        let thumbSide = thumbIndex(of: track.start.location)
+        guard let thumb = coordinator.chainThumb(preferring: thumbSide) else {
             endTap(tap, track: track)
             return
         }
         if coordinator.isCollecting {
             let ticket = tap.relinquish()
             context.composer.cancel(ticket)
-            coordinator.join(track, keyWidth: origin.visualFrame.width)
+            coordinator.join(track, keyWidth: origin.visualFrame.width, thumb: thumb)
         } else {
-            coordinator.begin(track, ticket: tap.relinquish(), keyWidth: origin.visualFrame.width)
+            coordinator.begin(track, ticket: tap.relinquish(), keyWidth: origin.visualFrame.width, thumb: thumb)
             coordinator.enlistUndecidedPartners()
         }
         phase = .stroking
         noteArrival(track, includeStart: true)
+    }
+
+    /// Left of the Q–P midline is one thumb. The other side is the other thumb.
+    private func thumbIndex(of location: CGPoint) -> Int {
+        let midline = LetterLayout(geometry: context.geometry)?.handMidline ?? (context.geometry.size.width / 2)
+        return location.x < midline ? 0 : 1
     }
 
     private func endTap(_ tap: CharacterTapSession, track: TouchTrack) {

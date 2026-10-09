@@ -76,6 +76,8 @@ public final class KeyboardEngine {
     private var pickedUpText: String?
     /// Holds freshly typed letters until the word is finished or a swipe takes them.
     private var composingTimer: (any Cancellable)?
+    /// The unfinished swipe beat, waiting out the leash after the last finger lifted.
+    private var beatHold: (any Cancellable)?
     /// The polyline of the swipe just committed, so picking another word can remember it.
     private var recentStrokePath: [CGPoint] = []
     /// Paste, copy, and cut. The pasteboard string is read only inside the paste handler.
@@ -117,6 +119,11 @@ public final class KeyboardEngine {
             publishState()
         }
         coordinator.onFinish = { [weak self] in self?.touchEngine.refreshPresentation() }
+        coordinator.onBeatIdle = { [weak self] in self?.armBeatHold() }
+        coordinator.onBeatContinued = { [weak self] in
+            self?.beatHold?.cancel()
+            self?.beatHold = nil
+        }
         return coordinator
     }()
 
@@ -254,8 +261,13 @@ public final class KeyboardEngine {
     /// Returns to a fresh state, e.g. when the keyboard reappears in a new field.
     public func reset() {
         touchEngine.cancelAll()
-        swipe.reset()
-        composer.reset()
+        let committed = swipe.finishNow()
+        if !committed {
+            swipe.reset()
+            composer.reset()
+        }
+        beatHold?.cancel()
+        beatHold = nil
         shift.reset()
         flow.reset()
         lastSpaceTime = nil
@@ -307,8 +319,13 @@ public final class KeyboardEngine {
 
     public func cancelAllTouches() {
         touchEngine.cancelAll()
-        swipe.reset()
-        composer.reset()
+        let committed = swipe.finishNow()
+        if !committed {
+            swipe.reset()
+            composer.reset()
+        }
+        beatHold?.cancel()
+        beatHold = nil
         liveTouches = []
         spaceTouches = []
     }
@@ -418,9 +435,13 @@ public final class KeyboardEngine {
         case let .tapCharacter(character, point, time):
             changed = insertCharacter(character, at: point, time: time)
         case .space:
-            closeOpenWord()
-            consumePickedUpWord()
-            changed = insertSpace()
+            if finishBeat(then: [.space]) {
+                changed = true
+            } else {
+                closeOpenWord()
+                consumePickedUpWord()
+                changed = insertSpace()
+            }
         case .pickUpWord:
             closeOpenWord()
             changed = togglePickUp()
@@ -429,13 +450,15 @@ public final class KeyboardEngine {
             changed = !(editor.contextBefore?.last?.isWhitespace ?? true)
             if changed { editor.insertSpace() }
         case .returnKey:
-            closeOpenWord()
-            consumePickedUpWord()
-            _ = finishWord(trailing: "")
-            editor.insert("\n")
-            words.noteSentenceEnded()
-            if let frame = visualFrame(of: .returnKey) {
-                emit(.returnSent(traits.returnKey.title, from: frame))
+            if !finishBeat(then: [.returnKey]) {
+                closeOpenWord()
+                consumePickedUpWord()
+                _ = finishWord(trailing: "")
+                editor.insert("\n")
+                words.noteSentenceEnded()
+                if let frame = visualFrame(of: .returnKey) {
+                    emit(.returnSent(traits.returnKey.title, from: frame))
+                }
             }
             changed = true
         case .deleteWord:
@@ -543,6 +566,7 @@ public final class KeyboardEngine {
             editor.insert(text)
             if hadWord { completeWord(.tap) }
         } else if let mark = text.first, text.count == 1, TextBoundary.hoppingPunctuation.contains(mark) {
+            if finishBeat(then: [.insert(text)]) { return true }
             closeOpenWord()
             flushTypedComposing()
             let hadWord = !editor.currentWord.isEmpty
@@ -598,6 +622,26 @@ public final class KeyboardEngine {
         composingTimer = scheduler.schedule(after: Self.wordLeash) { [weak self] in
             self?.flushTypedComposing()
         }
+    }
+
+    /// Keeps a lifted swipe open so the other thumb can still join, then decodes it.
+    private func armBeatHold() {
+        beatHold?.cancel()
+        beatHold = scheduler.schedule(after: activeLeash) { [weak self] in
+            self?.swipe.finishNow()
+        }
+    }
+
+    /// Commits the open beat before `intents`. Returns false when no beat is waiting.
+    private func finishBeat(then intents: [KeyboardIntent]) -> Bool {
+        beatHold?.cancel()
+        beatHold = nil
+        return swipe.finishNow(then: intents)
+    }
+
+    /// Used by tests so a one-finger swipe still commits without waiting out the leash.
+    func releaseHeldBeat() {
+        _ = finishBeat(then: [])
     }
 
     private func insertSpace() -> Bool {
