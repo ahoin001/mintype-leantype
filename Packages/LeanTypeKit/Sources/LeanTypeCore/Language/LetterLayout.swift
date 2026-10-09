@@ -8,6 +8,13 @@ public struct LetterLayout: Hashable, Sendable {
     public let keyWidth: CGFloat
     public let keyHeight: CGFloat
 
+    /// The split between the two thumbs: halfway from Q to P.
+    public var handMidline: CGFloat {
+        let left = center(of: UInt8(ascii: "q")).x
+        let right = center(of: UInt8(ascii: "p")).x
+        return (left + right) / 2
+    }
+
     /// Builds the layout from a letters-layer geometry; `nil` if any letter key is missing.
     public init?(geometry: KeyboardGeometry) {
         var centers = [CGPoint?](repeating: nil, count: LexiconKey.letterCount)

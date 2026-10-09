@@ -68,7 +68,9 @@ struct SwipeEvent: Hashable, Sendable {
             point: observation.point,
             letter: observation.letter,
             role: observation.isTap ? .tap : .anchor,
-            strokeIndex: observation.isTap ? -2 - tapFinger : observation.strokeIndex,
+            strokeIndex: observation.strokeIndex >= 0
+                ? observation.strokeIndex
+                : (observation.isTap ? -2 - tapFinger : observation.strokeIndex),
             directionX: observation.directionX,
             directionY: observation.directionY
         )
@@ -104,4 +106,13 @@ struct EvidenceTuning: Hashable, Sendable {
     var dwellTravel: CGFloat = GestureComposer.dwellTravel
 
     static let standard = EvidenceTuning()
+
+    /// Dwell radius and travel follow the key. Duration stays a time, not a width.
+    func scaled(to keyWidth: CGFloat) -> EvidenceTuning {
+        let scale = keyWidth / StrokeBuffer.referenceKeyWidth
+        var copy = self
+        copy.dwellRadius = GestureComposer.dwellRadius * scale
+        copy.dwellTravel = GestureComposer.dwellTravel * scale
+        return copy
+    }
 }

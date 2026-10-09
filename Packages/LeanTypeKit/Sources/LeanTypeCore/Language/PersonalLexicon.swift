@@ -22,6 +22,8 @@ public struct PersonalLexicon: Sendable {
     public static let capacity = 1000
     /// Uses before a learned word starts appearing as a suggestion.
     public static let usesBeforeSuggesting = 2
+    /// Uses before a new spelling is treated as a real word. Until then autocorrect may still fix it.
+    public static let usesBeforeKnown = 3
 
     /// A personal word ready for matching: its display form, key, and an estimated log count
     /// comparable with the dictionary's.
@@ -43,7 +45,8 @@ public struct PersonalLexicon: Sendable {
     public var isEmpty: Bool { learned.isEmpty }
 
     public func contains(_ word: some StringProtocol) -> Bool {
-        learned[Self.storageKey(word)] != nil
+        guard let existing = learned[Self.storageKey(word)] else { return false }
+        return existing.uses >= Self.usesBeforeKnown
     }
 
     public func display(of word: some StringProtocol) -> String? {
@@ -61,8 +64,8 @@ public struct PersonalLexicon: Sendable {
         learn(word, at: date)
         let key = Self.storageKey(word)
         guard var existing = learned[key] else { return false }
-        if existing.uses < Self.usesBeforeSuggesting {
-            existing.uses = Self.usesBeforeSuggesting
+        if existing.uses < Self.usesBeforeKnown {
+            existing.uses = Self.usesBeforeKnown
             learned[key] = existing
         }
         return true

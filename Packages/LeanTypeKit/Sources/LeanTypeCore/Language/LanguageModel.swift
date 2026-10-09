@@ -27,6 +27,8 @@ public final class LanguageModel {
 
     /// Learning only happens when this is on (the setting plus Full Access).
     public var isLearningEnabled = false
+    /// Full gesture traces are written locally. Off unless the setting says so.
+    var recordsGestureTraces = false
 
     private let store: (any LearnedWordsStore)?
     private let rejections: RejectionMemory
@@ -128,7 +130,8 @@ public final class LanguageModel {
             lexicon: lexicon,
             costs: costs,
             expected: expected,
-            habits: bonuses
+            habits: bonuses,
+            clock: SearchClock.responseClock()
         )
         let path = gesture.strokePaths.first ?? gesture.path
         return finish(strokes.applying(to: result, path: path, layout: layout), trace: Self.strokeTrace(of: gesture))
@@ -155,6 +158,7 @@ public final class LanguageModel {
             evidence: evidence
         )
         var pathScore = PathScore()
+        let sink = recordsGestureTraces ? DecodeTraceSink() : nil
         let result = AlignmentSearch.decode(
             gesture,
             layout: layout,
@@ -164,13 +168,38 @@ public final class LanguageModel {
             costs: costs,
             expected: context.hasPrecedingWord ? context.expectedWords() : [],
             habits: habitBonuses,
+            trace: sink,
+            clock: SearchClock.responseClock(),
             pathScore: &pathScore
         )
+        if let sink { GestureTraceLog.append(sink.trace) }
         let adjusted = strokes.applying(to: result, path: gesture.path, layout: layout)
         return SequenceOutcome(
             result: finish(adjusted, trace: evidence.aimedLetters),
             traced: evidence.aimedLetters
         )
+    }
+
+    /// A word typed with taps only, scored by the same search as a swipe. No polyline.
+    /// Thumbs come from timing and which side of the keyboard each key sits on.
+    func tapReading(word: String, touches: [CGPoint], times: [Double], layout: LetterLayout) -> DecodeResult? {
+        let letters = word.lowercased().filter(\.isLetter).map { String($0) }
+        guard letters.count >= 2, letters.count == touches.count, letters.count == times.count else { return nil }
+        let thumbs = TapThumbs.assign(times: times, points: touches, midline: layout.handMidline)
+        guard thumbs.count == letters.count else { return nil }
+        let observations = letters.indices.map { index in
+            StrokeObservation(
+                time: times[index],
+                point: touches[index],
+                directionX: 0,
+                directionY: 0,
+                letter: letters[index],
+                isTap: true,
+                strokeIndex: thumbs[index]
+            )
+        }
+        let outcome = sequenceDecode(observations, layout: layout, strokePaths: [])
+        return outcome.result.isEmpty ? nil : outcome.result
     }
 
     /// Saved corrections first, then a swipe the user just deleted. The deletion only changes

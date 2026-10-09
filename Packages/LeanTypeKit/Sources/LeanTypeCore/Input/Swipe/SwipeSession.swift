@@ -19,10 +19,15 @@ struct SwipeTypingMode: TypingMode {
 
 @MainActor
 final class SwipeSession: InteractionSession {
-    /// Sideways travel that is a swipe, not a downward flick.
+    /// Sideways travel that is a swipe, not a downward flick. Physical, so it stays in points.
     static let sidewaysDistance: CGFloat = 16
     /// Travel in any direction that turns a tap into a stroke, even straight down.
     static let strokeDistance: CGFloat = 36
+    /// How far past the key's hit frame a roll must go before it is a stroke. A thumb that
+    /// only crosses the border is still a tap.
+    static let frameSlop: CGFloat = 8
+    /// A letter held this long, while another finger is drawing, is a rest and not a letter.
+    static let restDuration: Double = 0.5
 
     private enum Phase {
         case tapping(CharacterTapSession)
@@ -84,8 +89,8 @@ final class SwipeSession: InteractionSession {
                 tap.moved(track)
             }
         case .holding:
-            if hasBecomeStroke(track) {
-                coordinator.promoteHold(track.id, track: track)
+            if hasBecomeStroke(track), coordinator.strokeChainCount < 2 {
+                coordinator.promoteHold(track.id, track: track, keyWidth: origin.visualFrame.width)
                 phase = .stroking
                 noteArrival(track, includeStart: true)
             }
@@ -103,7 +108,7 @@ final class SwipeSession: InteractionSession {
         case let .tapping(tap):
             endTap(tap, track: track)
         case .holding:
-            coordinator.liftHold(track.id)
+            coordinator.liftHold(track.id, at: track.current.timestamp)
         case .stroking:
             coordinator.ended(track)
         case .finished:
@@ -120,7 +125,8 @@ final class SwipeSession: InteractionSession {
         case .holding:
             coordinator.dropHold(latest.id)
         case .stroking:
-            coordinator.reset()
+            // This finger already drew. Keep it, and keep the other thumb's stroke.
+            coordinator.ended(latest)
         case .finished:
             return
         }
@@ -150,10 +156,11 @@ final class SwipeSession: InteractionSession {
             beginStroke(from: tap, track: latest)
             return
         }
+        let accent = tap.isShowingAlternates
         let ticket = tap.relinquish()
         context.composer.cancel(ticket)
         coordinator.unregisterUndecided(self)
-        holdForCurrentGesture()
+        holdForCurrentGesture(keepsRest: accent)
     }
 
     // MARK: - Private
@@ -175,15 +182,17 @@ final class SwipeSession: InteractionSession {
         ) {
             return false
         }
-        if !origin.hitFrame.contains(track.current.location) { return true }
+        let room = origin.hitFrame.insetBy(dx: -Self.frameSlop, dy: -Self.frameSlop)
+        if !room.contains(track.current.location) { return true }
         return hypot(move.dx, move.dy) >= Self.strokeDistance
     }
 
     /// Keeps this finger's letter in the open beat without adding a point to the polyline.
-    private func holdForCurrentGesture() {
+    /// An accent popup is a deliberate hold. A long rest beside another stroke is not.
+    private func holdForCurrentGesture(keepsRest: Bool = false) {
         guard let character = origin.key.kind.character else { return }
         let center = CGPoint(x: origin.visualFrame.midX, y: origin.visualFrame.midY)
-        coordinator.hold(latest.id, StrokeObservation(
+        coordinator.hold(latest.id, keepsRest: keepsRest, StrokeObservation(
             time: latest.start.timestamp,
             point: center,
             directionX: 0,
@@ -196,12 +205,16 @@ final class SwipeSession: InteractionSession {
 
     private func beginStroke(from tap: CharacterTapSession, track: TouchTrack) {
         coordinator.unregisterUndecided(self)
+        if coordinator.strokeChainCount >= 2 {
+            endTap(tap, track: track)
+            return
+        }
         if coordinator.isCollecting {
             let ticket = tap.relinquish()
             context.composer.cancel(ticket)
-            coordinator.join(track)
+            coordinator.join(track, keyWidth: origin.visualFrame.width)
         } else {
-            coordinator.begin(track, ticket: tap.relinquish())
+            coordinator.begin(track, ticket: tap.relinquish(), keyWidth: origin.visualFrame.width)
             coordinator.enlistUndecidedPartners()
         }
         phase = .stroking

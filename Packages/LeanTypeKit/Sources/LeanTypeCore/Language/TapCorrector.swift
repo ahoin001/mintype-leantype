@@ -73,9 +73,17 @@ struct TapCorrector {
             return candidate
         }
         let known = personalWord || match != nil
-        let completions = completions(for: key, excluding: [typed, correction].compactMap { $0 }, limit: completionLimit)
-            .map { matchCase($0, to: typed) }
-        return WordAnalysis(isKnown: known, correction: correction, completions: completions)
+        var completions = completions(for: key, excluding: [typed, correction].compactMap { $0 }, limit: completionLimit)
+        if let other = apostropheAlternate(typed, key: key),
+           !completions.contains(where: { $0.compare(other, options: .caseInsensitive) == .orderedSame }) {
+            completions.insert(other, at: 0)
+            if completions.count > completionLimit { completions.removeLast() }
+        }
+        return WordAnalysis(
+            isKnown: known,
+            correction: correction,
+            completions: completions.map { matchCase($0, to: typed) }
+        )
     }
 
     // MARK: - Correction
@@ -86,9 +94,30 @@ struct TapCorrector {
         logCount < rareWordLogCount
     }
 
+    /// Spellings that are not words of their own, so the contraction is the correction.
+    private static let contractionSpellings: Set<String> = ["dont", "cant", "wont", "im"]
+
     /// Same letters, different spelling: apostrophes, accents, or casing.
+    /// A non-word such as "dont" prefers the contraction when both displays share the key.
     private func sameLettersCorrection(_ typed: String, key: [UInt8]) -> String? {
-        lexicon.indices(ofKey: key).first.map { matchCase(lexicon.display(at: $0), to: typed) }
+        let indices = Array(lexicon.indices(ofKey: key))
+        guard !indices.isEmpty else { return nil }
+        let letters = typed.lowercased().filter(\.isLetter)
+        let chosen: Int
+        if Self.contractionSpellings.contains(letters),
+           let contraction = indices.first(where: { lexicon.display(at: $0).contains("'") || lexicon.display(at: $0).contains("’") }) {
+            chosen = contraction
+        } else {
+            chosen = indices[0]
+        }
+        return matchCase(lexicon.display(at: chosen), to: typed)
+    }
+
+    /// Both "its" and "it's" are real. The typed form stays; the other form is a strip choice.
+    private func apostropheAlternate(_ typed: String, key: [UInt8]) -> String? {
+        let displays = lexicon.indices(ofKey: key).map { lexicon.display(at: $0) }
+        guard displays.contains(where: { $0.compare(typed, options: .caseInsensitive) == .orderedSame }) else { return nil }
+        return displays.first { $0.compare(typed, options: .caseInsensitive) != .orderedSame }
     }
 
     /// The best single edit of `key`, if it beats leaving the word alone (`typedLogCount`) by

@@ -156,10 +156,24 @@ enum GestureComposer {
     ) -> SwipeGesture? {
         let strokes = strokes.filter { !$0.points.isEmpty }
         guard !strokes.isEmpty || !taps.isEmpty else { return nil }
-        let moving = strokes.max { length($0) < length($1) }
+        // Two thumbs draw. A third contact is a tap, so a palm cannot open another chain.
+        let chains = Array(strokes.prefix(2))
+        var taps = taps
+        for stroke in strokes.dropFirst(2) {
+            guard let letter = stroke.arrivals.first?.letter else { continue }
+            taps.append(StrokeObservation(
+                time: stroke.start.time,
+                point: stroke.start.location,
+                directionX: 0,
+                directionY: 0,
+                letter: letter,
+                isTap: true
+            ))
+        }
+        let moving = chains.max { length($0) < length($1) }
         let path = moving?.points.map(\.location) ?? []
-        let strokePaths = strokes.map { $0.points.map(\.location) }
-        var events = strokes.enumerated().flatMap { index, stroke in
+        let strokePaths = chains.map { $0.points.map(\.location) }
+        var events = chains.enumerated().flatMap { index, stroke in
             strokeEvents(in: stroke, strokeIndex: index, tuning: tuning)
         }
         for (offset, tap) in taps.enumerated() {
@@ -175,7 +189,7 @@ enum GestureComposer {
         let prefersContraction = strokes.contains { StrokeLetters.endsOnApostrophe($0.arrivals) }
         return SwipeGesture(
             path: path,
-            strokeCount: max(strokes.count, path.count >= 2 ? 1 : 0),
+            strokeCount: max(chains.count, path.count >= 2 ? 1 : 0),
             strokePaths: strokePaths,
             tracedLetters: traced,
             observations: observations,

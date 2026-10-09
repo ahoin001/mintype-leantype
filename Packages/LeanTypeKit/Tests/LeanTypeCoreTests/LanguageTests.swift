@@ -115,6 +115,18 @@ struct TapCorrectorTests {
         #expect(analysis.correction == nil)
     }
 
+    @Test(arguments: ["cant", "wont"])
+    func mapsMissingContractions(typed: String) {
+        let analysis = analyze(typed)
+        #expect(analysis.correction?.contains("'") == true)
+    }
+
+    @Test func itsStaysTypedAndOffersTheContraction() {
+        let analysis = analyze("its")
+        #expect(analysis.correction == nil)
+        #expect(analysis.completions.contains { $0.caseInsensitiveCompare("it's") == .orderedSame })
+    }
+
     @Test func respectsPersonalWords() {
         let analysis = analyze("Zyxt", personal: ["zyxt"])
         #expect(analysis.isKnown)
@@ -191,10 +203,13 @@ struct PersonalLexiconTests {
         var personal = PersonalLexicon()
         let date = Date()
         personal.learn("Zorbly", at: date)
-        #expect(personal.contains("zorbly"))
+        #expect(!personal.contains("zorbly"), "One use is still a pending spelling")
         #expect(personal.entries(logCountRange: 0...10).isEmpty, "One use isn't enough to suggest")
         personal.learn("Zorbly", at: date)
+        #expect(!personal.contains("zorbly"), "Two uses can suggest, but the spelling is not known yet")
         #expect(personal.entries(logCountRange: 0...10).map(\.display) == ["Zorbly"])
+        personal.learn("Zorbly", at: date)
+        #expect(personal.contains("zorbly"))
     }
 
     @Test func evictsLeastRecentlyUsed() {
@@ -206,9 +221,9 @@ struct PersonalLexiconTests {
         personal.learn("word0", at: start.addingTimeInterval(10_000))
         personal.learn("fresh", at: start.addingTimeInterval(10_001))
         #expect(personal.learnedWords.count == PersonalLexicon.capacity)
-        #expect(personal.contains("word0"), "Recently used words survive")
-        #expect(!personal.contains("word1"), "The stalest word makes room")
-        #expect(personal.contains("fresh"))
+        #expect(personal.learnedWords.contains { $0.word == "word0" }, "Recently used words survive")
+        #expect(!personal.learnedWords.contains { $0.word == "word1" }, "The stalest word makes room")
+        #expect(personal.learnedWords.contains { $0.word == "fresh" })
     }
 
     @Test func rememberSuggestsOnTheFirstPinAndForgetDropsOnlyThatWord() {
@@ -216,15 +231,16 @@ struct PersonalLexiconTests {
         personal.learn("kept", at: Date())
         let pinned = personal.remember("zorbly", at: Date())
         #expect(pinned)
-        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeSuggesting)
+        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeKnown)
+        #expect(personal.contains("zorbly"), "An explicit pin is known at once")
         let again = personal.remember("zorbly", at: Date())
         #expect(again)
-        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeSuggesting + 1)
+        #expect(personal.uses(of: "zorbly") == PersonalLexicon.usesBeforeKnown + 1)
         #expect(personal.entries(logCountRange: 0...10).map(\.display) == ["zorbly"])
         let forgotten = personal.forget("Zorbly")
         #expect(forgotten)
         #expect(!personal.contains("zorbly"))
-        #expect(personal.contains("kept"))
+        #expect(personal.learnedWords.contains { $0.word == "kept" })
     }
 }
 
@@ -338,6 +354,8 @@ struct EngineLanguageTests {
     @Test func unknownWordsAreLearned() {
         let (harness, _) = makeHarness()
         harness.type("zorbly zorbly ")
+        #expect(harness.engine.language?.isKnown("zorbly") == false, "Two uses stay pending")
+        harness.type("zorbly ")
         #expect(harness.engine.language?.isKnown("zorbly") == true)
         harness.type("zorbl")
         #expect(harness.state.candidates.candidates.contains { $0.text == "zorbly" })
@@ -347,7 +365,7 @@ struct EngineLanguageTests {
         let (harness, store) = makeHarness()
         harness.type("teh")
         harness.engine.rememberWord("teh")
-        #expect(store.load().first?.uses == PersonalLexicon.usesBeforeSuggesting)
+        #expect(store.load().first?.uses == PersonalLexicon.usesBeforeKnown)
         harness.tap(.space)
         #expect(harness.text == "teh ")
     }

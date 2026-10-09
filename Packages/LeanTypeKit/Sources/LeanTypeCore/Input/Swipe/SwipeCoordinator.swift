@@ -25,6 +25,8 @@ final class SwipeCoordinator {
     private var finished: [StrokeBuffer] = []
     /// Letter fingers still down that have not started a stroke. Each is one tap in this beat.
     private var held: [TouchID: StrokeObservation] = [:]
+    /// Holds that are an accent popup, so a long dwell still types the letter.
+    private var accentHolds: Set<TouchID> = []
     /// Taps that lifted while the beat was open, in touch-down order.
     private var liftedTaps: [StrokeObservation] = []
     private var ticket: InputComposer.Ticket?
@@ -52,6 +54,9 @@ final class SwipeCoordinator {
     /// A stroke or a held letter is still down. The word waits until both have lifted.
     var isCollecting: Bool { !active.isEmpty || !held.isEmpty }
 
+    /// Moving strokes already in this beat. A third finger stays a tap.
+    var strokeChainCount: Int { active.count + finished.count }
+
     func registerUndecided(_ session: SwipeSession) {
         undecided[ObjectIdentifier(session)] = WeakSession(session: session)
     }
@@ -61,14 +66,27 @@ final class SwipeCoordinator {
     }
 
     /// A letter finger that has not traveled. It stays out of the polyline.
-    func hold(_ id: TouchID, _ observation: StrokeObservation) {
+    /// `keepsRest` is an accent popup: the letter stays even after a long dwell.
+    func hold(_ id: TouchID, keepsRest: Bool = false, _ observation: StrokeObservation) {
         held[id] = observation
+        if keepsRest {
+            accentHolds.insert(id)
+        } else {
+            accentHolds.remove(id)
+        }
     }
 
     /// The held finger lifted without leaving its key. The letter joins the beat at its touch-down time.
-    func liftHold(_ id: TouchID) {
+    /// A long rest beside another stroke is left out.
+    func liftHold(_ id: TouchID, at time: Double) {
+        let keepsRest = accentHolds.remove(id) != nil
         if let observation = held.removeValue(forKey: id) {
-            liftedTaps.append(observation)
+            let rested = !keepsRest
+                && time - observation.time >= SwipeSession.restDuration
+                && strokeChainCount > 0
+            if !rested {
+                liftedTaps.append(observation)
+            }
         }
         finishIfIdle()
     }
@@ -76,13 +94,15 @@ final class SwipeCoordinator {
     /// The touch was cancelled. The letter is not part of the word.
     func dropHold(_ id: TouchID) {
         held.removeValue(forKey: id)
+        accentHolds.remove(id)
         finishIfIdle()
     }
 
     /// The held finger started to travel, so it becomes a stroke of the same beat.
-    func promoteHold(_ id: TouchID, track: TouchTrack) {
+    func promoteHold(_ id: TouchID, track: TouchTrack, keyWidth: CGFloat) {
         held.removeValue(forKey: id)
-        join(track)
+        accentHolds.remove(id)
+        join(track, keyWidth: keyWidth)
     }
 
     /// A tap that landed and lifted while this beat was open.
@@ -101,20 +121,21 @@ final class SwipeCoordinator {
     }
 
     /// Starts a gesture with `track` as its first stroke, holding `ticket` for the word.
-    func begin(_ track: TouchTrack, ticket: InputComposer.Ticket) {
+    func begin(_ track: TouchTrack, ticket: InputComposer.Ticket, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth) {
         if let previous = self.ticket {
             composer.cancel(previous)
         }
         finished.removeAll()
         liftedTaps.removeAll()
         held.removeAll()
+        accentHolds.removeAll()
         self.ticket = ticket
-        add(track)
+        add(track, keyWidth: keyWidth)
     }
 
     /// Adds `track` as another stroke of the gesture in progress.
-    func join(_ track: TouchTrack) {
-        add(track)
+    func join(_ track: TouchTrack, keyWidth: CGFloat = StrokeBuffer.referenceKeyWidth) {
+        add(track, keyWidth: keyWidth)
     }
 
     func moved(_ track: TouchTrack) {
@@ -147,6 +168,7 @@ final class SwipeCoordinator {
         active.removeAll()
         finished.removeAll()
         held.removeAll()
+        accentHolds.removeAll()
         liftedTaps.removeAll()
         if let ticket {
             composer.cancel(ticket)
@@ -157,8 +179,8 @@ final class SwipeCoordinator {
 
     // MARK: - Private
 
-    private func add(_ track: TouchTrack) {
-        var stroke = StrokeBuffer(start: Self.point(track.start))
+    private func add(_ track: TouchTrack, keyWidth: CGFloat) {
+        var stroke = StrokeBuffer(start: Self.point(track.start), keyWidth: keyWidth)
         if track.current.timestamp > track.start.timestamp {
             stroke.append(Self.point(track.current))
         }

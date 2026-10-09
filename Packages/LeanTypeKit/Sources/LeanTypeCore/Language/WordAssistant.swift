@@ -162,6 +162,12 @@ final class WordAssistant {
         }
         let word = String(editor.currentWord)
         guard let language, !word.isEmpty, !TextBoundary.continuesWord(after: editor.contextAfter) else { return false }
+        if let layout = letterLayout, let touches {
+            let letters = word.lowercased().filter(\.isLetter).map { String($0) }
+            if letters.count == touches.count {
+                TouchOffsetLog.record(letters: letters, points: touches, layout: layout)
+            }
+        }
         if literalWord == word {
             literalWord = nil
             language.noteCommitted(word, display: display)
@@ -176,7 +182,8 @@ final class WordAssistant {
         }
         keptWord = nil
         let analysis = language.analyze(word, touches: touches, layout: letterLayout, completionLimit: 0)
-        if autocorrects, let correction = analysis.correction, correction != word {
+        let correction = beamCorrection(of: word, fallback: analysis.correction, language: language)
+        if autocorrects, let correction, correction != word {
             let replaced = editor.replaceCurrentWord(with: correction, kind: .corrected, trailing: trailing)
             if replaced {
                 language.noteCommitted(correction, display: display)
@@ -188,6 +195,37 @@ final class WordAssistant {
         language.noteCommitted(word, display: display)
         settle(word)
         return false
+    }
+
+    /// The alignment search may replace a tapped word when it leads the typed spelling by more
+    /// than an exact hit. A name that is not a rearrangement of a dictionary word stays.
+    private func beamCorrection(of word: String, fallback: String?, language: LanguageModel) -> String? {
+        guard let layout = letterLayout,
+              let touches, touches.count == touchTimes.count,
+              let result = language.tapReading(word: word, touches: touches, times: touchTimes, layout: layout),
+              let winner = result.readings.first,
+              winner.word.compare(word, options: .caseInsensitive) != .orderedSame
+        else { return fallback }
+        if let typed = result.readings.first(where: {
+            $0.word.compare(word, options: .caseInsensitive) == .orderedSame
+        }) {
+            let appended = winner.score - DecodeResult.confidenceMargin - 1
+            let synthetic = !language.isKnown(word) && abs(typed.score - appended) < 0.05
+            if !synthetic, winner.score > typed.score + ReadingPolicy.exactLead {
+                return winner.word
+            }
+        }
+        let rival = result.readings.dropFirst().first?.score ?? -.infinity
+        if sameLetters(winner.word, word), winner.score > rival + ReadingPolicy.exactLead {
+            return winner.word
+        }
+        return fallback
+    }
+
+    private func sameLetters(_ left: String, _ right: String) -> Bool {
+        let a = left.lowercased().filter(\.isLetter).sorted()
+        let b = right.lowercased().filter(\.isLetter).sorted()
+        return a == b && !a.isEmpty
     }
 
     /// The user deleted a swipe the moment it landed. The next similar stroke tries another word.
@@ -212,6 +250,12 @@ final class WordAssistant {
     /// The user undid an autocorrection; leave `word` alone when it ends.
     func keep(_ word: String) {
         keptWord = word
+    }
+
+    /// The literal on the bar was tapped. Pin it now, so one choice makes the spelling known.
+    func acceptLiteral(_ word: String) {
+        keptWord = word
+        _ = language?.remember(word)
     }
 
     /// The user forgot `word`, so the next space may correct it again.

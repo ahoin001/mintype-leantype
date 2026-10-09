@@ -122,6 +122,7 @@ public final class KeyboardEngine {
         editor = TextEditor(document: document)
         words = WordAssistant(editor: editor)
         words.language = language
+        language?.recordsGestureTraces = settings.recordsGestureTraces
         self.scheduler = scheduler ?? MainQueueScheduler()
         self.settings = settings
         self.traits = traits
@@ -652,6 +653,14 @@ public final class KeyboardEngine {
         if !typed.isEmpty {
             let merged = (typed + observations).inReadingOrder()
             let started = observations.map(\.time).min() ?? scheduler.now
+            if let open = openWord, resplitShortTail(open, adding: observations) {
+                committed = true
+            } else if let open = openWord, shouldHoldShortTail(open, batch: observations, at: started) {
+                for event in observations.inReadingOrder() {
+                    holdLetter(event.letter, at: event.point, time: event.time)
+                }
+                committed = true
+            } else {
             let lastTap = typed.map(\.time).max() ?? started
             // A lifted letter stays in the word only for a short beat. Past that, the swipe is
             // its own word even when the two would spell something together.
@@ -674,6 +683,7 @@ public final class KeyboardEngine {
                 _ = finishWord(trailing: " ")
                 committed = publishBeat(readings, unsure: unsure, strokes: strokes, observations: observations)
             }
+            }
         } else if let open = openWord, editor.recentCommit?.kind == .swiped {
             let displayed = editor.recentCommit?.word ?? ""
             let finished = isFinishedWord(displayed, events: open.events)
@@ -681,9 +691,12 @@ public final class KeyboardEngine {
             let merged = (open.events + observations).inReadingOrder()
             let paths = open.paths + strokePaths.map(OpenBeat.capped)
             let existing = sequenceOutcome(open.events, strokePaths: open.paths)
-            if mayExtend(finished: finished, ownReading: choice.hasOwnReading, at: started, adding: observations.count),
+            if resplitShortTail(open, adding: observations) {
+                committed = true
+            } else if mayExtend(finished: finished, ownReading: choice.hasOwnReading, at: started, adding: observations.count),
                let joined = joinedReading(existing: existing, adding: observations, merged: merged, strokePaths: paths, addedPaths: strokePaths),
-               acceptsJoin(joined) {
+               acceptsJoin(joined), !isBlockedExtension(joined),
+               !finished || isKnownWord(joined.readings.first?.word ?? "") {
                 committed = revise(open, with: joined, batch: observations, strokes: strokes, paths: strokePaths)
             } else if settings.swipeCommitMode == .explicitSpace,
                       mayExtend(finished: finished, ownReading: false, at: started) {
@@ -697,7 +710,8 @@ public final class KeyboardEngine {
                       !WordJoiner.aligns(readings.first ?? "", traced: BeatChooser.collapse(observations.map(\.letter).joined())),
                       let reading = WordJoiner.alignedReading(in: sequenceOutcome(merged, strokePaths: paths)),
                       reading.word.lowercased().hasPrefix(displayed.lowercased()),
-                      reading.word.count > displayed.count {
+                      reading.word.count > displayed.count,
+                      !Self.blockedExtensions.contains(reading.word.lowercased()) {
                 committed = revise(
                     open,
                     with: DecodeResult(readings: [reading]),
@@ -705,6 +719,11 @@ public final class KeyboardEngine {
                     strokes: strokes,
                     paths: strokePaths
                 )
+            } else if shouldHoldShortTail(open, batch: observations, at: started) {
+                for event in observations.inReadingOrder() {
+                    holdLetter(event.letter, at: event.point, time: event.time)
+                }
+                committed = true
             } else {
                 // A fragment can still be pulled back by a later letter. A word that is already
                 // right cannot: the next beat must not rewrite it.
@@ -834,16 +853,26 @@ public final class KeyboardEngine {
         )]
         let displayed = editor.recentCommit?.word ?? ""
         let finished = isFinishedWord(displayed, events: open.events)
+        if resplitShortTail(open, adding: batch) { return true }
         if !mayExtend(finished: finished, ownReading: false, at: time) {
             closeOpenWord()
             return false
         }
         let merged = (open.events + batch).inReadingOrder()
         let existing = sequenceOutcome(open.events, strokePaths: open.paths)
-        if let joined = joinedReading(existing: existing, adding: batch, merged: merged, strokePaths: open.paths), acceptsJoin(joined) {
+        if let joined = joinedReading(existing: existing, adding: batch, merged: merged, strokePaths: open.paths),
+           acceptsJoin(joined), !isBlockedExtension(joined),
+           !finished || isKnownWord(joined.readings.first?.word ?? "") {
             return revise(open, with: joined, batch: batch, strokes: 0, paths: [])
         }
         if !finished, reassemble(adding: batch) { return true }
+        // A short tail can still be pulled into the next word ("the" + "n" + "ice").
+        if open.chunks.count >= 2,
+           let last = open.chunks.last, last.events.count <= 2,
+           leashAllows(at: time),
+           settings.swipeCommitMode != .explicitSpace {
+            return false
+        }
         closeOpenWord()
         return false
     }
@@ -943,6 +972,10 @@ public final class KeyboardEngine {
         let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
         editor.clearPreviewComposing()
         editor.commitWord(cased[0])
+        if let layout = words.letterLayout {
+            let accepted = priorChunks.flatMap(\.events) + events
+            TouchOffsetLog.record(letters: accepted.map(\.letter), points: accepted.map(\.point), layout: layout)
+        }
         noteRhythm(priorChunks.flatMap(\.events) + events)
         let literal = BeatChooser.collapse((priorChunks.flatMap(\.events) + events).map(\.letter).joined())
         words.swipeCommitted(
@@ -999,6 +1032,89 @@ public final class KeyboardEngine {
         openDeadline = nil
     }
 
+    /// Finished words that must not swallow the next beat, even when the letters spell one word.
+    private static let blockedExtensions: Set<String> = [
+        "into", "now", "ago", "some", "anyone", "cannot", "within", "upon", "become",
+    ]
+
+    /// A letter or two after a short join stays in composing until it spells the other split.
+    /// "i" after "then" is not a new word yet; "to" after "in" is.
+    private func shouldHoldShortTail(_ open: OpenWord, batch: [StrokeObservation], at time: Double) -> Bool {
+        guard settings.swipeCommitMode != .explicitSpace, leashAllows(at: time) else { return false }
+        guard open.chunks.count >= 2, let last = open.chunks.last, last.events.count <= 2 else { return false }
+        guard !batch.isEmpty, batch.count <= 2 else { return false }
+        let traced = BeatChooser.collapse(batch.map(\.letter).joined())
+        if traced.count >= 2,
+           let alone = sequenceOutcome(batch).result.readings.first?.word,
+           isKnownWord(alone),
+           WordJoiner.aligns(alone, traced: traced) {
+            return false
+        }
+        return true
+    }
+
+    private func isBlockedExtension(_ result: DecodeResult) -> Bool {
+        guard let word = result.readings.first?.word else { return false }
+        return Self.blockedExtensions.contains(word.lowercased())
+    }
+
+    /// A letter or two that joined a finished word can still leave with the next beat.
+    /// "the" + "n" is "then" until "ice" arrives and the tail spells "nice".
+    private func resplitShortTail(_ open: OpenWord, adding batch: [StrokeObservation]) -> Bool {
+        guard settings.swipeCommitMode != .explicitSpace, open.chunks.count >= 2, !batch.isEmpty else { return false }
+        let started = batch.map(\.time).min() ?? scheduler.now
+        guard leashAllows(at: started) else { return false }
+        let pending = words.placedObservations()
+        // Short joins can stack ("the" + "n" + "i"). Peel every short chunk that still
+        // belongs to the leash, and keep the split whose second word uses the most of them.
+        var best: (head: String, suffix: String, tail: [StrokeObservation], paths: [[CGPoint]], score: Double)?
+        for cut in 1..<open.chunks.count {
+            let tailChunks = Array(open.chunks[cut...])
+            guard tailChunks.allSatisfy({ $0.events.count <= 2 }) else { continue }
+            let headChunks = Array(open.chunks[..<cut])
+            let headEvents = headChunks.flatMap(\.events).inReadingOrder()
+            let tailEvents = (tailChunks.flatMap(\.events) + pending + batch).inReadingOrder()
+            guard let headEnd = headEvents.map(\.time).max(),
+                  let tailStart = tailEvents.map(\.time).min(),
+                  tailStart - headEnd <= activeLeash * 0.75
+            else { continue }
+            let traced = BeatChooser.collapse(tailEvents.map(\.letter).joined())
+            guard traced.count >= 2 else { continue }
+            let suffix = sequenceOutcome(tailEvents, strokePaths: tailChunks.flatMap(\.paths))
+            guard let suffixWord = suffix.result.readings.first?.word,
+                  isKnownWord(suffixWord),
+                  WordJoiner.aligns(suffixWord, traced: traced)
+            else { continue }
+            let headOutcome = sequenceOutcome(headEvents, strokePaths: headChunks.flatMap(\.paths))
+            let headWord = headOutcome.result.readings.first?.word ?? headChunks.last?.readings.first
+            guard let headWord, isKnownWord(headWord),
+                  WordJoiner.aligns(headWord, traced: BeatChooser.collapse(headEvents.map(\.letter).joined()))
+            else { continue }
+            let aloneTraced = BeatChooser.collapse(batch.map(\.letter).joined())
+            if let alone = sequenceOutcome(batch).result.readings.first?.word,
+               isKnownWord(alone),
+               WordJoiner.aligns(alone, traced: aloneTraced),
+               LexiconKey.make(alone).count >= LexiconKey.make(suffixWord).count {
+                continue
+            }
+            let score = suffix.result.readings.first?.score ?? WordJoiner.provisionalScore
+            if LexiconKey.make(suffixWord).count > LexiconKey.make(best?.suffix ?? "").count {
+                best = (headWord, suffixWord, tailEvents, tailChunks.flatMap(\.paths), score)
+            }
+        }
+        guard let best else { return false }
+        editor.setTypedComposing("")
+        words.noteContextChanged()
+        let shownHead = applyShift(to: best.head)
+        let shownSuffix = applyShift(to: best.suffix)
+        guard editor.replaceRecentCommitWord(with: shownHead) else { return false }
+        editor.commitWord(shownSuffix)
+        words.swipeCommitted([shownSuffix], unsure: false, display: displayToRemember(shownSuffix))
+        openWord = OpenWord(chunks: [OpenBeat(events: best.tail, paths: best.paths, readings: [shownSuffix], score: best.score)])
+        noteWordOpened()
+        return true
+    }
+
     /// A finished word stays open for a quick tap that lengthens it. It locks when the next
     /// beat is already a word, when that tap is turned off, or when the leash has closed.
     /// A fragment stays open only while the leash is open; a finger still down holds the leash.
@@ -1030,7 +1146,13 @@ public final class KeyboardEngine {
 
     private func noteWordOpened() {
         openDeadline = freshLeashDeadline()
-        swipe.evidenceTuning = rhythm.evidenceTuning
+        refreshEvidenceTuning()
+    }
+
+    /// Dwell and retreat follow the current key pitch. Time thresholds stay on the rhythm.
+    private func refreshEvidenceTuning() {
+        let pitch = LetterLayout(geometry: geometry)?.keyWidth ?? StrokeBuffer.referenceKeyWidth
+        swipe.evidenceTuning = rhythm.evidenceTuning.scaled(to: pitch)
     }
 
     private func isKnownWord(_ word: String) -> Bool {
@@ -1062,7 +1184,7 @@ public final class KeyboardEngine {
         guard let acceptance = words.accept(index, from: state.candidates) else { return (false, true) }
         switch acceptance {
         case let .keep(word):
-            words.keep(word)
+            words.acceptLiteral(word)
             return (insertSpace(), true)
         case let .replace(word):
             guard editor.replaceCurrentWord(with: word, kind: .completed) else { return (false, true) }
@@ -1203,6 +1325,7 @@ public final class KeyboardEngine {
     }
 
     private func applySettings() {
+        words.language?.recordsGestureTraces = settings.recordsGestureTraces
         flow.celebratesMilestones = settings.effects.celebrateMilestones
         let swipes = settings.typingMode == .swipe && words.language != nil && traits.supportsSwipe
         touchEngine.arbiter.typingMode = swipes ? SwipeTypingMode(coordinator: swipe) : TapTypingMode()
@@ -1213,7 +1336,7 @@ public final class KeyboardEngine {
         for (previous, next) in zip(times, times.dropFirst()) {
             rhythm.note(gap: next - previous)
         }
-        swipe.evidenceTuning = rhythm.evidenceTuning
+        refreshEvidenceTuning()
         let recommended = rhythm.leash
         if abs(recommended - lastReportedLeash) > 0.01 {
             lastReportedLeash = recommended
@@ -1327,6 +1450,7 @@ public final class KeyboardEngine {
             metrics: metrics ?? geometry.metrics
         )
         words.updateLayout(for: geometry, layer: layer)
+        refreshEvidenceTuning()
         delegate?.keyboardEngine(self, didUpdateGeometry: geometry)
         publishState()
     }

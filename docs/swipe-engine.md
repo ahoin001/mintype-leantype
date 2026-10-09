@@ -63,7 +63,7 @@ becomes a stroke when any of these is true (`SwipeSession`):
 | Condition | Threshold |
 | --- | --- |
 | Sideways travel | 16 pt |
-| Finger leaves the key's hit frame | immediately |
+| Finger leaves the key's hit frame | 8 pt past that frame |
 | Travel in any direction, including straight down | 36 pt |
 
 A short downward dip that stays on the key remains a flick, not a stroke. A slide
@@ -86,7 +86,7 @@ while a beat is already open is recorded inside that beat. The beat commits when
 last finger lifts: no active stroke and no held letter
 (`SwipeCoordinator.finishIfIdle`).
 
-Cancelling a stroke resets the whole gesture and cancels its composer ticket.
+Cancelling a finger that is already a stroke lifts that finger and keeps the other thumb's beat. A finger that never traveled still cancels without typing. A letter held with no travel for about 500 ms, while another finger is drawing and the accent row is closed, is left out of the beat. Decode uses at most two stroke chains; a third letter finger joins as a tap. Dwell and retreat scale with key width. Tap jitter does not.
 
 ## One beat, then the leash
 
@@ -119,6 +119,8 @@ then `correct` stay two words; `in` then `to` do not become `into`). A fragment 
 is only a prefix (`es`, `wa`, `priva`) stays open for the leash even when the bar is
 already showing a longer dictionary word. Turning `extendFinishedWords` off makes the
 next tap a new word immediately.
+
+While the leash is still open, a letter or two that joined a finished word can leave again. `the` + `n` is `then` until `ice` arrives inside the leash, and the field becomes `the nice`. The gap is a cost inside that window. A second beat that is already its own word (`to`, `nice`, `correct`) is not swallowed. Explicit space skips the choice. Pairs that are two function words (`in` + `to`, `no` + `w`, `a` + `go`, and the same kind) stay two words.
 
 A completion that runs ahead of the keys is not finished. `priva` shown as `private`
 stays open so `te` can still arrive. A shape match that is a different word is

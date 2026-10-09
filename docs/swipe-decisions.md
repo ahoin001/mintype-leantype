@@ -95,6 +95,28 @@ Group only.
 Rejected: learning a curve from the first accept, and dropping learning when Full
 Access is off.
 
+## Frame slop, and a cancel is one finger
+
+Leaving the hit frame is a stroke only after 8 pt past that frame. 16 pt sideways
+and 36 pt of travel stay physical points, so tap jitter does not grow with the key.
+Dwell and retreat scale with key width. Cancelling a stroke lifts that finger.
+`SwipeSession.cancelled` no longer resets the other thumb. A third letter finger
+joins as a tap, so a palm cannot open a third chain.
+
+Rejected: treating a border roll as a second letter, and dropping the whole beat
+because one finger was cancelled.
+
+## The leash can unpick a short join
+
+`the` + `n` may become `then`. If `ice` arrives before the leash ends, the join is
+scored again and the field can return to `the nice`. The other segmentation is the
+word that was on screen; a second beat that is already a word is not pulled in.
+Explicit space does not reopen the choice.
+
+Rejected: locking the join after two new events, which left `then ice` stuck.
+
+Locked by `theNiceUndoesAShortJoin` and `functionWordsDoNotSwallowTheNextBeat`.
+
 ## What this pass does not do
 
 Per-hand key offsets stay out until a perturbation set shows placement, rather than
@@ -102,3 +124,9 @@ timing or omission, is the miss. The seam bias stays until a touch profile repla
 it. Tap autocorrect already uses touch points. It keeps its own edit distance until
 the beam's edits have settled, so two edit models are not maintained. There is no
 online weight tuner and no neural reranker.
+
+`FollowerPrior` stays a fixed 0.45. A memory-mapped bigram, a smaller `exactLead`,
+and a sigma that grows from a precision estimate wait until the on-device touch
+log says placement or pair strength is the miss. The log is local and the ranker
+does not read it. Full gesture traces stay behind `recordsGestureTraces`, which
+defaults off. Nothing is uploaded.

@@ -37,10 +37,13 @@ struct StrokeBuffer {
     /// Samples closer than this to the previous one add nothing to the shape.
     static let minimumSpacing: CGFloat = 1.5
     /// How far back along the stroke, in points, drops the tail the finger has left behind.
+    /// Tuned when a key was `referenceKeyWidth` wide. A live stroke scales this with its key.
     static let retreatStep: CGFloat = 34
     /// A pull-back only undoes the letters just drawn. A later key that sits near an older
     /// part of a zigzag ("d" on the row already crossed in "traged") is a new letter.
     static let retreatLookback: CGFloat = 120
+    /// The key width these point thresholds were tuned against.
+    static let referenceKeyWidth: CGFloat = 36
 
     private(set) var points: [StrokePoint] = []
     /// Letters currently part of the word. A one-key reversal hides the tail until the finger
@@ -55,10 +58,16 @@ struct StrokeBuffer {
     private var undoneFinger: CGPoint?
     /// The longest the stroke has been. A retreat is measured from here.
     private var peak: CGFloat = 0
-    init(start: StrokePoint) {
+    /// This stroke's key width. Retreat distances scale with it.
+    private var keyWidth: CGFloat
+    init(start: StrokePoint, keyWidth: CGFloat = referenceKeyWidth) {
+        self.keyWidth = max(keyWidth, 1)
         points.reserveCapacity(Self.capacity)
         points.append(start)
     }
+
+    private var retreatStep: CGFloat { Self.retreatStep * keyWidth / Self.referenceKeyWidth }
+    private var retreatLookback: CGFloat { Self.retreatLookback * keyWidth / Self.referenceKeyWidth }
 
     var start: StrokePoint { points[0] }
     var end: StrokePoint { points[points.count - 1] }
@@ -70,7 +79,7 @@ struct StrokeBuffer {
 
         // A turn toward the next letter leaves the path. A pull-back lands on the path
         // already drawn, a key-width behind the furthest point, and the stroke shortens.
-        if let back = distanceBehindTip(of: point.location), back >= Self.retreatStep {
+        if let back = distanceBehindTip(of: point.location), back >= retreatStep {
             rewind(to: point)
             return
         }
@@ -99,9 +108,9 @@ struct StrokeBuffer {
     /// that are merely turning off toward a new letter are not on that older path.
     private func distanceBehindTip(of location: CGPoint) -> CGFloat? {
         let total = arcLength
-        guard total > Self.retreatStep, points.count >= 2 else { return nil }
-        let prefixEnd = total - Self.retreatStep
-        let windowStart = max(0, total - Self.retreatLookback)
+        guard total > retreatStep, points.count >= 2 else { return nil }
+        let prefixEnd = total - retreatStep
+        let windowStart = max(0, total - retreatLookback)
         var traveled: CGFloat = 0
         var bestDistance = CGFloat.greatestFiniteMagnitude
         var bestAlong: CGFloat = 0
@@ -127,7 +136,7 @@ struct StrokeBuffer {
             traveled = segmentEnd
             if traveled >= prefixEnd { break }
         }
-        guard bestDistance <= Self.retreatStep * 0.5 else { return nil }
+        guard bestDistance <= retreatStep * 0.5 else { return nil }
         return total - bestAlong
     }
 
@@ -146,14 +155,14 @@ struct StrokeBuffer {
         let before = points.count
         while points.count > 1 {
             let last = points[points.count - 1].location
-            if hypot(last.x - finger.location.x, last.y - finger.location.y) <= Self.retreatStep { break }
+            if hypot(last.x - finger.location.x, last.y - finger.location.y) <= retreatStep { break }
             points.removeLast()
         }
         if points.count < before {
             // About one key hides the last letter. Further than that, the finger is walking
             // back through the word, and the return-trip reading still needs every letter.
             let retreated = peak - arcLength
-            undoneFinger = retreated <= Self.retreatStep * 1.75 ? finger.location : nil
+            undoneFinger = retreated <= retreatStep * 1.75 ? finger.location : nil
         }
         push(finger)
     }
@@ -183,7 +192,7 @@ struct StrokeBuffer {
     }
 
     private func pathStillReaches(_ touch: CGPoint) -> Bool {
-        points.contains { hypot($0.location.x - touch.x, $0.location.y - touch.y) <= Self.retreatStep * 0.55 }
+        points.contains { hypot($0.location.x - touch.x, $0.location.y - touch.y) <= retreatStep * 0.55 }
     }
 
     private mutating func push(_ point: StrokePoint) {

@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Every hand-set number the alignment search uses, in one place.
 struct AlignmentCosts: Sendable {
@@ -58,6 +59,49 @@ struct AlignmentCosts: Sendable {
     }
 }
 
+/// Wall clock for one decode. The search reads it every few expansions and returns
+/// the best reading it already has once `deadline` has passed.
+final class SearchClock: @unchecked Sendable {
+    /// How long one decode may run before it returns what it has. Recovery does not start after this.
+    static let responseBudget = 0.012
+
+    let deadline: Double
+    let now: () -> Double
+    private var steps = 0
+
+    init(now: @escaping () -> Double, deadline: Double) {
+        self.now = now
+        self.deadline = deadline
+    }
+
+    static func budgeted(now: @escaping () -> Double = { Date().timeIntervalSinceReferenceDate }) -> SearchClock {
+        SearchClock(now: now, deadline: now() + responseBudget)
+    }
+
+    /// No deadline. Used when the caller did not ask for one, including debug runs where
+    /// coverage makes a 12 ms wall clock expire before a word is finished.
+    static let unlimited = SearchClock(now: { 0 }, deadline: .greatestFiniteMagnitude)
+
+    /// The clock a shipping decode should use. Debug builds leave it open so a coverage
+    /// run can finish a word; the 12 ms cutoff is what release ships, and tests inject a clock.
+    static func responseClock() -> SearchClock? {
+        #if DEBUG
+        return nil
+        #else
+        return budgeted()
+        #endif
+    }
+
+    /// True once the deadline has passed. Checked once per expansion step, not per hypothesis.
+    func shouldStop() -> Bool {
+        steps += 1
+        guard steps.isMultiple(of: 4) else { return false }
+        return now() >= deadline
+    }
+
+    var isPastDeadline: Bool { now() >= deadline }
+}
+
 /// One search over taps, anchors, and crossings. Replaces the path-versus-sequence table:
 /// a word letter is a tap, an aimed point, or a key the stroke passed through.
 enum AlignmentSearch {
@@ -71,8 +115,10 @@ enum AlignmentSearch {
         expected: [String] = [],
         habits: [String: Double] = [:],
         trace: DecodeTraceSink? = nil,
+        clock: SearchClock? = nil,
         pathScore: inout PathScore
     ) -> DecodeResult {
+        let budget = clock ?? SearchClock.unlimited
         let raw = gesture.evidence.events.isEmpty
             ? SwipeEvidence.fromObservations(gesture.observations).events
             : gesture.evidence.events
@@ -95,10 +141,12 @@ enum AlignmentSearch {
                 costs: costs,
                 habits: habits,
                 expected: expected,
-                crossingScale: crossingScale
+                crossingScale: crossingScale,
+                clock: budget
             )
         } else {
             for order in chainOrders(of: steps, costs: costs) {
+                if budget.isPastDeadline { break }
                 let penalty = orderPenalty(order, costs: costs)
                 let ranked = linearBeam(
                     order,
@@ -108,12 +156,13 @@ enum AlignmentSearch {
                     bigram: bigram,
                     costs: costs,
                     habits: habits,
-                    crossingScale: crossingScale
+                    crossingScale: crossingScale,
+                    clock: budget
                 ).map { DecodeResult.Reading(word: $0.word, score: $0.score - penalty) }
                 readings = merge(readings, ranked)
             }
             let leader = readings.first?.score ?? -.infinity
-            if readings.isEmpty || leader <= AlignmentCosts.weakScore {
+            if !budget.isPastDeadline, readings.isEmpty || leader <= AlignmentCosts.weakScore {
                 let chained = beam(
                     chains,
                     layout: layout,
@@ -123,7 +172,8 @@ enum AlignmentSearch {
                     costs: costs,
                     habits: habits,
                     expected: expected,
-                    crossingScale: crossingScale
+                    crossingScale: crossingScale,
+                    clock: budget
                 )
                 readings = merge(chained, readings)
             }
@@ -159,7 +209,7 @@ enum AlignmentSearch {
             limit: costs.resultLimit
         )
         trace?.trace.readings = result.readings.map(\.word)
-        guard !costs.allowsEdits, isWeak(result, aimed: aimed) else { return result }
+        guard !costs.allowsEdits, isWeak(result, aimed: aimed), !budget.isPastDeadline else { return result }
         trace?.trace.recovered = true
         var wide = AlignmentCosts.recovery
         wide.swapWindow = costs.swapWindow
@@ -173,6 +223,7 @@ enum AlignmentSearch {
             expected: expected,
             habits: habits,
             trace: trace,
+            clock: budget,
             pathScore: &pathScore
         )
         let combined = ReadingPolicy.apply(
@@ -303,7 +354,8 @@ enum AlignmentSearch {
         bigram: LetterBigram,
         costs: AlignmentCosts,
         habits: [String: Double],
-        crossingScale: Double
+        crossingScale: Double,
+        clock: SearchClock
     ) -> [DecodeResult.Reading] {
         let habitBuckets = habitBuckets(from: habits)
         var walked = [Hypothesis(
@@ -321,6 +373,7 @@ enum AlignmentSearch {
             justSkipped: false
         )]
         for (offset, step) in steps.enumerated() {
+            if clock.shouldStop() { break }
             var next: [Hypothesis] = []
             if let event = step.event {
                 let letters = candidates(for: event, layout: layout, costs: costs)
@@ -385,7 +438,8 @@ enum AlignmentSearch {
         costs: AlignmentCosts,
         habits: [String: Double],
         expected: [String],
-        crossingScale: Double
+        crossingScale: Double,
+        clock: SearchClock
     ) -> [DecodeResult.Reading] {
         let habitBuckets = habitBuckets(from: habits)
         guard !chains.chains.isEmpty else { return [] }
@@ -408,6 +462,7 @@ enum AlignmentSearch {
         var timely = [start]
         var late: [Hypothesis] = []
         for _ in 0..<chains.eventCount {
+            if clock.shouldStop() { break }
             var nextTimely: [Hypothesis] = []
             var nextLate: [Hypothesis] = []
             let parents = timely.map { ($0, true) } + late.map { ($0, false) }
@@ -1477,7 +1532,8 @@ actor AlignmentDecoder {
         lexicon: MappedLexicon,
         costs: AlignmentCosts,
         expected: [String] = [],
-        habits: [String: Double] = [:]
+        habits: [String: Double] = [:],
+        clock: SearchClock? = nil
     ) -> DecodeResult {
         AlignmentSearch.decode(
             gesture,
@@ -1488,6 +1544,7 @@ actor AlignmentDecoder {
             costs: costs,
             expected: expected,
             habits: habits,
+            clock: clock,
             pathScore: &pathScore
         )
     }

@@ -1112,6 +1112,26 @@ struct SwipeTypingTests {
         #expect(harness.text == "then ")
     }
 
+    @Test func theNiceUndoesAShortJoin() async {
+        let harness = makeHarness()
+        swipe("the", on: harness)
+        await harness.settle()
+        for letter in ["n", "i", "c", "e"] {
+            harness.tap(.character(letter), gap: 0.02)
+            await harness.settle()
+        }
+        #expect(harness.text == "the nice ")
+    }
+
+    @Test func functionWordsDoNotSwallowTheNextBeat() async {
+        let harness = makeHarness()
+        swipe("no", on: harness)
+        await harness.settle()
+        harness.tap(.character("w"), gap: 0.02)
+        #expect(!harness.text.lowercased().hasPrefix("now"))
+        #expect(harness.text.lowercased().hasPrefix("no"))
+    }
+
     @Test func aTapAfterTheLeashStartsTheNextWord() async {
         let harness = makeHarness()
         swipe("the", on: harness)
@@ -1610,7 +1630,8 @@ struct SwipeTypingTests {
         layout: LetterLayout,
         expected: [String] = [],
         habits: [String: Double] = [:],
-        trace: DecodeTraceSink? = nil
+        trace: DecodeTraceSink? = nil,
+        clock: SearchClock? = nil
     ) -> DecodeResult {
         var score = PathScore()
         return AlignmentSearch.decode(
@@ -1623,6 +1644,7 @@ struct SwipeTypingTests {
             expected: expected,
             habits: habits,
             trace: trace,
+            clock: clock,
             pathScore: &score
         )
     }
@@ -2294,6 +2316,72 @@ struct SwipeTypingTests {
         #expect(editor.replaceEarlierWord(words[1], with: "right"))
         #expect(document.text == "hello right again")
         #expect(document.before.hasSuffix("again"))
+    }
+
+    @Test func tapsUnderSixtyMillisecondsAreDifferentThumbs() {
+        let times = [0.0, 0.04, 0.20]
+        let points = [CGPoint(x: 10, y: 0), CGPoint(x: 12, y: 0), CGPoint(x: 200, y: 0)]
+        let thumbs = TapThumbs.assign(times: times, points: points, midline: 100)
+        #expect(thumbs == [0, 1, 1])
+    }
+
+    @Test func aRollJustPastTheKeyStaysATapUntilItClearsTheSlop() {
+        let frame = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let room = frame.insetBy(dx: -SwipeSession.frameSlop, dy: -SwipeSession.frameSlop)
+        #expect(room.contains(CGPoint(x: 52, y: 30)))
+        #expect(!room.contains(CGPoint(x: 60, y: 30)))
+    }
+
+    @Test func aThirdStrokeIsATapAndDwellFollowsTheKey() {
+        func stroke(_ letter: String, x: CGFloat) -> StrokeBuffer {
+            var buffer = StrokeBuffer(start: StrokePoint(location: CGPoint(x: x, y: 0), time: 0))
+            buffer.append(StrokePoint(location: CGPoint(x: x + 40, y: 0), time: 0.1))
+            buffer.arrive(letter, at: CGPoint(x: x, y: 0), time: 0)
+            return buffer
+        }
+        let gesture = GestureComposer.compose([
+            stroke("a", x: 0),
+            stroke("b", x: 80),
+            stroke("c", x: 160),
+        ])
+        #expect(gesture?.strokeCount == 2)
+        #expect(gesture?.evidence.events.contains { $0.letter == "c" && $0.role == .tap } == true)
+        let narrow = EvidenceTuning.standard.scaled(to: StrokeBuffer.referenceKeyWidth / 2)
+        #expect(narrow.dwellRadius == GestureComposer.dwellRadius / 2)
+        #expect(narrow.dwellTravel == GestureComposer.dwellTravel / 2)
+    }
+
+    @Test func anExhaustedClockSkipsRecovery() throws {
+        let layout = try #require(TestLayout.shared)
+        let letters = ["c", "a", "t"].map { letter -> (String, CGPoint) in
+            let byte = letter.utf8.first ?? UInt8(ascii: "a")
+            return (letter, layout.center(of: byte))
+        }
+        guard let gesture = gesture(through: letters) else {
+            Issue.record("No gesture")
+            return
+        }
+        let sink = DecodeTraceSink()
+        let clock = SearchClock(now: { 1 }, deadline: 0)
+        _ = decode(gesture, layout: layout, trace: sink, clock: clock)
+        #expect(sink.trace.recovered == false)
+    }
+
+    @Test func touchOffsetsAreMeasuredFromTheKeyCenter() throws {
+        let layout = try #require(TestLayout.shared)
+        let q = layout.center(of: UInt8(ascii: "q"))
+        let p = layout.center(of: UInt8(ascii: "p"))
+        let samples = TouchOffsetLog.samples(
+            letters: ["q", "p"],
+            points: [
+                CGPoint(x: q.x + layout.keyWidth / 2, y: q.y),
+                CGPoint(x: p.x - layout.keyWidth / 4, y: p.y),
+            ],
+            layout: layout
+        )
+        #expect(samples.map(\.side) == ["left", "right"])
+        #expect(abs(samples[0].dx - 0.5) < 0.01)
+        #expect(abs(samples[1].dx + 0.25) < 0.01)
     }
 
     @Test func moreOftenMakesAWordFamiliarAndLessOftenWalksItBack() {

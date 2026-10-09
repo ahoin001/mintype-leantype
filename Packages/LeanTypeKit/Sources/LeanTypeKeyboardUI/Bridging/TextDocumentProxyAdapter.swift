@@ -12,6 +12,7 @@ public final class TextDocumentProxyAdapter: TextDocument {
 
     public private(set) var typedComposing = ""
     public private(set) var previewComposing = ""
+    private var marked = ""
 
     public var contextBefore: String? {
         guard var before = proxy.documentContextBeforeInput else { return nil }
@@ -62,6 +63,8 @@ public final class TextDocumentProxyAdapter: TextDocument {
 
     private func publishMark() {
         let shown = typedComposing.isEmpty ? previewComposing : typedComposing
+        guard shown != marked else { return }
+        marked = shown
         let end = shown.utf16.count
         proxy.setMarkedText(shown, selectedRange: NSRange(location: end, length: 0))
     }

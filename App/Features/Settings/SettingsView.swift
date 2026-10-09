@@ -132,6 +132,13 @@ struct SettingsView: View {
                             : "Needs Full Access to remember words.",
                         isOn: $model.settings.learnWordsEnabled
                     )
+                    PebbleDivider()
+                    PebbleToggleRow(
+                        systemImage: "scribble",
+                        title: "Save gesture traces",
+                        detail: "Keeps a decode trace on this phone after each word. Nothing is uploaded.",
+                        isOn: $model.settings.recordsGestureTraces
+                    )
                     if data.learnedWordCount > 0 || data.blockedWordCount > 0 {
                         PebbleDivider()
                         NavigationLink {
