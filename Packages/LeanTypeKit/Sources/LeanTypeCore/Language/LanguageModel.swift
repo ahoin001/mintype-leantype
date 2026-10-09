@@ -313,6 +313,14 @@ public final class LanguageModel {
         habits.uses(of: word)
     }
 
+    func personalUses(of word: String) -> Int {
+        personal.uses(of: word) ?? 0
+    }
+
+    func pairStrength(previous: String, next: String) -> Double {
+        context.strength(previous: previous, next: next)
+    }
+
     /// Counts `word` enough times to lead a close swipe.
     func moreOften(_ word: String) {
         habits.reinforce(word)

@@ -20,6 +20,8 @@ final class SwipeCoordinator {
     /// A preview of the word being drawn, or `nil` when the gesture ended. Empty results are
     /// not delivered: the previous preview stays up.
     var onPreview: ((DecodeResult?) -> Void)?
+    /// Thumb index for each aimed letter of the preview, so the strip can tint them.
+    var onPreviewThumbs: (([Int]) -> Void)?
 
     private var active: [TouchID: StrokeBuffer] = [:]
     private var finished: [StrokeBuffer] = []
@@ -277,6 +279,7 @@ final class SwipeCoordinator {
             }
             guard !result.isEmpty else { return }
             previewPointCount = grown
+            onPreviewThumbs?(gesture.observations.map { max(0, $0.strokeIndex) })
             onPreview?(result)
         }
     }

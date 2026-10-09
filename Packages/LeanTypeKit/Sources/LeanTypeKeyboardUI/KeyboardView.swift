@@ -76,6 +76,7 @@ public final class KeyboardView: UIView {
     private let coach = CoachHints()
     private var pendingHint: CoachHints.Hint?
     private var hintHide: Timer?
+    private var didCheckPasteboard = false
 
     public init(engine: KeyboardEngine, theme: Theme, feedback: FeedbackCoordinator) {
         self.engine = engine
@@ -131,6 +132,18 @@ public final class KeyboardView: UIView {
         }
         dock.onReplaceHistory = { [weak self] index, word in
             self?.engine.replaceHistoryWord(at: index, with: word)
+        }
+        dock.menuRows = { [weak self] chip in
+            self?.engine.historyMenu(for: chip) ?? []
+        }
+        dock.onMenuAction = { [weak self] action in
+            self?.engine.performStripAction(action)
+        }
+        dock.borrowTextLayer = { [weak self] in
+            self?.effects.stage.pool.text()
+        }
+        dock.recycleTextLayer = { [weak self] layer in
+            self?.effects.stage.pool.recycle(layer)
         }
         dock.onWordmarkTap = { [weak self] in
             self?.dock.toggleDeleteMenu()
@@ -350,6 +363,19 @@ extension KeyboardView: KeyboardEngineDelegate {
         routeGestureMark(state.interaction.jewel)
         effects.shiftDidChange(state.shift)
         updateDock()
+        if state.candidates.isHistory { refreshPasteAvailability() }
+    }
+
+    /// Asks whether the pasteboard has text without reading it. The string is read only if Paste is tapped.
+    private func refreshPasteAvailability() {
+        guard !didCheckPasteboard else { return }
+        didCheckPasteboard = true
+        UIPasteboard.general.detectPatterns(for: [.probableWebURL, .probableWebSearch, .number]) { result in
+            let available = ((try? result.get()) ?? []).isEmpty == false
+            DispatchQueue.main.async { [weak self] in
+                self?.engine.notePasteboardAvailable(available)
+            }
+        }
     }
 
     /// A delete scrub stays on the backspace key. Shift scrub and the space-bar trackpad

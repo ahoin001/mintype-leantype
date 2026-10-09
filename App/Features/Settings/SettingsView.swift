@@ -134,6 +134,13 @@ struct SettingsView: View {
                     )
                     PebbleDivider()
                     PebbleToggleRow(
+                        systemImage: "speedometer",
+                        title: "Words per minute",
+                        detail: "Shows a rolling pace on the space bar. Nothing is saved as a weekly stat.",
+                        isOn: $model.settings.showsWordsPerMinute
+                    )
+                    PebbleDivider()
+                    PebbleToggleRow(
                         systemImage: "scribble",
                         title: "Save gesture traces",
                         detail: "Keeps a decode trace on this phone after each word. Nothing is uploaded.",

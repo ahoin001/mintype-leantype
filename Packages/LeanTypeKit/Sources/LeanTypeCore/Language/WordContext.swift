@@ -272,6 +272,19 @@ final class WordContext {
     /// True after a word has been committed and before the next sentence starts.
     var hasPrecedingWord: Bool { recent.last != nil }
 
+    /// A small bonus for a pair this user writes, or a common follower. It can reorder a close
+    /// call. It does not invent a mapped bigram.
+    func strength(previous: String, next: String) -> Double {
+        let previous = Self.normalized(previous)
+        let next = Self.normalized(next)
+        guard !previous.isEmpty, !next.isEmpty else { return 0 }
+        if let pair = pairs.first(where: { $0.previous == previous && $0.next == next }) {
+            return min(0.45, 0.15 * Double(pair.uses))
+        }
+        if Self.commonFollowers[previous]?.contains(next) == true { return 0.05 }
+        return 0
+    }
+
     /// Drops the words just written. Learned pairs stay, so the next sentence can start fresh.
     func noteSentenceEnded() {
         recent.removeAll()

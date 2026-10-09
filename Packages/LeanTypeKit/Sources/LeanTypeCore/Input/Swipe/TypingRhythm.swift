@@ -43,6 +43,12 @@ struct TypingRhythm: Sendable {
         return tuning
     }
 
+    /// Letter gaps, counted as words of five. Nil until a few gaps have been seen.
+    var wordsPerMinute: Int? {
+        guard samples >= 4, interval > 0.05 else { return nil }
+        return Int((12 / interval).rounded())
+    }
+
     var costs: AlignmentCosts {
         var costs = AlignmentCosts.standard
         costs.swapWindow = swapWindow

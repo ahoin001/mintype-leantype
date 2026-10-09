@@ -108,10 +108,12 @@ because one finger was cancelled.
 
 ## The leash can unpick a short join
 
-`the` + `n` may become `then`. If `ice` arrives before the leash ends, the join is
-scored again and the field can return to `the nice`. The other segmentation is the
-word that was on screen; a second beat that is already a word is not pulled in.
-Explicit space does not reopen the choice.
+`the` + `n` may become `then`. If `ice` arrives before the leash ends, every cut
+through the short chunks is scored again and the field becomes `the nice `. The
+strip then shows `nice` and its other readings. One chip replaces one word, so
+`then ice` is not a single tap. A second beat that is already a word is not pulled
+in. Explicit space does not reopen the choice. The behavior, including the blocked
+pairs, is written out in `docs/swipe-engine.md`.
 
 Rejected: locking the join after two new events, which left `then ice` stuck.
 

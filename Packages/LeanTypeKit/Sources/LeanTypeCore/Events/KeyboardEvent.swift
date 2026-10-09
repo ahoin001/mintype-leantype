@@ -45,6 +45,10 @@ public enum KeyboardEvent: Hashable, Sendable {
     case capsLockEngaged
     /// A word was finished (by space, punctuation, swipe, or accepting a suggestion).
     case wordCommitted(WordSource)
+    /// How sure the commit was. Sure uses a soft tap; a close call is lighter.
+    case commitFelt(sure: Bool)
+    /// A suggestion chip was tapped.
+    case chipChosen
     /// A swipe landed as a word. `strokes` is how many thumbs drew it.
     case swipeGestureCommitted(strokes: Int)
     /// The word the swipe is about to commit changed while the fingers are still down.

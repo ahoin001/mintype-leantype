@@ -22,6 +22,10 @@ final class WordAssistant {
         case follow(String)
         /// The landed word was confirmed. The document stays as it is.
         case settle
+        /// The bar changed and the document did not: a drill, a hint, a learned chip.
+        case refresh
+        /// Run a history or field action. `text` is the chip label, used when the action inserts it.
+        case command(Candidate.StripAction, text: String)
     }
 
     var language: LanguageModel?
@@ -38,6 +42,18 @@ final class WordAssistant {
     /// edits it, so "com" at the end of an email is not autocorrected or offered as a fix.
     private var literalWord: String?
     private var swipeReadings: [String] = []
+    private var history = WordHistory()
+    private var stagedHistory: HistoryEntry?
+    private var drill: HistoryDrill?
+    private var pendingUndo: HistoryUndo?
+    private var learnedNotice: String?
+    private var previewThumbs: [Int] = []
+    private var snippets = SnippetBook.load()
+    private var emojiRecents = EmojiWords.loadRecents()
+    private var hintRemaining = StripHintStore.remaining()
+    private var hintCounted = false
+    /// Set by the engine when `detectPatterns` says the pasteboard has something. The string is not read here.
+    var pasteboardMayContainText = false
     /// Letters the last swipe aimed at, so deleting that word can refuse it for a similar stroke.
     private var swipeTrace: String?
     /// Aimed letters from the swipe, kept on the strip when they are not the committed word.
@@ -107,6 +123,21 @@ final class WordAssistant {
     func noteContextChanged() {
         clearSettled()
         releaseLiteralIfStale()
+        sealHistory()
+        let context = editor.contextBefore
+        if context == nil {
+            history.clear()
+            drill = nil
+            pendingUndo = nil
+        } else {
+            history.dropIfStale(contextBefore: context)
+            if let pendingUndo, context?.hasSuffix(pendingUndo.match) != true {
+                self.pendingUndo = nil
+            }
+            if drill?.context != context {
+                drill = nil
+            }
+        }
         if editor.currentWord.isEmpty {
             touches = []
             touchTimes = []
@@ -171,28 +202,47 @@ final class WordAssistant {
         if literalWord == word {
             literalWord = nil
             language.noteCommitted(word, display: display)
+            stageHistory(text: word, readings: [HistoryReading(word: word, score: 0)], aimed: word, unsure: false, trailing: trailing)
             return false
         }
         if keptWord == word {
             keptWord = nil
-            language.learn(word, display: display)
+            noteLearnedCrossing(word, display: display)
             language.noteCommitted(word, display: display)
+            stageHistory(text: word, readings: [HistoryReading(word: word, score: 0)], aimed: word, unsure: false, trailing: trailing)
             settle(word)
             return false
         }
         keptWord = nil
+        if snippets.expansion(for: word) != nil {
+            language.noteCommitted(word, display: display)
+            stageHistory(text: word, readings: [HistoryReading(word: word, score: 0)], aimed: word, unsure: false, trailing: trailing)
+            settle(word)
+            return false
+        }
         let analysis = language.analyze(word, touches: touches, layout: letterLayout, completionLimit: 0)
         let correction = beamCorrection(of: word, fallback: analysis.correction, language: language)
         if autocorrects, let correction, correction != word {
             let replaced = editor.replaceCurrentWord(with: correction, kind: .corrected, trailing: trailing)
             if replaced {
                 language.noteCommitted(correction, display: display)
+                stageHistory(
+                    text: correction,
+                    readings: [
+                        HistoryReading(word: correction, score: 0),
+                        HistoryReading(word: word, score: -0.2),
+                    ],
+                    aimed: word,
+                    unsure: false,
+                    trailing: trailing
+                )
                 settle(correction)
             }
             return replaced
         }
-        language.learn(word, display: display)
+        noteLearnedCrossing(word, display: display)
         language.noteCommitted(word, display: display)
+        stageHistory(text: word, readings: [HistoryReading(word: word, score: 0)], aimed: word, unsure: false, trailing: trailing)
         settle(word)
         return false
     }
@@ -255,7 +305,11 @@ final class WordAssistant {
     /// The literal on the bar was tapped. Pin it now, so one choice makes the spelling known.
     func acceptLiteral(_ word: String) {
         keptWord = word
+        let before = language?.personalUses(of: word) ?? 0
         _ = language?.remember(word)
+        if before < PersonalLexicon.usesBeforeKnown {
+            learnedNotice = word
+        }
     }
 
     /// The user forgot `word`, so the next space may correct it again.
@@ -272,10 +326,11 @@ final class WordAssistant {
 
     func swipeCommitted(
         _ readings: [String],
-        unsure _: Bool,
+        unsure: Bool,
         literal: String? = nil,
         advancesRefusalClock: Bool = false,
-        display: String? = nil
+        display: String? = nil,
+        scores: [Double] = []
     ) {
         if advancesRefusalClock {
             language?.noteSwipeLanded()
@@ -293,10 +348,23 @@ final class WordAssistant {
         preview = nil
         chosenPreview = nil
         previewHeldUntil = nil
+        previewThumbs = []
         touches = []
         touchTimes = []
         settledWord = nil
         cached = nil
+        if let word = readings.first {
+            let paired = readings.enumerated().map { index, reading in
+                HistoryReading(word: reading, score: scores.indices.contains(index) ? scores[index] : Double(-index))
+            }
+            rememberHistory(
+                text: word,
+                readings: paired,
+                aimed: literal ?? word,
+                unsure: unsure,
+                trailing: " "
+            )
+        }
     }
 
     /// The word that just finished stays on the strip until the next letter.
@@ -407,6 +475,7 @@ final class WordAssistant {
         preview = nil
         chosenPreview = nil
         previewHeldUntil = nil
+        previewThumbs = []
         cached = nil
     }
 
@@ -416,25 +485,45 @@ final class WordAssistant {
 
     // MARK: - Suggestions
 
-    func candidates(suggests: Bool, autocorrects: Bool) -> CandidateState {
+    func notePreviewThumbs(_ thumbs: [Int]) {
+        previewThumbs = thumbs
+    }
+
+    func candidates(suggests: Bool, autocorrects: Bool, variant: KeyboardVariant = .standard, blocksHistory: Bool = false) -> CandidateState {
+        sealHistory()
+        if blocksHistory || editor.contextBefore == nil {
+            history.clear()
+            drill = nil
+        }
         if let preview {
-            let shown = preview.readings.prefix(CandidateState.capacity).map { Candidate($0.word, role: .alternative) }
+            let shown = preview.readings.prefix(CandidateState.capacity).enumerated().map { index, reading in
+                Candidate(reading.word, role: .alternative, unsure: preview.isUnsure && index == 0, letterThumbs: index == 0 ? previewThumbs : [])
+            }
             // Close calls get no pill, so the preview never looks like the word a space will lock in.
             return CandidateState(shown, highlightedIndex: preview.isUnsure ? nil : 0, isTentative: true)
         }
         if pickedUpWord != nil {
             return pickedUpCandidates()
         }
+        if editor.hasSelection, !blocksHistory, editor.contextBefore != nil {
+            return CandidateState(fieldChips(variant: variant), isHistory: true)
+        }
         // Search and URL fields hide suggestions, but a finished swipe still offers its other readings.
         if !suggests, let commit = editor.recentCommit, commit.kind == .swiped,
            !TextBoundary.continuesWord(after: editor.contextAfter) {
             return swipeStrip(word: commit.word, readings: swipeReadings, settled: settledWord, literal: tracedLiteral)
         }
-        guard suggests, let language, !TextBoundary.continuesWord(after: editor.contextAfter) else { return .empty }
+        let fieldBar = variant == .email || variant == .url
+        guard (suggests || fieldBar), !blocksHistory, let language, !TextBoundary.continuesWord(after: editor.contextAfter) else {
+            return .empty
+        }
         releaseLiteralIfStale()
         if literalWord == String(editor.currentWord) {
             cached = nil
             return .empty
+        }
+        if !suggests {
+            return showingHistory(insteadOf: .empty, variant: variant)
         }
         let key = CacheKey(
             word: editor.currentWord,
@@ -445,19 +534,35 @@ final class WordAssistant {
             settled: settledWord,
             literal: tracedLiteral
         )
-        if let cached, cached.key == key { return showingHistory(insteadOf: cached.state) }
+        if let cached, cached.key == key {
+            return appendingSnippet(to: showingHistory(insteadOf: cached.state, variant: variant))
+        }
         let state = makeCandidates(key, language: language)
         cached = (key, state)
-        return showingHistory(insteadOf: state)
+        return appendingSnippet(to: showingHistory(insteadOf: state, variant: variant))
+    }
+
+    private func appendingSnippet(to state: CandidateState) -> CandidateState {
+        guard !state.isHistory, !state.isTentative, !state.isDrilled, state.candidates.count < CandidateState.capacity else { return state }
+        let token = state.candidates.first?.text ?? ""
+        guard let expansion = snippets.expansion(for: token) else { return state }
+        let chip = Candidate(expansion, role: .history, action: .replaceSuffix(match: token + " ", with: expansion + " "))
+        return CandidateState(
+            state.candidates + [chip],
+            highlightedIndex: state.highlightedIndex,
+            isTentative: state.isTentative
+        )
     }
 
     /// The word that just landed stays until the next letter. Once that repair is gone and
     /// nothing is being typed, the bar lists the words already written.
-    private func showingHistory(insteadOf state: CandidateState) -> CandidateState {
-        guard !state.isTentative, editor.currentWord.isEmpty, state.candidates.isEmpty else { return state }
-        let words = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
-        guard !words.isEmpty else { return state }
-        return CandidateState(words.map { Candidate($0.text, role: .history) }, isHistory: true)
+    private func showingHistory(insteadOf state: CandidateState, variant: KeyboardVariant) -> CandidateState {
+        guard !state.isTentative, editor.currentWord.isEmpty else { return state }
+        if !state.candidates.isEmpty { return state }
+        if let drill {
+            return drilledState(drill)
+        }
+        return idleHistory(variant: variant)
     }
 
     func historyChoices(for word: String) -> [String] {
@@ -512,6 +617,117 @@ final class WordAssistant {
         case .follow:
             return .follow(candidate.text)
         case .history:
+            guard let action = candidate.action else { return nil }
+            return .command(action, text: candidate.text)
+        }
+    }
+
+    /// Rows for the hold menu on one visible chip.
+    func menuRows(for chip: Int, in state: CandidateState) -> [HistoryMenuRow] {
+        guard state.candidates.indices.contains(chip) else { return [] }
+        let candidate = state.candidates[chip]
+        switch candidate.action {
+        case let .openHistory(index):
+            return rows(forEntry: index)
+        case let .openDocumentWord(index):
+            return rows(forDocument: index)
+        case .retireLearned:
+            return [
+                HistoryMenuRow(title: "Undo", action: .forgetLearned),
+                HistoryMenuRow(title: "Block", action: .blockLearned),
+            ]
+        default:
+            return []
+        }
+    }
+
+    func openHistoryChip(_ action: Candidate.StripAction) {
+        switch action {
+        case let .openHistory(index):
+            guard let entry = history.entry(index) else { return }
+            let previous = index > 0 ? history.entry(index - 1)?.text : nil
+            let next = history.entry(index + 1)?.text
+            drill = HistoryDrill(
+                source: .entry(index),
+                choices: ranked(entry, previous: previous, next: next),
+                context: editor.contextBefore
+            )
+        case let .openDocumentWord(index):
+            let earlier = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
+            guard earlier.indices.contains(index) else { return }
+            let word = earlier[index].text
+            var choices = historyChoices(for: word)
+            choices.append(contentsOf: HistoryRanking.extras(for: word, known: isKnownWord))
+            if !choices.contains(where: { $0.compare(word, options: .caseInsensitive) == .orderedSame }) {
+                choices.insert(word, at: 0)
+            }
+            drill = HistoryDrill(source: .document(index), choices: choices, context: editor.contextBefore)
+        default:
+            break
+        }
+        cached = nil
+    }
+
+    func closeDrill() {
+        guard drill != nil else { return }
+        drill = nil
+        cached = nil
+    }
+
+    func rememberEmoji(_ symbol: String) {
+        guard let word = history.entries.last?.text else { return }
+        emojiRecents[word.lowercased()] = symbol
+        EmojiWords.remember(word, symbol: symbol)
+    }
+
+    /// Applies one history edit when the field still ends with what was stored.
+    /// Returns the elapsed-time record when a replacement was attempted.
+    @discardableResult
+    func perform(_ action: Candidate.StripAction, started: Double, now: () -> Double, strokePath: [CGPoint]?) -> HistoryEditLog.Record? {
+        switch action {
+        case .openHistory, .openDocumentWord:
+            openHistoryChip(action)
+            return nil
+        case .closeDrill:
+            closeDrill()
+            return nil
+        case .dismissHint:
+            hintRemaining = 0
+            StripHintStore.save(0)
+            hintCounted = true
+            cached = nil
+            return nil
+        case .retireLearned, .forgetLearned:
+            if action == .forgetLearned, let learnedNotice {
+                _ = language?.forget(learnedNotice)
+            }
+            learnedNotice = nil
+            cached = nil
+            return nil
+        case .blockLearned:
+            if let learnedNotice {
+                _ = language?.ban(learnedNotice)
+                _ = language?.forget(learnedNotice)
+            }
+            learnedNotice = nil
+            cached = nil
+            return nil
+        case .undoEdit:
+            undoEdit()
+            return nil
+        case let .replaceHistory(entry, text):
+            return replaceEntry(entry, with: text, started: started, now: now, strokePath: strokePath)
+        case let .replaceDocumentWord(index, text):
+            return replaceDocument(index, with: text, started: started, now: now)
+        case let .retype(entry):
+            retype(entry)
+            return nil
+        case let .merge(entry):
+            return merge(entry, started: started, now: now)
+        case let .capitalize(entry, upper):
+            capitalize(entry, upper: upper)
+            return nil
+        case .insertText, .replaceSuffix, .clipboard:
             return nil
         }
     }
@@ -606,7 +822,8 @@ final class WordAssistant {
             state.candidates + [Candidate(shown, role: .follow)],
             highlightedIndex: state.highlightedIndex,
             isTentative: state.isTentative,
-            isHistory: state.isHistory
+            isHistory: state.isHistory,
+            isDrilled: state.isDrilled
         )
     }
 
@@ -628,5 +845,296 @@ final class WordAssistant {
             }
         }
         return CandidateState(candidates)
+    }
+
+    // MARK: - History
+
+    private func noteLearnedCrossing(_ word: String, display: String?) {
+        let before = language?.personalUses(of: word) ?? 0
+        language?.learn(word, display: display)
+        let after = language?.personalUses(of: word) ?? 0
+        if before < PersonalLexicon.usesBeforeKnown, after >= PersonalLexicon.usesBeforeKnown {
+            learnedNotice = word
+        }
+    }
+
+    private func stageHistory(text: String, readings: [HistoryReading], aimed: String, unsure: Bool, trailing: String) {
+        stagedHistory = HistoryEntry(
+            text: text,
+            readings: readings,
+            aimed: aimed,
+            unsure: unsure,
+            trailing: trailing,
+            startsSentence: false
+        )
+        sealHistory()
+    }
+
+    private func rememberHistory(text: String, readings: [HistoryReading], aimed: String, unsure: Bool, trailing: String) {
+        stageHistory(text: text, readings: readings, aimed: aimed, unsure: unsure, trailing: trailing)
+    }
+
+    private func sealHistory() {
+        guard var entry = stagedHistory, let before = editor.contextBefore else { return }
+        if before.hasSuffix(entry.suffix), !entry.suffix.isEmpty, !(entry.trailing.isEmpty && before.hasSuffix(entry.text)) {
+            stagedHistory = nil
+            history.record(entry, contextBefore: before)
+            return
+        }
+        guard let range = before.range(of: entry.text, options: [.backwards, .caseInsensitive]) else { return }
+        let trailing = String(before[range.upperBound...])
+        guard !trailing.isEmpty, trailing.allSatisfy({ !$0.isLetter && !$0.isNumber }) else { return }
+        entry.trailing = trailing
+        stagedHistory = nil
+        history.record(entry, contextBefore: before)
+    }
+
+    private func isKnownWord(_ word: String) -> Bool {
+        language?.isKnown(word) == true || word.count == 1
+    }
+
+    private func ranked(_ entry: HistoryEntry, previous: String?, next: String?) -> [String] {
+        HistoryRanking.alternatives(
+            for: entry,
+            previous: previous,
+            next: next,
+            known: isKnownWord,
+            pair: { [language] previous, next in language?.pairStrength(previous: previous, next: next) ?? 0 }
+        )
+    }
+
+    private func idleHistory(variant: KeyboardVariant) -> CandidateState {
+        if editor.hasSelection {
+            return CandidateState(fieldChips(variant: variant), isHistory: true)
+        }
+        var chips: [Candidate] = []
+        if let pendingUndo {
+            chips.append(Candidate("Undo", role: .history, action: .undoEdit))
+            _ = pendingUndo
+        }
+        if let learnedNotice {
+            chips.append(Candidate("learned: \(learnedNotice)", role: .history, action: .retireLearned))
+        }
+        if history.matches(editor.contextBefore) {
+            for (index, entry) in history.entries.enumerated() {
+                chips.append(Candidate(entry.text, role: .history, action: .openHistory(index), unsure: entry.unsure))
+            }
+            if !hintCounted, hintRemaining > 0 {
+                chips.append(Candidate("Tap a word to fix it", role: .history, action: .dismissHint))
+                hintRemaining -= 1
+                hintCounted = true
+                StripHintStore.save(hintRemaining)
+            }
+        } else {
+            let words = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
+            for (index, word) in words.enumerated() {
+                chips.append(Candidate(word.text, role: .history, action: .openDocumentWord(index)))
+            }
+        }
+        chips.append(contentsOf: fieldChips(variant: variant))
+        guard !chips.isEmpty else { return .empty }
+        return CandidateState(chips, isHistory: true)
+    }
+
+    private func fieldChips(variant: KeyboardVariant) -> [Candidate] {
+        if editor.hasSelection {
+            return [
+                Candidate("Copy", role: .history, action: .clipboard(.copy)),
+                Candidate("Cut", role: .history, action: .clipboard(.cut)),
+                Candidate("Paste", role: .history, action: .clipboard(.paste)),
+                Candidate("Select word", role: .history, action: .clipboard(.selectWord)),
+            ]
+        }
+        var chips: [Candidate] = []
+        let context = editor.contextBefore ?? ""
+        let token = String(editor.currentWord).isEmpty ? history.entries.last?.text ?? "" : String(editor.currentWord)
+        if let expansion = snippets.expansion(for: token) {
+            let match = history.matches(context) ? (history.entry(history.entries.count - 1)?.suffix ?? token) : token
+            chips.append(Candidate(expansion, role: .history, action: .replaceSuffix(match: match, with: expansion + " ")))
+        }
+        if let symbol = EmojiWords.symbol(for: token, recents: emojiRecents) {
+            chips.append(Candidate(symbol, role: .history, action: .insertText))
+        }
+        if let expression = ExpressionValue.token(in: context), let result = ExpressionValue.result(of: expression) {
+            chips.append(Candidate(result, role: .history, action: .replaceSuffix(match: expression, with: result)))
+        }
+        switch variant {
+        case .email:
+            chips.append(Candidate("@", role: .history, action: .insertText))
+            for domain in ["gmail.com", "icloud.com", ".com"] {
+                chips.append(Candidate(domain, role: .history, action: .insertText))
+            }
+        case .url:
+            for piece in ["www.", ".com", "/"] {
+                chips.append(Candidate(piece, role: .history, action: .insertText))
+            }
+        case .standard, .numeric:
+            break
+        }
+        if pasteboardMayContainText {
+            chips.append(Candidate("Paste", role: .history, action: .clipboard(.paste)))
+        }
+        return chips
+    }
+
+    private func drilledState(_ drill: HistoryDrill) -> CandidateState {
+        var chips = [Candidate("Back", role: .history, action: .closeDrill)]
+        for choice in drill.choices {
+            let action: Candidate.StripAction = switch drill.source {
+            case let .entry(index): .replaceHistory(entry: index, text: choice)
+            case let .document(index): .replaceDocumentWord(index: index, text: choice)
+            }
+            chips.append(Candidate(choice, role: .history, action: action))
+        }
+        return CandidateState(chips, isHistory: true, isDrilled: true)
+    }
+
+    private func rows(forEntry index: Int) -> [HistoryMenuRow] {
+        guard let entry = history.entry(index) else { return [] }
+        let previous = index > 0 ? history.entry(index - 1)?.text : nil
+        let next = history.entry(index + 1)?.text
+        var rows = ranked(entry, previous: previous, next: next).map {
+            HistoryMenuRow(title: $0, action: .replaceHistory(entry: index, text: $0))
+        }
+        rows.append(HistoryMenuRow(title: "Retype", action: .retype(entry: index)))
+        rows.append(HistoryMenuRow(title: "Capitalize", action: .capitalize(entry: index, upper: true)))
+        rows.append(HistoryMenuRow(title: "Lowercase", action: .capitalize(entry: index, upper: false)))
+        return rows
+    }
+
+    private func rows(forDocument index: Int) -> [HistoryMenuRow] {
+        let earlier = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
+        guard earlier.indices.contains(index) else { return [] }
+        let word = earlier[index].text
+        var choices = historyChoices(for: word)
+        choices.append(contentsOf: HistoryRanking.extras(for: word, known: isKnownWord))
+        var rows = choices.map { HistoryMenuRow(title: $0, action: .replaceDocumentWord(index: index, text: $0)) }
+        rows.append(HistoryMenuRow(title: "Capitalize", action: .replaceDocumentWord(index: index, text: word.capitalized)))
+        rows.append(HistoryMenuRow(title: "Lowercase", action: .replaceDocumentWord(index: index, text: word.lowercased())))
+        return rows
+    }
+
+    private func replaceEntry(_ index: Int, with replacement: String, started: Double, now: () -> Double, strokePath: [CGPoint]?) -> HistoryEditLog.Record? {
+        guard history.matches(editor.contextBefore), let entry = history.entry(index), let tail = history.suffix(from: index) else {
+            history.clear()
+            drill = nil
+            return nil
+        }
+        let shown = cased(replacement, like: entry)
+        let rest = history.entries[(index + 1)...].map(\.suffix).joined()
+        let replacementSuffix = shown + entry.trailing + rest
+        guard editor.replaceMatchedSuffix(tail, with: replacementSuffix) else {
+            history.clear()
+            drill = nil
+            return nil
+        }
+        let record = HistoryEditLog.record(elapsed: max(0, now() - started))
+        pendingUndo = HistoryUndo(match: replacementSuffix, previous: tail)
+        language?.noteRejection(preferred: shown, rejected: entry.text)
+        language?.noteCommitted(shown, display: shown)
+        if let strokePath, strokePath.count >= 2, index == history.entries.count - 1, let layout = letterLayout {
+            language?.rememberStroke(shown, path: strokePath, layout: layout)
+        }
+        history.rewrite(at: index, text: shown)
+        drill = nil
+        cached = nil
+        return record
+    }
+
+    private func replaceDocument(_ index: Int, with replacement: String, started: Double, now: () -> Double) -> HistoryEditLog.Record? {
+        let earlier = TextBoundary.earlierWords(before: editor.contextBefore, limit: CandidateState.historyLimit)
+        guard earlier.indices.contains(index), let context = editor.contextBefore else { return nil }
+        let word = earlier[index]
+        let units = word.utf16After + word.text.utf16.count
+        guard let suffix = context.suffix(utf16Count: units) else { return nil }
+        let shown = replacement
+        guard editor.replaceEarlierWord(word, with: shown, confirming: suffix) else {
+            history.clear()
+            drill = nil
+            return nil
+        }
+        let record = HistoryEditLog.record(elapsed: max(0, now() - started))
+        language?.noteRejection(preferred: shown, rejected: word.text)
+        language?.noteCommitted(shown, display: shown)
+        drill = nil
+        cached = nil
+        return record
+    }
+
+    private func retype(_ index: Int) {
+        guard let match = history.suffix(from: index), let entry = history.entry(index), history.matches(editor.contextBefore) else {
+            history.clear()
+            return
+        }
+        let followers = history.entries[(index + 1)...].map(\.suffix).joined()
+        if followers.isEmpty {
+            guard editor.reopenMatchedSuffix(match, as: entry.aimed) else {
+                history.clear()
+                return
+            }
+        } else {
+            let rest = entry.trailing + followers
+            guard editor.replaceMatchedSuffix(match, with: entry.aimed + rest) else {
+                history.clear()
+                return
+            }
+            for _ in rest {
+                guard editor.moveCursor(by: -1) else { break }
+            }
+        }
+        history.clear()
+        drill = nil
+        cached = nil
+    }
+
+    private func merge(_ index: Int, started: Double, now: () -> Double) -> HistoryEditLog.Record? {
+        guard history.matches(editor.contextBefore),
+              let first = history.entry(index),
+              let second = history.entry(index + 1),
+              let tail = history.suffix(from: index)
+        else { return nil }
+        let joined = first.text + second.text
+        let rest = history.entries[(index + 2)...].map(\.suffix).joined()
+        let replacementSuffix = joined + second.trailing + rest
+        guard editor.replaceMatchedSuffix(tail, with: replacementSuffix) else {
+            history.clear()
+            return nil
+        }
+        let record = HistoryEditLog.record(elapsed: max(0, now() - started))
+        pendingUndo = HistoryUndo(match: replacementSuffix, previous: tail)
+        history.merge(at: index, text: joined)
+        drill = nil
+        cached = nil
+        return record
+    }
+
+    private func capitalize(_ index: Int, upper: Bool) {
+        guard let entry = history.entry(index) else { return }
+        let text = upper ? entry.text.prefix(1).uppercased() + entry.text.dropFirst() : entry.text.lowercased()
+        _ = replaceEntry(index, with: text, started: 0, now: { 0 }, strokePath: nil)
+    }
+
+    private func undoEdit() {
+        guard let pendingUndo, editor.contextBefore?.hasSuffix(pendingUndo.match) == true else {
+            self.pendingUndo = nil
+            return
+        }
+        guard editor.replaceMatchedSuffix(pendingUndo.match, with: pendingUndo.previous) else { return }
+        self.pendingUndo = nil
+        history.dropIfStale(contextBefore: editor.contextBefore)
+        if !history.matches(editor.contextBefore) {
+            history.clear()
+        }
+        drill = nil
+        cached = nil
+    }
+
+    /// A replacement keeps the capital the field already had. Autocap-off typing stays lowercase.
+    private func cased(_ word: String, like entry: HistoryEntry) -> String {
+        guard entry.startsSentence, entry.text.first?.isUppercase == true, let first = word.first, first.isLetter else {
+            return word
+        }
+        if word.dropFirst().contains(where: \.isUppercase) { return word }
+        return first.uppercased() + word.dropFirst()
     }
 }

@@ -90,6 +90,26 @@ final class DockView: UIView {
         set { suggestions.onReplaceHistory = newValue }
     }
 
+    var menuRows: ((Int) -> [HistoryMenuRow])? {
+        get { suggestions.menuRows }
+        set { suggestions.menuRows = newValue }
+    }
+
+    var onMenuAction: ((Candidate.StripAction) -> Void)? {
+        get { suggestions.onMenuAction }
+        set { suggestions.onMenuAction = newValue }
+    }
+
+    var borrowTextLayer: (() -> CATextLayer?)? {
+        get { suggestions.borrowTextLayer }
+        set { suggestions.borrowTextLayer = newValue }
+    }
+
+    var recycleTextLayer: ((CATextLayer) -> Void)? {
+        get { suggestions.recycleTextLayer }
+        set { suggestions.recycleTextLayer = newValue }
+    }
+
     /// A tap on the wordmark. Opens the delete-tap choice.
     var onWordmarkTap: (() -> Void)?
 

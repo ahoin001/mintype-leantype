@@ -33,4 +33,8 @@ public enum Motion {
     public static let returnLift: TimeInterval = 0.18
     /// How far that copy travels, in points.
     public static let returnLiftDistance: CGFloat = 22
+    /// A committed word flying from the callout into its chip.
+    public static let wordFlight: TimeInterval = 0.22
+    /// A chip fading in when Reduce Motion is on, and the hold menu fading in.
+    public static let stripFade: TimeInterval = 0.16
 }

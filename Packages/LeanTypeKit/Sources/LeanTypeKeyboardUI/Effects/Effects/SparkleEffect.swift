@@ -16,8 +16,9 @@ final class SparkleEffect: KeyboardEffect {
 
     func handle(_ event: KeyboardEvent, in context: EffectContext) {
         switch event {
-        case let .sentenceEnded(point):
-            burst(at: context.stage.point(fromKeyArea: point), count: 160, speed: 110, in: context)
+        case .sentenceEnded:
+            let dock = context.stage.dockFrame
+            burst(at: CGPoint(x: dock.midX, y: dock.minY + 8), count: 70, speed: 70, in: context)
         case let .flowMilestone(streak):
             let dock = context.stage.dockFrame
             burst(at: CGPoint(x: dock.midX, y: dock.maxY), count: 420, speed: 190, in: context)

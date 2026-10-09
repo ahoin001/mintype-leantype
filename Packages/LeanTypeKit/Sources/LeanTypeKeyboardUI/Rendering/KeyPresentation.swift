@@ -59,7 +59,8 @@ enum KeyPresentationProvider {
             return KeyPresentation(label: .symbol("delete.left"), family: .function, isEnabled: true, accessibilityLabel: "delete")
 
         case .space:
-            return KeyPresentation(label: .text("space", .function), family: .letter, isEnabled: true, accessibilityLabel: "space")
+            let title = state.spaceTitle
+            return KeyPresentation(label: .text(title, .function), family: .letter, isEnabled: true, accessibilityLabel: title == "space" ? "space" : "\(title) words per minute")
 
         case .returnKey:
             let title = state.returnKey.title

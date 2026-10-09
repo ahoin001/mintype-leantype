@@ -9,6 +9,8 @@ public struct KeyboardViewState: Hashable, Sendable {
     public var isReturnKeyEnabled: Bool
     public var candidates: CandidateState
     public var emojiPage: EmojiCategory
+    /// Shown on the space bar when words-per-minute is turned on. Otherwise "space".
+    public var spaceTitle: String = "space"
 }
 
 @MainActor
@@ -70,6 +72,8 @@ public final class KeyboardEngine {
     private var composingTimer: (any Cancellable)?
     /// The polyline of the swipe just committed, so picking another word can remember it.
     private var recentStrokePath: [CGPoint] = []
+    /// Paste, copy, and cut. The pasteboard string is read only inside the paste handler.
+    public var onClipboard: ((ClipboardCommand) -> Void)?
 
     lazy var composer = InputComposer { [weak self] intents in
         self?.performBatch(intents)
@@ -88,6 +92,9 @@ public final class KeyboardEngine {
     private lazy var swipe: SwipeCoordinator = {
         let coordinator = SwipeCoordinator(composer: composer) { [weak self] gesture in
             await self?.decode(gesture) ?? .empty
+        }
+        coordinator.onPreviewThumbs = { [weak self] thumbs in
+            self?.words.notePreviewThumbs(thumbs)
         }
         coordinator.onPreview = { [weak self] result in
             guard let self else { return }
@@ -363,9 +370,30 @@ public final class KeyboardEngine {
 
     public func replaceHistoryWord(at index: Int, with replacement: String) {
         let earlier = TextBoundary.earlierWords(before: editor.contextBefore)
-        guard earlier.indices.contains(index) else { return }
-        guard editor.replaceEarlierWord(earlier[index], with: replacement) else { return }
+        guard earlier.indices.contains(index), let context = editor.contextBefore else { return }
+        let word = earlier[index]
+        let units = word.utf16After + word.text.utf16.count
+        guard let suffix = context.suffix(utf16Count: units) else { return }
+        guard editor.replaceEarlierWord(word, with: replacement, confirming: suffix) else { return }
         language?.noteCommitted(replacement, display: displayToRemember(replacement))
+        refreshTextState()
+    }
+
+    /// `detectPatterns` found something. The string itself is not read until Paste is tapped.
+    public func notePasteboardAvailable(_ available: Bool) {
+        guard words.pasteboardMayContainText != available else { return }
+        words.pasteboardMayContainText = available
+        publishState()
+    }
+
+    public func historyMenu(for chip: Int) -> [HistoryMenuRow] {
+        words.menuRows(for: chip, in: state.candidates)
+    }
+
+    /// A hold-menu row, a case swipe, or a gap double-tap.
+    public func performStripAction(_ action: Candidate.StripAction) {
+        closeOpenWord()
+        _ = performStrip(action, text: "")
         refreshTextState()
     }
 
@@ -983,8 +1011,10 @@ public final class KeyboardEngine {
             unsure: tentative,
             literal: literal,
             advancesRefusalClock: countsAsNewWord,
-            display: displayToRemember(cased[0])
+            display: displayToRemember(cased[0]),
+            scores: result.readings.map(\.score)
         )
+        emit(.commitFelt(sure: !tentative))
         if let layout = words.letterLayout, recentStrokePath.count >= 2 {
             words.language?.rememberFrequentStroke(cased[0], path: recentStrokePath, layout: layout)
         }
@@ -1217,6 +1247,42 @@ public final class KeyboardEngine {
             return (insertSpace(), true)
         case .settle:
             return (true, false)
+        case .refresh:
+            return (true, false)
+        case let .command(action, text):
+            return performStrip(action, text: text)
+        }
+    }
+
+    private func performStrip(_ action: Candidate.StripAction, text: String) -> (changed: Bool, changesText: Bool) {
+        switch action {
+        case .insertText:
+            editor.insert(text)
+            words.rememberEmoji(text)
+            emit(.chipChosen)
+            return (true, true)
+        case let .replaceSuffix(match, replacement):
+            let started = scheduler.now
+            let changed = editor.replaceMatchedSuffix(match, with: replacement)
+            _ = HistoryEditLog.record(elapsed: max(0, scheduler.now - started))
+            emit(.chipChosen)
+            return (changed, true)
+        case let .clipboard(command):
+            onClipboard?(command)
+            emit(.chipChosen)
+            return (command == .cut || command == .paste, command == .cut || command == .paste)
+        default:
+            let started = scheduler.now
+            let path = openWord == nil ? nil : recentStrokePath
+            _ = words.perform(action, started: started, now: { [scheduler] in scheduler.now }, strokePath: path)
+            emit(.chipChosen)
+            let editsText: Bool = switch action {
+            case .replaceHistory, .replaceDocumentWord, .retype, .merge, .capitalize, .undoEdit:
+                true
+            default:
+                false
+            }
+            return (true, editsText)
         }
     }
 
@@ -1414,6 +1480,11 @@ public final class KeyboardEngine {
         publishState()
     }
 
+    private var spaceTitle: String {
+        guard settings.showsWordsPerMinute, let pace = rhythm.wordsPerMinute else { return "space" }
+        return "\(pace)"
+    }
+
     private func publishState() {
         let next = KeyboardViewState(
             layer: layer,
@@ -1423,9 +1494,12 @@ public final class KeyboardEngine {
             isReturnKeyEnabled: isReturnKeyEnabled,
             candidates: words.candidates(
                 suggests: settings.suggestionsEnabled && traits.supportsLanguageFeatures,
-                autocorrects: autocorrects
+                autocorrects: autocorrects,
+                variant: traits.variant,
+                blocksHistory: traits.blocksLexicalEntry
             ),
-            emojiPage: emojiPage
+            emojiPage: emojiPage,
+            spaceTitle: spaceTitle
         )
         guard next != state else { return }
         state = next

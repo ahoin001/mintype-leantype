@@ -159,6 +159,8 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     public var learnWordsEnabled: Bool
     /// Writes a full gesture trace on this phone. Off unless someone turns it on. Nothing is uploaded.
     public var recordsGestureTraces: Bool
+    /// Shows a rolling pace on the space bar. Off unless someone turns it on. No weekly stats.
+    public var showsWordsPerMinute: Bool
     public var height: KeyboardHeight
     public var oneHandedMode: OneHandedMode
     public var effects: EffectsSettings
@@ -185,6 +187,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         leashDuration: Double? = nil,
         learnWordsEnabled: Bool = true,
         recordsGestureTraces: Bool = false,
+        showsWordsPerMinute: Bool = false,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
         effects: EffectsSettings = .default,
@@ -209,6 +212,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.leashDuration = leashDuration
         self.learnWordsEnabled = learnWordsEnabled
         self.recordsGestureTraces = recordsGestureTraces
+        self.showsWordsPerMinute = showsWordsPerMinute
         self.height = height
         self.oneHandedMode = oneHandedMode
         self.effects = effects
@@ -237,6 +241,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case leashDuration
         case learnWordsEnabled
         case recordsGestureTraces
+        case showsWordsPerMinute
         case height
         case oneHandedMode
         case effects
@@ -269,6 +274,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         leashDuration = lenient.value(.leashDuration, defaults.leashDuration)
         learnWordsEnabled = lenient.value(.learnWordsEnabled, defaults.learnWordsEnabled)
         recordsGestureTraces = lenient.value(.recordsGestureTraces, defaults.recordsGestureTraces)
+        showsWordsPerMinute = lenient.value(.showsWordsPerMinute, defaults.showsWordsPerMinute)
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)
         effects = lenient.value(.effects, defaults.effects)

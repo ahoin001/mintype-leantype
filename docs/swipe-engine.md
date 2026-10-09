@@ -1,74 +1,97 @@
 # Swipe engine
 
-Review reference for the current English swipe decoder. It describes the behavior in
-the tree, the numbers that are hand-set, and the cases the tests lock. It is not a
-roadmap. The choices that set that behavior are in `docs/swipe-decisions.md`.
+This is the behavior of the English swipe decoder in the tree. Numbers below are the
+ones the code uses. Each worked example names the test that locks it. The choices
+behind those numbers are in `docs/swipe-decisions.md`. This is not a roadmap.
 
 Swipe runs only when `KeyboardSettings.typingMode` is `.swipe`, a language model is
-loaded, and the field's traits allow it (`KeyboardEngine.applySettings`). It runs on
-the letters layer. A finger on a non-letter never becomes a stroke.
+loaded, and the field allows it (`KeyboardEngine.applySettings`). It runs on the
+letters layer. A finger on a non-letter never becomes a stroke.
 
-Decode budget and memory limits are in `docs/PERF.md`. The release target is 15 ms
-off the main thread. The mapped lexicon does not count toward the extension's dirty
-memory.
+Decode budget and memory limits are in `docs/PERF.md`. A release decode also stops
+itself at 12 ms. See [Stay inside a frame](#stay-inside-a-frame).
 
-## What this engine does, and what it does not
+## What this engine does
 
 One beat can mix taps and strokes. While either thumb is down, those inputs are one
-word. The leading word is shown in the field during the stroke and committed in place
-on lift. A single clean curve can search the lexicon by shape. A repeated word, a
-remembered curve, and a familiar follower can break a close call. They cannot replace
-a spelling the keys actually aimed at.
+word. The key under the finger lights on touch-down, before any decode. The leading
+word is shown in the field during the stroke and committed in place on lift. A single
+clean curve can search the lexicon by shape. A repeated word, a remembered curve, and
+a familiar follower can break a close call. They cannot replace a spelling the keys
+actually aimed at unless the alternative leads by more than `exactLead` (1.0).
+
+A word made only of taps uses that same search when space ends it. A finished swipe
+stays open for a leash, and a short join made inside that leash can still come apart.
 
 Intentionally absent:
 
-- The lexicon is unigram. Letter bigrams are used only inside a word, as a spelling
-  prior. Between words, one follower sits beside the word that just finished. It is
-  not highlighted, and there is no second suggestion row.
+- The lexicon is unigram. Letter bigrams are a spelling prior inside one word.
+  Between words, one follower sits beside the word that just finished. It is not
+  highlighted, and there is no second suggestion row.
 - The previous word is not fed into the two-thumb beam as a prefix.
+- `FollowerPrior` stays a fixed 0.45. `exactLead` stays 1.0. Sigma does not grow
+  from a precision estimate or from how far the thumb reached. Those wait until the
+  on-device touch log says placement or pair strength is the miss.
 - There is no clipboard history, no iCloud sync of learned words, and no jump into
   the system emoji keyboard. The public input-mode API only advances to the next
   keyboard.
 - A permanent number row is not part of this layout.
+- Nothing in this engine is uploaded.
 
 ## Pipeline
 
 ```
 touches
-  → ThumbChains               one chain per stroke, order inside a chain fixed
-  → SwipeCoordinator          one beat: strokes, held letters, taps
+  → SwipeSession              tap, hold, or stroke
+  → SwipeCoordinator          one beat: at most two strokes, plus holds and taps
   → GestureComposer           anchors, crossings, taps, aimed letters
-  → AlignmentDecoder (actor)  off the main thread
-       1. beam over the chains
-       2. rescore with the polyline
-       3. expected followers, if the stroke fits them
-       4. shape nominations for one clean curve
-       5. follower bonus, then ReadingPolicy
-       6. the same search again, with recovery costs, only when that result is weak
+  → AlignmentSearch
+       1. walk chain order (and a few legal swaps) with the linear beam
+       2. chain beam only if that list is empty or the leader is ≤ −6
+       3. rescore with the polyline
+       4. expected followers, if a preceding word exists and the stroke fits them
+       5. shape nominations for one clean curve
+       6. follower bonus, then ReadingPolicy
+       7. the same search again, with recovery costs, only when that result is weak
+          and the 12 ms budget is still open
   → LanguageModel.finish      blocklist, rejections, familiar words, stroke memory
   → field                     preview composing while down, commit on lift
 ```
 
 `KeyboardEngine` stores each beat as an `OpenBeat`: the keys and a point-capped copy
 of each polyline. A later beat that joins the open word calls
-`LanguageModel.sequenceDecode` with those paths, which runs this same search.
-`sequenceDecode` is not a second decoder. Every hand-set search number lives on
-`AlignmentCosts`. `AlignmentCosts.recovery` is the wider second pass.
+`LanguageModel.sequenceDecode` with those paths. That is the same search, not a
+second decoder. Every hand-set search number lives on `AlignmentCosts`.
+`AlignmentCosts.recovery` is the wider second pass.
 
 ## What a finger is
 
-Every finger that lands on a letter starts as a tap (`CharacterTapSession`). It
-becomes a stroke when any of these is true (`SwipeSession`):
+Every finger that lands on a letter starts as a tap (`CharacterTapSession`). The key
+is pressed immediately. The finger becomes a stroke only when `SwipeSession` says it
+has traveled. A roll that merely crosses the key border is still that one letter.
 
-| Condition | Threshold |
-| --- | --- |
-| Sideways travel | 16 pt |
-| Finger leaves the key's hit frame | 8 pt past that frame |
-| Travel in any direction, including straight down | 36 pt |
+| Condition | Threshold | Scales with key width? |
+| --- | --- | --- |
+| Sideways travel | 16 pt | No |
+| Past the key's hit frame | 8 pt (`frameSlop`) | No |
+| Travel in any direction, including straight down | 36 pt | No |
+| Dwell radius | 24 pt at a 36 pt key | Yes |
+| Dwell travel | 12 pt at a 36 pt key | Yes |
+| Retreat step | 34 pt at a 36 pt key | Yes |
+| Retreat lookback | 120 pt at a 36 pt key | Yes |
+| Dwell time | 180 ms, then the session rhythm | No. Time stays time |
+| Rest while another finger draws | 500 ms | No |
+
+`StrokeBuffer.referenceKeyWidth` is 36. A live key of width `w` multiplies dwell
+radius, dwell travel, retreat step, and retreat lookback by `w / 36`. The 16 pt,
+36 pt, and 8 pt tests stay in points, so a bigger key does not turn tap jitter into
+a stroke.
 
 A short downward dip that stays on the key remains a flick, not a stroke. A slide
 along the shortcut row is choosing an accent, not drawing. If the shortcut row is
 already open, the other thumb's word still receives the letter that was held.
+
+### Two thumbs
 
 Two letter fingers can be down together. Neither types until one of them travels.
 The finger that travels starts the gesture and enlists the other:
@@ -77,16 +100,38 @@ The finger that travels starts the gesture and enlists the other:
 - A partner still on its key becomes a held letter. It is one character in this
   word, timestamped at touch-down, and it is not a point on the polyline.
 - If that held finger later travels, the hold is dropped and it becomes a stroke of
-  the same beat.
+  the same beat, unless two strokes are already open.
 - If it lifts without traveling, the letter is kept as a tap in the beat.
 
-A tap with no swipe in progress is held as composing text, not inserted as a finished
-character. See [The word stays open](#the-word-stays-open). A tap that lands and lifts
-while a beat is already open is recorded inside that beat. The beat commits when the
-last finger lifts: no active stroke and no held letter
-(`SwipeCoordinator.finishIfIdle`).
+Decode uses at most two stroke chains. `GestureComposer` keeps the first two strokes
+as chains. Each later stroke becomes a tap of its first aimed letter. `SwipeSession`
+also refuses to open a third chain, so a palm cannot multiply the search.
 
-Cancelling a finger that is already a stroke lifts that finger and keeps the other thumb's beat. A finger that never traveled still cancels without typing. A letter held with no travel for about 500 ms, while another finger is drawing and the accent row is closed, is left out of the beat. Decode uses at most two stroke chains; a third letter finger joins as a tap. Dwell and retreat scale with key width. Tap jitter does not.
+### Cancel, and a long rest
+
+Cancelling a finger that is already a stroke calls the same path as a lift of that
+finger (`coordinator.ended`). The other thumb's beat stays. Cancelling a finger that
+never traveled types nothing and does not reset the gesture.
+
+A letter held with no travel for 500 ms, while another finger is drawing and the
+accent row is closed, is left out of the beat. The same hold with the accent row
+open is kept. A slow tap with no other finger down is still that letter.
+
+### Examples
+
+- A thumb lands on N and rolls 6 pt past the hit frame, then lifts. The field gets
+  `n`. The roll never became a stroke. At 8 pt past the frame it would.
+- Left thumb is drawing `live`. The right thumb is cancelled after it has started
+  its own stroke. The left stroke is kept and decoded. If the right thumb is
+  cancelled before it travels, it contributes no letter.
+- Left thumb holds K for half a second while the right thumb draws a word, and the
+  accent row is closed. K is not in the word. Holding K alone, however slowly, types
+  `k`.
+- Three fingers land and travel. The first two are chains. The third is a tap of
+  the letter it started on.
+
+Locked by `aRollJustPastTheKeyStaysATapUntilItClearsTheSlop` and
+`aThirdStrokeIsATapAndDwellFollowsTheKey`.
 
 ## One beat, then the leash
 
@@ -100,32 +145,76 @@ The ticket is taken from the first stroke's tap session. A letter tapped before 
 swipe can land before the swiped word. A letter tapped after waits until the decoder
 returns, because the composer will not apply a later intent in front of an open ticket.
 
+The beat commits when the last finger lifts: no active stroke and no held letter
+(`SwipeCoordinator.finishIfIdle`).
+
 After a beat commits, the word stays **open** for a leash. Cold start is
 `KeyboardEngine.wordLeash` (340 ms). After four inter-key gaps, `TypingRhythm` scales
 that leash from the session's pace and clamps it between 160 ms and 550 ms. A finger
 still down holds the leash open (`openDeadline = .infinity`) and the leash restarts
-when that finger lifts. While the word is open, another tap or swipe can rewrite it
-instead of starting the next word. Space, return, an external edit, or the leash
-expiring closes it.
+when that finger lifts. Space, return, an external edit, or the leash expiring
+closes it. The keyboard's own echo of the commit does not.
 
-`KeyboardSettings.swipeCommitMode` defaults to `.lift`, which is this behavior. The
-other mode, `.explicitSpace`, keeps one word open until space, return, or an external
-edit. Lift still inserts the trailing space. A later beat replaces that word in place.
+`KeyboardSettings.swipeCommitMode` defaults to `.lift`. `.explicitSpace` keeps one
+word open until space, return, or an external edit, and it skips the split choice
+below. Lift still inserts the trailing space. A later beat replaces that word in
+place.
 
-`extendFinishedWords` (default on) is the other gate. A word the fingers have actually
-spelled can still grow from a quick tap that is not itself a word (`the` + `n` →
-`then`). It will not be rewritten by a beat that already has its own reading (`hello`
-then `correct` stay two words; `in` then `to` do not become `into`). A fragment that
-is only a prefix (`es`, `wa`, `priva`) stays open for the leash even when the bar is
-already showing a longer dictionary word. Turning `extendFinishedWords` off makes the
-next tap a new word immediately.
+### Growing a finished word
 
-While the leash is still open, a letter or two that joined a finished word can leave again. `the` + `n` is `then` until `ice` arrives inside the leash, and the field becomes `the nice`. The gap is a cost inside that window. A second beat that is already its own word (`to`, `nice`, `correct`) is not swallowed. Explicit space skips the choice. Pairs that are two function words (`in` + `to`, `no` + `w`, `a` + `go`, and the same kind) stay two words.
+`extendFinishedWords` (default on) is the other gate. A word the fingers have
+actually spelled can still grow by one or two events that are not themselves a word.
 
-A completion that runs ahead of the keys is not finished. `priva` shown as `private`
-stays open so `te` can still arrive. A shape match that is a different word is
-finished: `pull` for a P–I–L path will not silently keep absorbing letters as if it
-were still `pil`.
+| What arrives inside the leash | Field |
+| --- | --- |
+| `the`, then `n` | `then ` |
+| `the`, then `n` after the leash | `the n` |
+| `hello`, then a swipe of `correct` | `hello correct ` |
+| `in`, then `to` | `in to ` |
+| `es`, then `tranged` | `estranged ` |
+| `priva` shown early, then `te` | `private ` |
+| `extendFinishedWords` off, then any tap | the tap is a new word |
+
+A fragment that is only a prefix stays open for the leash even when the bar is
+already showing a longer dictionary word. A completion that runs ahead of the keys
+is not finished. `priva` shown as `private` stays open so `te` can still arrive.
+A shape match that is a different word is finished: `pull` for a P–I–L path will
+not keep absorbing letters as if it were still `pil`.
+
+A finished word absorbs a later beat only when that beat spells a known word.
+`the` + `n` becomes `then` because `then` is in the dictionary. `then` + `i` does
+not become the string `theni`. Unknown letter piles stay in composing.
+
+These joins are refused even when the letters spell one dictionary word, because
+the second beat is already its own word:
+
+`into`, `now`, `ago`, `some`, `anyone`, `cannot`, `within`, `upon`, `become`.
+
+So `no` + `w` stays `no` and then `w`. `in` + `to` stays two words.
+
+### The leash can unpick a short join
+
+`the` + `n` may become `then`. If `i`, `c`, and `e` arrive before the leash ends,
+that join is scored again. The field becomes `the nice `, not `then ice `.
+
+While the leash is open, each new letter looks at every cut through the short
+chunks (each chunk is one or two events). A cut is kept when both sides are known
+words and each side lines up with the letters on that side. The cut whose second
+word uses the most of those letters wins. The time from the end of the head to the
+start of the tail has to sit inside three quarters of the leash. After the leash,
+or on explicit space, the cut is not reconsidered.
+
+Letters that do not yet finish the other word stay in composing. `i` after `then`
+is not a new committed word. `c` stays with it. `e` completes `nice`, the committed
+word is rewritten from `then` to `the`, and `nice ` is committed.
+
+A second beat that is already its own word is not pulled in. `to`, `correct`, and
+a finished `nice` stay the next word. The strip after a resplit shows that suffix
+word and its other readings. One chip replaces one word, so `then ice` is not
+offered as a single tap that would rewrite both words at once.
+
+Locked by `theNiceUndoesAShortJoin`, `aQuickTapCanStillLengthenTheWord`,
+`aTapAfterTheLeashStartsTheNextWord`, and `functionWordsDoNotSwallowTheNextBeat`.
 
 ## The word stays open
 
@@ -137,29 +226,34 @@ erase.
 | `typedComposing` | Letters held while no swipe preview is up | Yes. Shift, the current word, and backspace see it. |
 | `previewComposing` | The swipe leader, and only while typed composing is empty | No. It is the ghost in the field. |
 
-The host sees one marked range (`setMarkedText`). On flush, the mark is cleared and
-the text is inserted. `unmarkText` is not used, because that would commit the mark
-twice. Context passed back from the proxy strips a suffix that matches the mark, so
-the marked text is not counted twice.
+The host sees one marked range. `setMarkedText` runs only when that string changes,
+so a repeated preview of the same word does not touch the field again. On flush, the
+mark is cleared and the text is inserted. `unmarkText` is not used, because that
+would commit the mark twice. Context passed back from the proxy strips a suffix that
+matches the mark, so the marked text is not counted twice.
 
 A tapped letter appears immediately and is flushed after `wordLeash`, or sooner on
 space, punctuation, emoji, or a cursor move. A swipe preview cancels that flush. The
 taps stay peelable until the swipe commit replaces them. Backspace peels typed
-composing before it touches the document.
+composing before it touches the document. Deleting a character counts the composing
+text, and a field that holds only composing still counts as non-empty, so the return
+key can enable.
 
 ## What the thumbs aimed at
 
 The polyline is the finger's real path. It is not "every key the finger crossed."
 
 `StrokeBuffer` keeps up to 256 points, dropping samples closer than 1.5 pt. Pulling
-back along the path shortens it. A reversal of about one key (34 pt) that lands on the
-path already drawn, and within the last 120 pt of that path, drops the tail. Letters
-already entered are not erased by that shorten. A later key that merely sits near an
-older part of a zigzag is a new letter. That is why T–R–A–G–E–D stays `traged` and is
-not read as a retreat through R. Past 256 points the buffer keeps every other sample.
+back along the path shortens it. A reversal of about one key (34 pt at the reference
+width) that lands on the path already drawn, and within the lookback of that path,
+drops the tail. Both distances scale with key width. Letters already entered are not
+erased by that shorten. A later key that merely sits near an older part of a zigzag
+is a new letter. That is why T–R–A–G–E–D stays `traged` and is not read as a retreat
+through R. Past 256 points the buffer keeps every other sample.
 
 A letter is recorded when the finger becomes closer to that key's center than to the
-key it was previously aiming at. Riding a boundary does not alternate. Repeating the
+key it was previously aiming at. The sample used is the closest approach along the
+segment, not a smoothed point. Riding a boundary does not alternate. Repeating the
 current letter does nothing.
 
 The corner is judged where the finger came nearest the key, not at the boundary where
@@ -173,8 +267,9 @@ the center is not promoted just because a neighbor turned.
   corner at about 29° (`aimTurn` 0.50 rad). A wobble that stays on one QWERTY row
   needs about 69° (`sameRowTurn` 1.20 rad), so a straight run does not aim every key
   it brushes. Cold dwell is 180 ms inside a 24 pt radius, with no more than 12 pt of
-  travel. A pause is that letter once: the beam does not offer a doubled letter from
-  a dwell. `TypingRhythm` scales the dwell with the session and clamps it.
+  travel, both radii scaled to the key. A pause is that letter once: the beam does
+  not offer a doubled letter from a dwell. `TypingRhythm` scales the dwell duration
+  with the session and clamps it.
 - **Crossing** — anything else. The beam may insert it. Skipping a key the path only
   grazed is cheap. Skipping one the path went through the middle of is not.
 - **Tap** — a thumb that never drew. Timestamped at touch-down. Not a polyline point.
@@ -210,6 +305,11 @@ Adjacent bounces are collapsed again (`BeatChooser.collapse`): `ghghgh` becomes 
 `AlignmentSearch.decode` walks a prefix index (`indices(withPrefix:)`). A hypothesis
 dies when the letters so far are not a prefix of a dictionary or personal word.
 
+The first pass walks time order, plus up to six chain-legal adjacent swaps, each as
+its own linear beam. Order inside one chain stays fixed. A chain beam runs only when
+that list is empty or the leader scores at or below −6. Recovery, when it runs, is
+the chain beam with one omission and one within-chain transposition.
+
 Each word letter is a tap, an anchor, or a letter taken from a channel. The costs
 below are `AlignmentCosts.standard` unless a row says otherwise.
 
@@ -227,12 +327,13 @@ below are `AlignmentCosts.standard` unless a row says otherwise.
 | Insert a crossing | Extra `0.35 ×` distance from the center, capped at 1.5 key widths. The middle of a key is cheap to take; a distant graze is not |
 | Letter bigram | weight 0.30, from the lexicon, inside the word only |
 | Motion | weight 0.45, travel direction versus the step from the previous key, same stroke only |
-| Cross-thumb order | order inside one chain is fixed. Up to six chain-legal adjacent swaps are each walked on their own, so a skip is not crowded out. A gap the swap window cannot reach falls through to the chain beam, which charges `min(1.6, 2.4 × seconds)`. There is no 18-event cliff |
-| One omission | recovery pass only. A vowel costs 1.15, any other letter 1.40. One per hypothesis |
+| Cross-thumb order | a swapped order pays `transpositionPenalty` for the gap. The chain beam, when it runs, charges `min(1.6, 2.4 × seconds)`. There is no 18-event cliff |
+| One omission | recovery pass only. Costs 1.15. One per hypothesis |
 | Within-chain transpose | recovery pass only. Costs 1.15. The skipped step is still matched |
 | Frequency | `0.22 ×` the word's place in the lexicon's log-count range, not the raw log count |
 | Results kept | 4 on the bar, plus any reading within 1.15 of that last slot |
-| Recovery | empty, score ≤ −6, or a tie whose leader is not the aimed spelling. Wider neighbors (10 within 2.5 key widths), beam 48, edits on, weak shape kept as a penalty |
+| Weak score | −6. At or below this, the chain beam or recovery may run |
+| Recovery | empty, score ≤ −6, or unsure and the leader does not line up with the aimed letters. Wider neighbors (10 within 2.5 key widths), beam 48, edits on, weak shape kept as a penalty. Skipped when the 12 ms budget is already gone |
 
 The frequency fraction is deliberate. A raw log count outweighed the path, so a common
 stem such as `ve` could crowd out the letters the finger drew.
@@ -240,7 +341,8 @@ stem such as `ve` could crowd out the letters the finger drew.
 After the beam, `rescore` adds `StrokeFit` and a length cost (`lengthWeight` 1.4).
 Length outside the old 0.45×–2.2× band is a cost on the sum of the strokes. It is not
 a hard reject, and it is not skipped because more than one finger moved. A stroke that
-already scored as a miss does not also pay the length cost.
+already scored as a miss (−8) does not also pay the length cost. That is what keeps
+an exact `cat` inside the result window.
 
 `StrokeFit` lays the word on the strokes:
 
@@ -249,13 +351,21 @@ already scored as a miss does not also pay the length cost.
 - Two thumbs are sequential slices when each thumb owns a run, and an interleave only
   when the two spans overlap. A non-overlapping interleave is not tried. That is what
   keeps `live` ahead of `veli`.
-- A word the strokes do not explain scores as a miss (−8) and is dropped on the first pass. The recovery pass keeps that score as a penalty.
+- A word the strokes do not explain scores as a miss (−8) and is dropped on the first
+  pass. The recovery pass keeps that score as a penalty.
 
 `PathScore` resamples both the gesture and the ideal key path to 32 points. Location
 σ is 0.42, shape σ is 0.30, endpoints σ is 0.55. The score used for ranking is
 pointwise. A short warp (radius 2 samples) is used only when asking whether one word's
 curve sits closer than another's. Putting that warp into the ranking score made shape
 words tie and dropped real readings out of the top 4.
+
+### Example
+
+Two thumbs spell `cat`, and one thumb skips a neighbor. Each thumb has its own skip
+budget of 2. `cat` stays in the result even when several neighbor-words score a
+little higher, because anything within 1.15 of the fourth slot is kept, and a miss
+does not also pay length. Locked by `eachThumbKeepsItsOwnSkipBudget`.
 
 ## Shape search
 
@@ -272,13 +382,12 @@ scans first-and-last-letter buckets around the stroke's endpoints:
 
 There is no fixed list of common curves. Any nominated word can lead.
 
-A nomination that is merely in the neighborhood stays just outside the tie margin
-(leader score − 0.35 − 0.01). A word already in the beam keeps the beam's score.
-Either kind leads only when its path is at least 0.35 key widths closer than the beam
-leader (or closer than 0.55 when the leader has no location). That lead is raised to
-`leader + exactLead + 0.01`, so a graze that merely lines up with the aimed letters
-cannot take the place back. `the` drawn as a curve beats a grazed `tre` for this
-reason.
+A nomination that is merely in the neighborhood stays under the leader by the tie
+margin. A word already in the beam keeps the beam's score. Either kind leads only
+when its path is at least 0.35 key widths closer than the beam leader (or closer
+than 0.55 when the leader has no location). That lead is capped under the leader
+minus the tie margin, so a shape extra cannot spend `exactLead`. `the` drawn as a
+curve beats a grazed `tre` for this reason.
 
 A tap, or a second thumb, keeps the beam. The shape pass does not override a letter
 the other thumb placed. Two-thumb words can still be nominated by joining the two
@@ -303,8 +412,8 @@ because several neighbor-words sat a little closer.
 `WordJoiner.aligns` is the spelling rule. The word must use the aimed letters in
 order. Any aimed letter may also cover one extra copy of itself (`pill` from `pil`,
 `hello` from `helo`). An extra word letter that was never traced does not align, so
-`love` does not align with traced `live`. An apostrophe does not have to be visited
-(`that's` lines up with `thats`).
+`love` does not align with traced `live`, and `the` does not align with `teh`.
+An apostrophe does not have to be visited (`that's` lines up with `thats`).
 
 | Situation | What is committed |
 | --- | --- |
@@ -329,6 +438,81 @@ as `priva` until `private` is covered).
 If the decoder returns nothing, the aimed letters are committed anyway, marked unsure.
 One letter is inserted as a character. Two or more go through the swipe commit.
 
+## Words typed with taps
+
+On space, a word made only of taps becomes tap events with no polyline and runs
+through `AlignmentSearch`. `TapCorrector` still runs. The typed letters change only
+when one of these is true:
+
+- The beam has a real score for the typed spelling, and the winner leads it by more
+  than `exactLead`.
+- The winner is the same letters in another order, and it leads the next reading by
+  more than `exactLead`.
+
+Otherwise the typed word stays, and `TapCorrector` may still apply its own single
+edit. An exact name or code stays. `teh` can still become `the`, because those are
+not the same letters and the corrector already knows that slip.
+
+### Which thumb
+
+Thumb identity is timing and side, not a learned map (`TapThumbs`). The midline is
+halfway from Q to P.
+
+- Two touches under 60 ms apart are different thumbs. One thumb cannot land twice
+  that fast. The second touch takes the other thumb, even if both keys are on the
+  left.
+- A slower pair uses the side of the key. Left of the midline is thumb 0. Right is
+  thumb 1.
+
+Same-thumb taps stay in order. Cross-thumb taps may swap, which is how a two-thumb
+tap word can still be read when the fingers overlap.
+
+Example: taps at 0 ms, 40 ms, and 200 ms, on keys at x = 10, 12, and 200, with the
+midline at 100. The thumbs are 0, 1, 1. The first two are different because 40 ms is
+inside the gap. The third is thumb 1 because it is on the right and 160 ms later.
+Locked by `tapsUnderSixtyMillisecondsAreDifferentThumbs`.
+
+### Contractions
+
+`dont`, `cant`, `wont`, and `im` are not words of their own. Space maps them to the
+contraction the dictionary stores for those letters: `don't`, `can't`, `won't`,
+`I'm`. Capitalization follows the typed word, so `Im` becomes `I'm`.
+
+`its` and `it's` are both real. The typed form stays. The other form is a completion
+on the strip, not a rewrite after the next word.
+
+| Typed | On space | On the strip |
+| --- | --- | --- |
+| `dont` | `don't ` | the correction is highlighted, as with any unknown spelling |
+| `cant` | `can't ` | same |
+| `wont` | `won't ` | same |
+| `im` | `I'm ` | same |
+| `its` | `its ` | `it's` is offered, not applied |
+| `teh` | `the ` | `TapCorrector` still owns this slip |
+
+Locked by `correctsCommonSlips`, `mapsMissingContractions`, and
+`itsStaysTypedAndOffersTheContraction`.
+
+### A new spelling
+
+`PersonalLexicon.learn` records a spelling on the first commit, but `contains` is
+false until three uses (`usesBeforeKnown`). Until then autocorrect may still fix it.
+Suggestions start at two uses (`usesBeforeSuggesting`), so a spelling can be offered
+once before it is treated as known.
+
+Tapping the literal on the bar calls `remember`, which promotes that spelling
+immediately. Holding a suggestion to remember does the same.
+
+| What the user did | Known? | Suggested? |
+| --- | --- | --- |
+| Typed `zorbly` once | No | No |
+| Typed `zorbly` twice | No | Yes |
+| Typed `zorbly` three times | Yes | Yes |
+| Tapped the literal `zorbly` on the bar | Yes, at once | Yes |
+
+Locked by `learnsAndSuggestsAfterRepeatedUse`, `unknownWordsAreLearned`, and
+`rememberSuggestsOnTheFirstPinAndForgetDropsOnlyThatWord`.
+
 ## What the user has already written
 
 Habits, rejections, and stroke memory run after the search, on the way out of
@@ -343,7 +527,9 @@ decoder.
 | Rejections | cap 200 | If the user has insisted on `teh` over `the`, `teh` is ranked first the next time both appear. |
 | Swipe refusals | cap 12 | Deleting a swipe demotes that word the next time a similar trace would have led with it. |
 | Blocklist | cap 300 | Removed before the readings are shown. |
-| Personal lexicon | cap 1,000 | Same prefix checks as the main lexicon, with their own log count. A new word is learned when a typed word ends and it is not a known correction. |
+| Personal lexicon | cap 1,000 | Same prefix checks as the main lexicon once the spelling is known. Pending uses sit in the same file and are not known yet. |
+| Touch offsets | `touch-offsets.jsonl` | After a committed word, one line of how far each accepted touch sat from its key center, in key widths, tagged `left` or `right`. The ranker does not read it. |
+| Gesture traces | `gesture-traces.jsonl` | Written only when `recordsGestureTraces` is on. Default off. |
 
 A period, question mark, exclamation, or newline clears recent context. Learned pairs
 stay. Autocorrect runs when a word is finished by space or return, not when a swipe
@@ -353,6 +539,22 @@ word. That swap is also what records the stroke prototype.
 `LearningDirectory` writes those files to the App Group when Full Access makes it
 available, and to the extension container otherwise. Settings the companion reads stay
 in the App Group only.
+
+## Stay inside a frame
+
+`SearchClock.responseBudget` is 12 ms. The search reads the clock every fourth
+expansion step and returns the best complete reading it already has. Recovery does
+not start if that budget is already gone. The beam width stays 28. The budget is a
+stall guard, not a reason to search more.
+
+Release builds install that clock on `sequenceDecode` and on the async aligner.
+Debug builds, including the test suite, leave the clock open, because coverage can
+spend 12 ms before a short word is scored. The deadline itself is locked by
+`anExhaustedClockSkipsRecovery`, which injects a clock that is already past its
+deadline and checks that recovery did not run. Device milliseconds are not invented.
+
+`TextDocumentProxyAdapter` calls `setMarkedText` only when the marked string
+changes.
 
 ## Preview, commit, and the bar
 
@@ -379,11 +581,16 @@ follow it. The lift commits that choice when the word is still in the result, an
 On commit the editor inserts the word as one unit: a leading space when the cursor is
 mid-text, then the word, then a trailing space. The word is replaced in place if a
 later beat joins. Shift is applied to the committed word: first letter, or the whole
-word when caps is locked.
+word when caps is locked. Shift is not stored per letter, so `iPhone` and
+`McDonald's` are not guessed.
 
 Unsure commits and provisional fragments (score −20) stay tentative on the bar. The
 cleaned aimed letters ride at the end of the readings when they are not the chosen
 word, so an unknown name can be tapped back.
+
+The settled word stays the highlighted center. Its follower, when there is a real
+preceding word, is an extra chip that is not highlighted. History on an empty field
+stays the recent words. The follower does not replace them.
 
 ## A miss stays cheap
 
@@ -401,11 +608,12 @@ These already exist and are not part of the decoder:
 
 | Action | Effect |
 | --- | --- |
-| Last finger lifts | Decode and commit this beat. The word stays open for the leash, unless explicit space is on, in which case it stays open. |
-| Space | Flushes composing, closes the open word, finishes it (autocorrect may apply), inserts a space. |
+| Last finger lifts | Decode and commit this beat. The word stays open for the leash. Explicit space keeps it open past the leash. |
+| Space | Flushes composing, closes the open word, finishes it (autocorrect may apply), inserts a space. A tap-only word runs through the alignment search here. |
 | Return | Closes the open word, finishes it with no extra trailing space, inserts a newline, ends the sentence context. |
 | Double-space period | Sentence boundary. Sparkle plays at the space bar. |
 | Next beat has its own reading, or the leash expired | The open word locks. The new beat is the next word, with its own leading space. |
+| Short letters inside the leash that finish the other split | The committed word is rewritten and the new word is committed. `then` + `ice` becomes `the nice `. |
 | External document edit | The open word locks. The next letter is inserted into whatever is there now. |
 | Our own echo of the commit | The word stays open. A host echoing `pil ` back does not break a following `e` into a new word. |
 
@@ -415,9 +623,11 @@ next swipe.
 
 ## Worked examples
 
-Thumb names are the intended choreography. The engine does not know left from right.
-It knows which finger moved, which finger tapped, and the time of each aimed letter.
-QWERTY, top to bottom: `Q W E R T Y U I O P`, `A S D F G H J K L`, `Z X C V B N M`.
+Thumb names are the intended choreography. The engine does not know left from right
+except when assigning thumbs to a tap-only word, where side is the midline between
+Q and P. It otherwise knows which finger moved, which finger tapped, and the time of
+each aimed letter. QWERTY, top to bottom: `Q W E R T Y U I O P`, `A S D F G H J K L`,
+`Z X C V B N M`.
 
 These must stay true. Each one is a test in `SwipeTypingTests` unless noted.
 
@@ -520,46 +730,73 @@ scored.
 Locked by `aRepeatedWordBeatsAnEqualShapeAndOneUseDoesNot` and
 `liveBeatsVeliBecauseTheWordShapeDiffers`.
 
+### the nice — a short join comes apart
+
+1. Swipe `the`. The field is `the `, and the word is open for the leash.
+2. Tap `n` inside the leash. `then` is a known word, so the field becomes `then `.
+3. Tap `i`, then `c`. Neither finishes a new word with the short tail, so they stay
+   in composing. The field shows `then ic`.
+4. Tap `e` inside the leash. The short chunks are `n` and `i`. The cut that uses the
+   most of them is `the` + `nice`. The field becomes `the nice `.
+
+If step 2 happens after the leash, the field stays `the n`. If step 4 is a swipe of
+`correct`, that beat is already its own word and is not swallowed.
+
+`no` + `w`, `in` + `to`, `a` + `go`, `so` + `me`, `any` + `one`, `can` + `not`,
+`with` + `in`, `up` + `on`, and `be` + `come` stay two words. The second beat is
+already a word, and those concatenations are on the blocked list.
+
+Locked by `theNiceUndoesAShortJoin` and `functionWordsDoNotSwallowTheNextBeat`.
+
 ## Where this is brittle
 
 - One aimed letter may cover only one extra copy of itself. A third L will not spell
   `pill` from `pi`.
-- The retreat window is 120 pt. A zigzag that really does walk back through the same
-  keys inside that window loses those letters.
-- Cross-hand order is a chain-legal swap inside the rhythm's window, walked as its own
-  beam, or the chain beam when that window cannot reach. Order inside one thumb stays fixed.
-- The leash starts at 340 ms and then follows the typist. A finished word can still
-  grow. `the` + a quick `n` becomes `then`. That is intended, and it is also how a
-  deliberate second word gets eaten if it is typed immediately and is not itself a
-  confident swipe. Explicit space turns that choice off.
+- The retreat window is one key of lookback at the reference width, scaled with the
+  key. A zigzag that really does walk back through the same keys inside that window
+  loses those letters.
+- Cross-hand order is a chain-legal swap inside the rhythm's window, walked as its
+  own beam, or the chain beam when that window cannot reach. Order inside one thumb
+  stays fixed.
+- The leash starts at 340 ms and then follows the typist. `the` + a quick `n` becomes
+  `then`, and `ice` inside the same leash can give that `n` back. A second word that
+  is already confident (`to`, `correct`) is not eaten. Explicit space turns the
+  choice off. A gap longer than three quarters of the leash is not reconsidered.
 - A preview withdraws only after the path has already produced one and then grown
   into a miss. The first samples still keep the previous pill.
 - Joining still requires the aimed letters in order. A crossing can fill a hole.
   A tap and a stroke that land inside the swap window can be read either way.
-- The shape lead clears `exactLead` on purpose. It fires only when the curve is
-  clearly closer and there is a single moving finger. Loosening `exactLead` would
-  let a habit or a graze replace an aimed spelling. Tightening it would let the graze
-  take `the` back.
+- The shape lead stays under the tie margin on purpose. Loosening `exactLead` would
+  let a habit or a graze replace an aimed spelling.
 - Stroke memory promotes past `exactLead` as well, and only after the user has
   already rejected the keyboard's choice for that curve. A prototype match of 0.42
   key widths is tight; a sloppy repeat of a different word should not hit it.
 - The fast-flick stretch starts at 750 pt/s. Below that the Gaussian stays round.
   Stretching ordinary traces reshuffles close spellings such as `live` / `love`.
+- The 12 ms cutoff is a release stall guard. A debug or coverage run does not apply
+  it. An injected clock is how the cutoff is tested.
 
 ## Where to look
 
 | Concern | Type |
 | --- | --- |
-| When a touch becomes a stroke, preview cadence, commit | `SwipeCoordinator`, `SwipeSession` |
-| Anchors, crossings, closest approach, dwell | `GestureComposer` in `StrokeAnalyzer.swift` |
+| When a touch becomes a stroke, cancel, rest | `SwipeSession` |
+| Two chains, holds, preview cadence, commit | `SwipeCoordinator` |
+| Anchors, crossings, closest approach, dwell, third finger as a tap | `GestureComposer` in `StrokeAnalyzer.swift` |
 | Return trips and same-row collapses | `StrokeLetters` |
 | Channels between corners | `StrokeChannel` |
-| Beam, chains, recovery, exact-lead policy | `AlignmentSearch`, `ThumbChains`, `ReadingPolicy` in `AlignmentDecoder.swift` |
-| Optional decode trace | `DecodeTrace`. Off unless a test passes a `DecodeTraceSink` |
+| Retreat distances | `StrokeBuffer` in `SwipeGesture.swift` |
+| Beam, chains, recovery, exact-lead policy, 12 ms clock | `AlignmentSearch`, `SearchClock`, `ThumbChains`, `ReadingPolicy` in `AlignmentDecoder.swift` |
+| Optional decode trace | `DecodeTrace`. Off unless `recordsGestureTraces` is on, or a test passes a `DecodeTraceSink` |
 | Polyline score | `PathScore`, `StrokeFit` |
 | Endpoint-bucket nominations | `PathDecoder.nominate` |
+| Tap thumbs | `TapThumbs` |
+| Tap autocorrect, contractions | `TapCorrector` |
 | Habits, pairs, remembered curves | `HabitMemory`, `WordContext`, `StrokeMemory` |
-| Composing text and the leash | `KeyboardEngine`, `TextEditor`, `TextDocument` |
+| Pending spellings | `PersonalLexicon` |
+| Touch offsets and gesture traces | `TouchOffsetLog`, `GestureTraceLog` in `LocalLearningLog.swift` |
+| Composing text, the leash, unpicking a short join | `KeyboardEngine`, `TextEditor`, `TextDocument` |
+| Marked text | `TextDocumentProxyAdapter` |
 | Suggestion strip | `WordAssistant` |
 | Space-bar cursor, backspace scrub | `SpaceSession`, `BackspaceSession` |
 
@@ -569,3 +806,4 @@ words with seeded noise). The perturbation set
 (`perturbationSetKeepsCleanWordsAndClassifiesTheRest`) reports recall, rank,
 boundary, and classification on top of that floor. A delayed second thumb is
 `aDelayedSecondThumbStillDecodes`. Timing: `PathDecoderTests.decodesFastEnough`.
+The stall guard is `anExhaustedClockSkipsRecovery`.

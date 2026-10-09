@@ -53,9 +53,11 @@ public final class FeedbackCoordinator: KeyboardEventObserver {
         case .flowMilestone:
             impact(softImpact, intensity: 1)
         case .wordCommitted(.swipe):
-            guard hapticsEnabled else { return }
-            swipeSuccess.notificationOccurred(.success)
-            swipeSuccess.prepare()
+            break
+        case let .commitFelt(sure):
+            impact(softImpact, intensity: sure ? 0.65 : 0.3)
+        case .chipChosen:
+            impact(keyImpact, intensity: 0.35)
         case .sentenceEnded, .trackpadEnded, .wordCommitted, .swipeGestureCommitted, .correctionApplied, .flowChanged, .holdArmed, .holdEnded, .returnSent:
             break
         }

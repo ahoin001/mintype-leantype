@@ -181,10 +181,19 @@ public final class TextEditor {
     }
 
     /// Replaces one earlier word and puts the caret back where it was.
+    /// `suffix` is the field ending that still has to be there. A mismatch changes nothing.
     @discardableResult
-    public func replaceEarlierWord(_ word: TextBoundary.EarlierWord, with replacement: String) -> Bool {
+    public func replaceEarlierWord(
+        _ word: TextBoundary.EarlierWord,
+        with replacement: String,
+        confirming suffix: String? = nil
+    ) -> Bool {
         guard !replacement.isEmpty, word.characters > 0 else { return false }
+        if let suffix {
+            guard let before = document.contextBefore, before.hasSuffix(suffix) else { return false }
+        }
         forgetEverything()
+        document.flushTypedComposing()
         document.adjustCursor(byUTF16Offset: -word.utf16After)
         for _ in 0..<word.characters {
             document.deleteBackward()
@@ -193,6 +202,29 @@ public final class TextEditor {
         if word.utf16After != 0 {
             document.adjustCursor(byUTF16Offset: word.utf16After)
         }
+        return true
+    }
+
+    /// Replaces a field ending and leaves the caret after the replacement.
+    @discardableResult
+    public func replaceMatchedSuffix(_ suffix: String, with replacement: String) -> Bool {
+        guard !suffix.isEmpty, let before = document.contextBefore, before.hasSuffix(suffix) else { return false }
+        forgetEverything()
+        document.flushTypedComposing()
+        for _ in suffix {
+            document.deleteBackward()
+        }
+        if !replacement.isEmpty {
+            document.insert(replacement)
+        }
+        return true
+    }
+
+    /// Puts `composing` back where `suffix` was, so typing continues inside that word.
+    @discardableResult
+    public func reopenMatchedSuffix(_ suffix: String, as composing: String) -> Bool {
+        guard replaceMatchedSuffix(suffix, with: "") else { return false }
+        document.setTypedComposing(composing)
         return true
     }
 
@@ -338,7 +370,7 @@ public final class TextEditor {
 
     // MARK: - Memory bookkeeping
 
-    private var hasSelection: Bool {
+    var hasSelection: Bool {
         !(document.selectedText ?? "").isEmpty
     }
 

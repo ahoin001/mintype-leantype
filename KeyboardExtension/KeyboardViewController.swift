@@ -65,6 +65,9 @@ final class KeyboardViewController: UIInputViewController {
         keyboardView.backgroundStyle = .system
         keyboardView.onOneHandedChange = { [weak self] mode in self?.persistOneHanded(mode) }
         keyboardView.onBackspaceTapChange = { [weak self] action in self?.persistBackspace(action) }
+        engine.onClipboard = { [weak self] command in
+            self?.performClipboard(command)
+        }
         keyboardView.addEventObserver(stats)
 
         notificationObservers = [
@@ -178,6 +181,28 @@ final class KeyboardViewController: UIInputViewController {
         settings.oneHandedMode = mode
         guard hasFullAccess else { return }
         settingsStore.save(settings)
+    }
+
+    private func performClipboard(_ command: ClipboardCommand) {
+        switch command {
+        case .copy:
+            if let text = textDocumentProxy.selectedText {
+                UIPasteboard.general.string = text
+            }
+        case .cut:
+            if let text = textDocumentProxy.selectedText {
+                UIPasteboard.general.string = text
+                textDocumentProxy.deleteBackward()
+            }
+        case .paste:
+            if let text = UIPasteboard.general.string {
+                textDocumentProxy.insertText(text)
+            }
+        case .selectWord:
+            let word = TextBoundary.currentWord(before: textDocumentProxy.documentContextBeforeInput)
+            guard !word.isEmpty else { return }
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: -word.utf16.count)
+        }
     }
 
     private func persistBackspace(_ action: BackspaceTapAction) {
