@@ -18,20 +18,17 @@ public final class TextDocumentProxyAdapter: TextDocument {
 
     public var contextBefore: String? {
         guard var before = proxy.documentContextBeforeInput else { return nil }
-        let mark = typedComposing.isEmpty ? previewComposing : typedComposing
-        guard !mark.isEmpty else { return before }
-        var prefix = Substring(mark)
-        while !prefix.isEmpty {
-            if before.hasSuffix(prefix) {
-                before.removeLast(prefix.count)
-                break
-            }
-            prefix.removeLast()
-        }
+        var after = proxy.documentContextAfterInput ?? ""
+        stripIncludedMark(before: &before, after: &after)
         return before
     }
 
-    public var contextAfter: String? { proxy.documentContextAfterInput }
+    public var contextAfter: String? {
+        guard var after = proxy.documentContextAfterInput else { return nil }
+        var before = proxy.documentContextBeforeInput ?? ""
+        stripIncludedMark(before: &before, after: &after)
+        return after
+    }
     public var selectedText: String? { proxy.selectedText }
 
     public func insert(_ text: String) {
@@ -49,7 +46,6 @@ public final class TextDocumentProxyAdapter: TextDocument {
     }
 
     public func adjustCursor(byUTF16Offset offset: Int) {
-        flushTypedComposing()
         proxy.adjustTextPosition(byCharacterOffset: offset)
     }
 
@@ -71,12 +67,44 @@ public final class TextDocumentProxyAdapter: TextDocument {
     }
 
     public func flushTypedComposing() {
-        let text = typedComposing
-        guard !text.isEmpty else { return }
+        guard !typedComposing.isEmpty else { return }
         typedComposing = ""
+        proxy.unmarkText()
+        marked = ""
+        markedCaret = 0
         markCaret = previewComposing.count
-        publishMark()
-        proxy.insertText(text)
+        if !previewComposing.isEmpty {
+            publishMark()
+        }
+    }
+
+    public func commitActiveMark() {
+        guard !activeMark.isEmpty else { return }
+        typedComposing = ""
+        previewComposing = ""
+        markCaret = 0
+        marked = ""
+        markedCaret = 0
+        proxy.unmarkText()
+    }
+
+    /// Removes the mark from the host context only when both sides are that same mark.
+    /// A committed word that merely ends in the same letters stays intact.
+    private func stripIncludedMark(before: inout String, after: inout String) {
+        let mark = activeMark
+        guard !mark.isEmpty else { return }
+        let caret = min(markCaret, mark.count)
+        let prefix = String(mark.prefix(caret))
+        let suffix = String(mark.dropFirst(caret))
+        let beforeMatches = prefix.isEmpty || before.hasSuffix(prefix)
+        let afterMatches = suffix.isEmpty || after.hasPrefix(suffix)
+        guard beforeMatches, afterMatches else { return }
+        if !prefix.isEmpty {
+            before.removeLast(prefix.count)
+        }
+        if !suffix.isEmpty {
+            after.removeFirst(suffix.count)
+        }
     }
 
     /// An empty string clears a swipe ghost. `unmarkText` would commit it.

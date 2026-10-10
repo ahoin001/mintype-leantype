@@ -53,6 +53,10 @@ public enum KeyboardEvent: Hashable, Sendable {
     case swipeGestureCommitted(strokes: Int)
     /// The word the swipe is about to commit changed while the fingers are still down.
     case swipePreviewChanged
+    /// A finger is drawing. Emitted on a short cadence, not on every touch sample.
+    case strokePulse
+    /// Letters a finished swipe kept. One event per commit, and only while Spectacle is on.
+    case spectacleLetters([String])
     case correctionApplied
     case correctionReverted
     /// Return inserted a newline. `title` is the key's label; `key` is its frame.

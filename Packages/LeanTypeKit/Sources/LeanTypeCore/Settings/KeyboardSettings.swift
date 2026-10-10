@@ -103,11 +103,19 @@ public struct EffectsSettings: Codable, Sendable, Equatable {
     public var intensity: Intensity
     public var trailStyle: TrailStyle
     public var celebrateMilestones: Bool
+    /// Letters ride the stroke and a fast rhythm brightens the trail. Off unless someone turns it on.
+    public var spectacle: Bool
 
-    public init(intensity: Intensity = .lively, trailStyle: TrailStyle = .lantern, celebrateMilestones: Bool = true) {
+    public init(
+        intensity: Intensity = .lively,
+        trailStyle: TrailStyle = .lantern,
+        celebrateMilestones: Bool = true,
+        spectacle: Bool = false
+    ) {
         self.intensity = intensity
         self.trailStyle = trailStyle
         self.celebrateMilestones = celebrateMilestones
+        self.spectacle = spectacle
     }
 
     public static let `default` = EffectsSettings()
@@ -116,6 +124,7 @@ public struct EffectsSettings: Codable, Sendable, Equatable {
         case intensity
         case trailStyle
         case celebrateMilestones
+        case spectacle
     }
 
     public init(from decoder: Decoder) throws {
@@ -125,6 +134,7 @@ public struct EffectsSettings: Codable, Sendable, Equatable {
         intensity = lenient.value(.intensity, defaults.intensity)
         trailStyle = lenient.value(.trailStyle, defaults.trailStyle)
         celebrateMilestones = lenient.value(.celebrateMilestones, defaults.celebrateMilestones)
+        spectacle = lenient.value(.spectacle, defaults.spectacle)
     }
 }
 
@@ -163,6 +173,8 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
     public var showsWordsPerMinute: Bool
     public var height: KeyboardHeight
     public var oneHandedMode: OneHandedMode
+    /// Docked, floating, or split. The word session does not change with placement.
+    public var placement: KeyboardPlacement
     public var effects: EffectsSettings
     /// Hold-and-slide rows the user has edited, keyed by a lowercase letter. A missing key
     /// keeps the built-in accents. An empty row means holding that letter types nothing extra.
@@ -190,6 +202,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         showsWordsPerMinute: Bool = false,
         height: KeyboardHeight = .regular,
         oneHandedMode: OneHandedMode = .off,
+        placement: KeyboardPlacement = .docked,
         effects: EffectsSettings = .default,
         keyShortcuts: [String: [String]] = [:]
     ) {
@@ -215,6 +228,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         self.showsWordsPerMinute = showsWordsPerMinute
         self.height = height
         self.oneHandedMode = oneHandedMode
+        self.placement = placement
         self.effects = effects
         self.keyShortcuts = keyShortcuts
     }
@@ -244,6 +258,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         case showsWordsPerMinute
         case height
         case oneHandedMode
+        case placement
         case effects
         case keyShortcuts
     }
@@ -277,6 +292,7 @@ public struct KeyboardSettings: Codable, Sendable, Equatable {
         showsWordsPerMinute = lenient.value(.showsWordsPerMinute, defaults.showsWordsPerMinute)
         height = lenient.value(.height, defaults.height)
         oneHandedMode = lenient.value(.oneHandedMode, defaults.oneHandedMode)
+        placement = lenient.value(.placement, defaults.placement)
         effects = lenient.value(.effects, defaults.effects)
         keyShortcuts = lenient.value(.keyShortcuts, defaults.keyShortcuts)
     }

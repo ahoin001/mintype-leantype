@@ -48,6 +48,7 @@ final class TouchEngine {
         var callout: CalloutState?
         var isTrackpadActive = false
         var strokes = Set<TouchID>()
+        var strokeThumbs: [TouchID: Int] = [:]
         var jewel: GestureMark?
 
         for id in order {
@@ -60,6 +61,9 @@ final class TouchEngine {
             isTrackpadActive = isTrackpadActive || presentation.isTrackpadActive
             if presentation.isStroke {
                 strokes.insert(id)
+                if let thumb = presentation.strokeThumb {
+                    strokeThumbs[id] = thumb
+                }
             }
             if let mark = presentation.jewel {
                 jewel = mark
@@ -71,6 +75,7 @@ final class TouchEngine {
             callout: callout,
             isTrackpadActive: isTrackpadActive,
             strokes: strokes,
+            strokeThumbs: strokeThumbs,
             jewel: jewel
         )
         guard next != interaction else { return }

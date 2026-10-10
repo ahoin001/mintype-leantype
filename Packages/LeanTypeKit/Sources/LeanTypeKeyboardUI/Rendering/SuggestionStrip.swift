@@ -31,6 +31,16 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     /// Set by a commit or a correction, then consumed by the next pill placement.
     private var emphasis = PillEmphasis.travel
     private var pressedChip: Int?
+    /// Extra strip motion. Preview updates while a finger is down do not use it.
+    var spectacle = false
+    private var spectacleCue = SpectacleCue.none
+
+    private enum SpectacleCue {
+        case none
+        case unsure
+        case rewrite
+        case restore
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -92,6 +102,9 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             emphasis = .land
         case .correctionApplied, .correctionReverted:
             emphasis = .correct
+            if spectacle { spectacleCue = .rewrite }
+        case let .commitFelt(sure) where spectacle && !sure:
+            spectacleCue = .unsure
         default:
             break
         }
@@ -107,6 +120,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
             cancelEmphasis()
             return
         }
+        let previous = highlightedText
         let centerNewest = newState.isHistory && !newState.isDrilled
         state = newState
         let animated = !UIAccessibility.isReduceMotionEnabled && window != nil
@@ -116,6 +130,7 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         layoutIfNeeded()
         placePill(animated: animated)
         if centerNewest { centerNewestWord() }
+        playSpectacle(from: previous, animated: animated)
     }
 
     override func layoutSubviews() {
@@ -308,6 +323,46 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
         }
     }
 
+    private var highlightedText: String? {
+        guard let index = state.highlightedIndex, state.candidates.indices.contains(index) else { return nil }
+        return state.candidates[index].text
+    }
+
+    /// Sure land keeps the pill settle. The other three verbs play once, and never on a live preview.
+    private func playSpectacle(from previous: String?, animated: Bool) {
+        guard spectacle, animated, !state.isTentative else {
+            spectacleCue = .none
+            return
+        }
+        if spectacleCue == .none, let previous, let current = highlightedText,
+           current.count > previous.count,
+           current.lowercased().hasPrefix(previous.lowercased()) {
+            spectacleCue = .rewrite
+        }
+        if spectacleCue == .none, let previous,
+           state.candidates.contains(where: { $0.role == .typed }),
+           !state.candidates.contains(where: { $0.role == .settled && $0.text == previous }) {
+            spectacleCue = .restore
+        }
+        let cue = spectacleCue
+        spectacleCue = .none
+        let index = state.highlightedIndex ?? slots.firstIndex { !$0.isHidden }
+        guard let index, slots.indices.contains(index) else { return }
+        switch cue {
+        case .none:
+            break
+        case .unsure:
+            slots[index].spectaclePulse()
+            if let other = slots.indices.first(where: { $0 != index && !slots[$0].isHidden }) {
+                slots[other].spectaclePulse()
+            }
+        case .rewrite:
+            slots[index].spectacleGrow()
+        case .restore:
+            slots[index].spectacleLift()
+        }
+    }
+
     /// Stretches the accent pill between slots. A landing or a correction squeezes through
     /// the middle instead. The first appearance is in place.
     private func placePill(animated: Bool) {
@@ -471,6 +526,32 @@ private final class SuggestionSlot: UIButton {
 
     override var isHighlighted: Bool {
         didSet { alpha = isHighlighted ? 0.55 : 1 }
+    }
+
+    func spectaclePulse() {
+        UIView.animateKeyframes(withDuration: 0.22, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.5) { self.alpha = 0.65 }
+            UIView.addKeyframe(withRelativeStartTime: 0.5, relativeDuration: 0.5) { self.alpha = 1 }
+        }
+    }
+
+    func spectacleGrow() {
+        label.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+        UIView.animate(withDuration: 0.14, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
+            self.label.transform = .identity
+        }
+    }
+
+    func spectacleLift() {
+        transform = .identity
+        alpha = 1
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .curveEaseOut], animations: {
+            self.transform = CGAffineTransform(translationX: 0, y: -8)
+            self.alpha = 0
+        }, completion: { _ in
+            self.transform = .identity
+            self.alpha = 1
+        })
     }
 
     func configure(text: String, symbol: String?, isHighlighted emphasized: Bool, unsure: Bool, theme: Theme) {

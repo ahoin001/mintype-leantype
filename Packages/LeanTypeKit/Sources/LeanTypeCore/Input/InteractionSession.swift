@@ -17,11 +17,21 @@ protocol SessionContext: AnyObject {
     /// Letters are still waiting out the leash, so a hold must not open the accent row.
     var isInsideComposingWord: Bool { get }
 
+    /// Both sides of the caret are letters, so a space-bar flick stays on characters.
+    var caretIsInsideWord: Bool { get }
+
+    /// The caret sits inside a pending mark, so backspace deletes one letter there.
+    var caretIsInsideMark: Bool { get }
+
     /// Text removed or put back by the last successful delete or restore. Empty otherwise.
     var performedText: String { get }
 
     @discardableResult
     func perform(_ intent: KeyboardIntent) -> Bool
+    /// Commits a tap-open word so this key's ticket lands after it. Returns whether a word was waiting.
+    func commitTapOpenWord() -> Bool
+    /// The swipe commit already typed the trailing space, so the next space key should not add another.
+    func suppressDelimiterSpace()
     func emit(_ event: KeyboardEvent)
     /// Runs `action` later and then refreshes what's on screen.
     func schedule(after delay: TimeInterval, _ action: @escaping @MainActor @Sendable () -> Void) -> any Cancellable

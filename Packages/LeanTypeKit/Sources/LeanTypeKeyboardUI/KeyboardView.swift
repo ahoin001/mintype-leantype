@@ -73,6 +73,7 @@ public final class KeyboardView: UIView {
     private var observers: [any KeyboardEventObserver] = []
     private var heightScale = 1.0
     private var oneHandedMode = OneHandedMode.off
+    private var placement = KeyboardPlacement.docked
     private let coach = CoachHints()
     private var pendingHint: CoachHints.Hint?
     private var hintHide: Timer?
@@ -95,10 +96,18 @@ public final class KeyboardView: UIView {
         panel.isHidden = true
         observers = [feedback, effects]
 
+        keysView.onCollectedLetter = { [weak self] letter, point in
+            guard let self else { return }
+            effects.trails.noteLetter(letter, at: effects.stage.point(fromKeyArea: point))
+        }
         keysView.onTouchSamples = { [weak self] samples in
             guard let self else { return }
             engine.handle(samples)
-            effects.trails.ingest(samples, strokes: engine.state.interaction.strokes)
+            effects.trails.ingest(
+                samples,
+                strokes: engine.state.interaction.strokes,
+                thumbs: engine.state.interaction.strokeThumbs
+            )
         }
         keysView.onAccessibilityActivate = { [weak self] id in
             self?.engine.activateKey(id)
@@ -238,11 +247,11 @@ public final class KeyboardView: UIView {
             width: bounds.width,
             height: max(bounds.height - metrics.dockHeight, 0)
         )
-        let mode = metrics.isCompact ? .off : oneHandedMode
+        let mode = (metrics.isCompact || placement != .docked) ? OneHandedMode.off : oneHandedMode
         let keysWidth = mode == .off ? keyArea.width : (keyArea.width * Self.oneHandedWidth).rounded()
         let keysX = mode == .right ? keyArea.maxX - keysWidth : keyArea.minX
         keysView.frame = CGRect(x: keysX, y: keyArea.minY, width: keysWidth, height: keyArea.height)
-        panel.isHidden = mode == .off
+        panel.isHidden = mode == .off || placement != .docked
         panel.frame = CGRect(
             x: mode == .right ? keyArea.minX : keysView.frame.maxX,
             y: keyArea.minY,
@@ -263,9 +272,15 @@ public final class KeyboardView: UIView {
         dock.setBackspaceAction(settings.backspaceTapAction)
         keysView.showsHints = settings.secondaryHintsVisible && settings.flickForSecondaryEnabled
         effects.apply(settings: settings.effects)
-        if settings.height.scale != heightScale || settings.oneHandedMode != oneHandedMode {
+        let spectacle = settings.effects.spectacle
+        let motion = spectacle && effects.level == .full
+        keysView.spectacle = spectacle
+        keysView.spectacleMotion = motion
+        dock.spectacle = motion
+        if settings.height.scale != heightScale || settings.oneHandedMode != oneHandedMode || settings.placement != placement {
             heightScale = settings.height.scale
             oneHandedMode = settings.oneHandedMode
+            placement = settings.placement
             invalidateIntrinsicContentSize()
             setNeedsLayout()
         }
@@ -392,6 +407,13 @@ extension KeyboardView: KeyboardEngineDelegate {
             spaceGulpID += 1
         }
         dock.note(event)
+        if case let .spectacleLetters(letters) = event {
+            keysView.noteKeptLetters(letters)
+            effects.trails.noteKept(letters)
+        }
+        if case let .commitFelt(sure) = event {
+            effects.trails.noteCommit(sure: sure)
+        }
         noteCoach(event)
         for observer in observers {
             observer.handle(event)

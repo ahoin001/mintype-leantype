@@ -17,6 +17,14 @@ final class KeyboardTouchView: UIView {
         didSet { if showsHints != oldValue { render() } }
     }
 
+    /// Letter keys draw lighter. Motion (the lift) stays off under Reduce Motion.
+    var spectacle = false {
+        didSet { if spectacle != oldValue { render() } }
+    }
+    var spectacleMotion = false
+    /// A letter key the stroke just entered, in key-area coordinates.
+    var onCollectedLetter: ((String, CGPoint) -> Void)?
+
     private let calloutView = CalloutView()
     /// Views for every layer seen so far, so switching layers mid-slide never allocates.
     private var viewPool: [KeyID: KeyView] = [:]
@@ -35,6 +43,9 @@ final class KeyboardTouchView: UIView {
     private var pressedIDs: Set<KeyID> = []
     private var flowValue = 0.0
     private var flowEffectsEnabled = false
+    /// Letter keys the current stroke has entered. Cleared when the next stroke starts.
+    private var visitedIDs: [KeyID] = []
+    private var strokeOpen = false
     /// The layer last laid out, so a switch can bring the new labels in by row.
     private var shownLayer: KeyboardLayer?
     private let flowRim = CAShapeLayer()
@@ -115,8 +126,23 @@ final class KeyboardTouchView: UIView {
             flashFlowRim(on: id)
         }
         render()
+        noteSpectacle(in: newState)
         if trackpadChanged {
             setLabelsHidden(newState.interaction.isTrackpadActive)
+        }
+    }
+
+    /// Letters a finished swipe kept. Visited keys that are not in the list fall back.
+    func noteKeptLetters(_ letters: [String]) {
+        guard spectacleMotion else { return }
+        var remaining = letters.map { $0.lowercased() }
+        for id in visitedIDs {
+            guard let letter = letter(of: id)?.lowercased() else { continue }
+            if let index = remaining.firstIndex(of: letter) {
+                remaining.remove(at: index)
+            } else {
+                viewPool[id]?.setSpectaclePose(collected: false)
+            }
         }
     }
 
@@ -224,6 +250,7 @@ final class KeyboardTouchView: UIView {
         for frame in geometry.keys {
             guard let view = viewPool[frame.id] else { continue }
             let presentation = KeyPresentationProvider.presentation(for: frame.key, state: state, showsHints: showsHints)
+            view.spectacleAir = spectacle && presentation.family == .letter
             view.configure(
                 label: presentation.label,
                 colors: theme.colors(for: presentation.family),
@@ -357,6 +384,36 @@ final class KeyboardTouchView: UIView {
             guard let character = frame.key.kind.character?.lowercased(), letters.contains(character) else { return nil }
             return frame.id
         })
+    }
+
+    private func noteSpectacle(in state: KeyboardViewState) {
+        let drawing = spectacleMotion && !state.interaction.strokes.isEmpty
+        if drawing, !strokeOpen {
+            for id in visitedIDs {
+                viewPool[id]?.clearSpectaclePose()
+            }
+            visitedIDs.removeAll(keepingCapacity: true)
+            strokeOpen = true
+        }
+        if !drawing {
+            strokeOpen = false
+        }
+        guard drawing else { return }
+        for id in state.interaction.pressedKeys where isLetterKey(id) && !visitedIDs.contains(id) {
+            visitedIDs.append(id)
+            viewPool[id]?.setSpectaclePose(collected: true)
+            if let letter = letter(of: id), let frame = geometry?.keys.first(where: { $0.id == id }) {
+                let center = CGPoint(x: frame.visualFrame.midX, y: frame.visualFrame.midY)
+                onCollectedLetter?(letter, center)
+            }
+        }
+    }
+
+    private func letter(of id: KeyID) -> String? {
+        guard let character = geometry?.keys.first(where: { $0.id == id })?.key.kind.character,
+              character.count == 1, character.first?.isLetter == true
+        else { return nil }
+        return character
     }
 
     private func isLetterKey(_ id: KeyID) -> Bool {

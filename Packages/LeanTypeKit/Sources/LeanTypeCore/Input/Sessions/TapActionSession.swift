@@ -49,6 +49,9 @@ final class TapActionSession: InteractionSession {
     private func commitIfAllowed() {
         let allowed = isInside && (intent != .returnKey || context.isReturnKeyEnabled)
         if allowed {
+            if intent == .returnKey {
+                _ = context.commitTapOpenWord()
+            }
             context.composer.commit(ticket, [intent])
         } else {
             context.composer.cancel(ticket)

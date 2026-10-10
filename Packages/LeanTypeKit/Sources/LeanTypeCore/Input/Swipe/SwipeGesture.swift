@@ -62,6 +62,8 @@ struct StrokeBuffer {
     private var keyWidth: CGFloat
     /// Which thumb drew this stroke. A later stroke with the same thumb extends that chain.
     var thumb: Int
+    /// Key width, so a stored touch error can be turned back into points.
+    var pitch: CGFloat { keyWidth }
 
     init(start: StrokePoint, keyWidth: CGFloat = referenceKeyWidth, thumb: Int = 0) {
         self.keyWidth = max(keyWidth, 1)

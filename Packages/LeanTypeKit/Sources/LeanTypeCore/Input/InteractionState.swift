@@ -31,6 +31,8 @@ struct SessionPresentation {
     var isStroke = false
     /// Set while this finger is scrubbing or the space bar is a trackpad.
     var jewel: GestureMark?
+    /// Which thumb is drawing, fixed at touch-down. Nil when this finger is not stroking.
+    var strokeThumb: Int?
 
     static let none = SessionPresentation()
 }
@@ -76,6 +78,8 @@ public struct InteractionState: Hashable, Sendable {
     public var isTrackpadActive: Bool
     /// Fingers currently drawing swipe strokes.
     public var strokes: Set<TouchID>
+    /// Thumb tag for each stroke, fixed when that finger started drawing.
+    public var strokeThumbs: [TouchID: Int]
     /// The scrub or trackpad finger, so a jewel can ride above it.
     public var jewel: GestureMark?
 
@@ -84,12 +88,14 @@ public struct InteractionState: Hashable, Sendable {
         callout: CalloutState?,
         isTrackpadActive: Bool,
         strokes: Set<TouchID> = [],
+        strokeThumbs: [TouchID: Int] = [:],
         jewel: GestureMark? = nil
     ) {
         self.pressedKeys = pressedKeys
         self.callout = callout
         self.isTrackpadActive = isTrackpadActive
         self.strokes = strokes
+        self.strokeThumbs = strokeThumbs
         self.jewel = jewel
     }
 

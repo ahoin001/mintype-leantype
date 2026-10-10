@@ -24,6 +24,8 @@ struct SettingsView: View {
                         options: [("Tap and swipe", .swipe), ("Tap only", .tap)]
                     )
                     PebbleDivider()
+                    leashRow
+                    PebbleDivider()
                     PebblePickerRow(
                         systemImage: "delete.left",
                         title: "A tap on delete removes",
@@ -95,27 +97,6 @@ struct SettingsView: View {
                         detail: "Up to three words above the keys. Tap one to use it.",
                         isOn: $model.settings.suggestionsEnabled
                     )
-                    PebbleDivider()
-                    PebbleToggleRow(
-                        systemImage: "text.append",
-                        title: "Finish a word you just typed",
-                        detail: "A quick tap can still turn the into then. A full swipe is always the next word.",
-                        isOn: $model.settings.extendFinishedWords
-                    )
-                    if model.settings.typingMode == .swipe {
-                        PebbleDivider()
-                        PebblePickerRow(
-                            systemImage: "space",
-                            title: "End a swipe",
-                            detail: model.settings.swipeCommitMode == .lift
-                                ? "The word lands when you lift. A short pause can still add a letter."
-                                : "Several swipes stay one word until you press space.",
-                            selection: $model.settings.swipeCommitMode,
-                            options: [("On lift", .lift), ("On space", .explicitSpace)]
-                        )
-                        PebbleDivider()
-                        leashRow
-                    }
                     PebbleDivider()
                     PebbleToggleRow(
                         systemImage: "wand.and.sparkles",
@@ -229,32 +210,39 @@ struct SettingsView: View {
 
     private var leashRow: some View {
         let recommended = SharedContainer.recommendedLeash()
-        let suggested = String(format: "Suggested %.2f s from your typing.", recommended)
-        return VStack(alignment: .leading, spacing: 8) {
-            PebbleToggleRow(
-                systemImage: "timer",
-                title: "Join window",
-                detail: model.settings.leashDuration == nil
-                    ? "Follows your pace. \(suggested)"
-                    : suggested,
-                isOn: Binding(
-                    get: { model.settings.leashDuration == nil },
-                    set: { follow in
-                        model.settings.leashDuration = follow ? nil : recommended
-                    }
-                )
-            )
-            if model.settings.leashDuration != nil {
-                Slider(
-                    value: Binding(
-                        get: { model.settings.leashDuration ?? recommended },
-                        set: { model.settings.leashDuration = min(0.55, max(0.16, $0)) }
-                    ),
-                    in: 0.16...0.55
-                )
-                .padding(.leading, 48)
+        let suggested = String(format: "%.2f", recommended)
+        let detail = joinWindow.map { seconds in
+            "Words can join for \(String(format: "%g", seconds)) seconds."
+        } ?? "Follows your pace. Suggested \(suggested) s from your typing."
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                PebbleIcon(systemName: "timer", size: 34)
+                PebbleRowText(title: "Join window", detail: detail)
             }
+            PebbleOptionTiles(
+                title: "Join window",
+                selection: joinWindowBinding,
+                options: [
+                    .init(label: "Pace", systemImage: "metronome", value: nil),
+                    .init(label: "0.2 s", systemImage: "hare", value: 0.2),
+                    .init(label: "0.4 s", systemImage: "timer", value: 0.4),
+                    .init(label: "0.8 s", systemImage: "tortoise", value: 0.8),
+                ]
+            )
         }
+    }
+
+    /// The tile that matches the stored window. Pace is nil.
+    private var joinWindow: Double? {
+        guard let value = model.settings.leashDuration else { return nil }
+        return [0.2, 0.4, 0.8].min { abs($0 - value) < abs($1 - value) }
+    }
+
+    private var joinWindowBinding: Binding<Double?> {
+        Binding(
+            get: { joinWindow },
+            set: { model.settings.leashDuration = $0 }
+        )
     }
 
     private var learnedWordsDetail: String {

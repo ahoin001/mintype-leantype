@@ -480,6 +480,91 @@ final class MemoryLearnedWordsStore: LearnedWordsStore, @unchecked Sendable {
     func clear() { words = [] }
 }
 
+@MainActor
+@Suite("Redraw and the strip")
+struct RedrawStripTests {
+    private func readings(_ words: [String]) -> DecodeResult {
+        DecodeResult(readings: words.map { DecodeResult.Reading(word: $0, score: 0) })
+    }
+
+    @Test func aWholeWordDeleteSkipsTheChipsThatWereShowing() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let result = readings(["alpha", "beta", "gamma", "delta"])
+        language.noteCommitted("alpha")
+        #expect(language.useCount(of: "alpha") == 1)
+
+        language.noteRedrawRejection(chips: ["beta", "alpha", "gamma"], trace: "alpha", word: "alpha")
+        #expect(language.useCount(of: "alpha") == 0)
+        #expect(language.applyingRedraw(to: result, trace: "alpha").words == ["delta", "alpha", "beta", "gamma"])
+        #expect(language.applyingRedraw(to: result, trace: "beta").words == ["alpha", "beta", "gamma", "delta"])
+
+        language.noteCommitted("delta")
+        language.noteRedrawRejection(chips: ["delta"], trace: "alpha", word: "delta")
+        #expect(language.applyingRedraw(to: result, trace: "alpha").words == ["alpha", "beta", "gamma", "delta"])
+
+        language.noteCommitted("delta")
+        language.noteCommitted("later")
+        #expect(language.applyingRedraw(to: result, trace: "alpha").words.first == "alpha")
+    }
+
+    @Test func aRejectionThatWasNotRecordedLeavesTheOrderAlone() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let result = readings(["alpha", "beta", "gamma"])
+        #expect(language.applyingRedraw(to: result, trace: "alpha").words == ["alpha", "beta", "gamma"])
+    }
+
+    @Test func neverSuggestDropsTheChipAndRememberPutsItBack() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let document = InMemoryTextDocument()
+        let editor = TextEditor(document: document)
+        editor.commitWord("alpha")
+        let words = WordAssistant(editor: editor)
+        words.language = language
+        words.swipeCommitted(["alpha", "beta", "gamma", "delta"], unsure: false, literal: "alpha")
+
+        #expect(language.ban("alpha"))
+        words.conceal("alpha")
+        let hidden = words.candidates(suggests: true, autocorrects: false).candidates.map(\.text)
+        #expect(!hidden.contains("alpha"))
+
+        #expect(language.remember("alpha"))
+        words.restoreConcealed("alpha")
+        let restored = words.candidates(suggests: true, autocorrects: false).candidates.map(\.text)
+        #expect(restored.contains("alpha"))
+    }
+
+    @Test func forgetDropsALearnedChipFromTheStrip() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        language.isLearningEnabled = true
+        let document = InMemoryTextDocument()
+        let editor = TextEditor(document: document)
+        editor.commitWord("alpha")
+        let words = WordAssistant(editor: editor)
+        words.language = language
+        words.swipeCommitted(["alpha", "beta", "gamma"], unsure: false, literal: "alpha")
+        #expect(language.remember("alpha"))
+        #expect(language.forget("alpha"))
+        words.conceal("alpha")
+        let shown = words.candidates(suggests: true, autocorrects: false).candidates.map(\.text)
+        #expect(!shown.contains("alpha"))
+    }
+
+    @Test func moreOftenAndLessOftenMoveAChip() {
+        let language = LanguageModel(lexicon: TestLexicon.shared)
+        let document = InMemoryTextDocument()
+        let editor = TextEditor(document: document)
+        editor.commitWord("alpha")
+        let words = WordAssistant(editor: editor)
+        words.language = language
+        words.swipeCommitted(["alpha", "beta", "gamma"], unsure: false, literal: "alpha")
+        words.nudgeChip("gamma", forward: true)
+        words.nudgeChip("gamma", forward: false)
+        language.moreOften("gamma")
+        language.lessOften("gamma")
+        #expect(language.useCount(of: "gamma") >= 1)
+    }
+}
+
 /// Banned spellings kept in memory for tests.
 final class MemoryBlocklistStore: BlocklistStore, @unchecked Sendable {
     private var entries: [BlockedSpelling] = []

@@ -59,17 +59,36 @@ public final class TextEditor {
     }
 
     public var contextBefore: String? {
+        let prefix = markPrefix
         guard let base = document.contextBefore else {
-            return document.typedComposing.isEmpty ? nil : document.typedComposing
+            return prefix.isEmpty ? nil : prefix
         }
-        return base + document.typedComposing
+        return base + prefix
     }
-    public var contextAfter: String? { document.contextAfter }
+
+    public var contextAfter: String? {
+        let suffix = markSuffix
+        guard let base = document.contextAfter else {
+            return suffix.isEmpty ? nil : suffix
+        }
+        return suffix + base
+    }
 
     public var isDocumentEmpty: Bool {
         (document.contextBefore ?? "").isEmpty
             && (document.contextAfter ?? "").isEmpty
-            && document.typedComposing.isEmpty
+            && document.activeMark.isEmpty
+    }
+
+    /// The swipe ghost is the visible mark, so a typed letter joins it instead of hiding it.
+    public var isEditingPreview: Bool {
+        document.typedComposing.isEmpty && !document.previewComposing.isEmpty
+    }
+
+    /// The caret sits before the last held letter.
+    public var caretIsMidTypedMark: Bool {
+        let typed = document.typedComposing
+        return !typed.isEmpty && document.markCaret < typed.count
     }
 
     /// The word right before the cursor, if the cursor is at the end of one.
@@ -78,9 +97,12 @@ public final class TextEditor {
         TextBoundary.currentWord(before: contextBefore)
     }
 
+    /// Letters typed into the open word and not yet flushed into the document.
+    public var typedComposing: String { document.typedComposing }
+
     /// The most recent unit commit, if the cursor is still right after it.
     public var recentCommit: RecentCommit? {
-        guard let commit, isValid(commit.anchor) else { return nil }
+        guard let commit, isValid(commit.anchor), !caretIsInsideMark else { return nil }
         return commit.value
     }
 
@@ -112,6 +134,30 @@ public final class TextEditor {
 
     public func appendTypedComposing(_ letter: String) {
         document.setTypedComposing(document.typedComposing + letter)
+    }
+
+    /// Inserts `letter` at the caret inside the visible mark.
+    public func insertIntoActiveMark(_ letter: String) {
+        guard !letter.isEmpty else { return }
+        if isEditingPreview {
+            let caret = min(document.markCaret, document.previewComposing.count)
+            var characters = Array(document.previewComposing)
+            characters.insert(contentsOf: letter, at: caret)
+            document.setPreviewComposing(String(characters), caret: caret + letter.count)
+            previewEdited = true
+            return
+        }
+        let caret = min(document.markCaret, document.typedComposing.count)
+        var characters = Array(document.typedComposing)
+        characters.insert(contentsOf: letter, at: caret)
+        document.setTypedComposing(String(characters), caret: caret + letter.count)
+    }
+
+    /// Writes the visible mark into the document once, with the caret left where it was.
+    public func commitActiveMark() {
+        guard !document.activeMark.isEmpty else { return }
+        previewEdited = false
+        document.commitActiveMark()
     }
 
     public func clearPreviewComposing() {
@@ -388,51 +434,15 @@ public final class TextEditor {
                 return .handled(true)
             }
         }
-        return leaveMark(toward: direction, byWord: byWord)
+        return leaveMark()
     }
 
-    /// Typed letters flush once. A swipe ghost is cleared without being inserted.
-    private func leaveMark(toward direction: Int, byWord: Bool) -> MarkTravel {
-        let typed = document.typedComposing
-        if !typed.isEmpty {
-            forgetEverything()
-            document.flushTypedComposing()
-            return .handled(movePastFlushed(typed, direction: direction, byWord: byWord))
-        }
-        if !document.previewComposing.isEmpty {
-            document.setPreviewComposing("")
-            return .continueOutside
-        }
-        return .absent
-    }
-
-    /// The flushed word is now behind the caret. Finish the step that crossed out of it.
-    private func movePastFlushed(_ typed: String, direction: Int, byWord: Bool) -> Bool {
-        let before = document.contextBefore ?? ""
-        let after = document.contextAfter ?? ""
-        let stem = before.hasSuffix(typed) ? String(before.dropLast(typed.count)) : before
-        let offset: Int
-        if direction < 0 {
-            if byWord {
-                let length = TextBoundary.wordMovementLength(before: stem)
-                offset = -(typed.utf16.count + stem.suffix(length).utf16.count)
-            } else if let character = stem.last {
-                offset = -(typed.utf16.count + character.utf16.count)
-            } else {
-                let back = typed.utf16.count
-                if back > 0 { document.adjustCursor(byUTF16Offset: -back) }
-                return false
-            }
-        } else if byWord {
-            offset = after.prefix(TextBoundary.wordMovementLength(after: after)).utf16.count
-        } else if let character = after.first {
-            offset = character.utf16.count
-        } else {
-            return false
-        }
-        guard offset != 0 else { return false }
-        document.adjustCursor(byUTF16Offset: offset)
-        return true
+    /// The mark is already in the field. Committing it writes those letters once, then the same step continues outside.
+    private func leaveMark() -> MarkTravel {
+        guard !document.activeMark.isEmpty else { return .absent }
+        previewEdited = false
+        document.commitActiveMark()
+        return .continueOutside
     }
 
     private func moveDocumentCaret(_ direction: Int, byWord: Bool) -> Bool {
@@ -569,5 +579,21 @@ public final class TextEditor {
 
     private func currentAnchor() -> Substring? {
         document.contextBefore.map { $0.suffix(Self.anchorLength) }
+    }
+
+    /// The caret has moved into a pending mark, so the previous commit is not what backspace should remove.
+    public var caretIsInsideMark: Bool {
+        let mark = document.activeMark
+        return !mark.isEmpty && document.markCaret < mark.count
+    }
+
+    private var markPrefix: String {
+        let mark = document.activeMark
+        return String(mark.prefix(min(document.markCaret, mark.count)))
+    }
+
+    private var markSuffix: String {
+        let mark = document.activeMark
+        return String(mark.dropFirst(min(document.markCaret, mark.count)))
     }
 }

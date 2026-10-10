@@ -45,6 +45,7 @@ final class TrailRenderer {
         var arrivals: Int = 0
         /// 0 on a straight run, 1 through a turn. Prism rings spread with it.
         var split: CGFloat = 0
+        var hue: CGFloat = 0
         var root: CALayer { gradient ?? shape }
     }
 
@@ -63,12 +64,39 @@ final class TrailRenderer {
     private var sampleBuffer: [FingerJewel.Sample] = []
 
     var level: EffectsLevel = .full {
-        didSet { if level == .off { endAll(animated: false) } }
+        didSet {
+            if level == .off {
+                spectacle = false
+                hideGlyphs()
+                filament?.isHidden = true
+                cancelEcho()
+                endAll(animated: false)
+            }
+        }
     }
 
     var style: EffectsSettings.TrailStyle = .lantern
     var palette: EffectPalette
     var intensity: CGFloat = 1
+    /// Typing rhythm, 0...1. The echo waits until this reaches the prism step.
+    var flow: Double = 0
+    private(set) var spectacle = false
+    /// Lifetime used by the ribbon currently being drawn.
+    private var frameLifetime = TrailRenderer.lifetime
+    private var glyphs: [CATextLayer] = []
+    private var glyphCount = 0
+    /// Letters poured on the last lift. Kept so a late commit can drop the ones the swipe skipped,
+    /// even after the pool has started the next word.
+    private var pouredLetters: [String] = []
+    private var filament: CAShapeLayer?
+    private var echoShape: CAShapeLayer?
+    private var lastPath: [CGPoint] = []
+    private var lastHues: [CGFloat] = []
+    private var pathOpen = false
+
+    static let glyphCap = 12
+    static let echoDuration: CFTimeInterval = 0.18
+    static let prismFlow = 0.7
 
     init(stage: EffectsStage, palette: EffectPalette) {
         self.stage = stage
@@ -79,7 +107,7 @@ final class TrailRenderer {
 
     /// Records touch movement (key-area coordinates) and starts or ends trails to match the
     /// set of fingers currently drawing strokes.
-    func ingest(_ samples: [TouchSample], strokes: Set<TouchID>) {
+    func ingest(_ samples: [TouchSample], strokes: Set<TouchID>, thumbs: [TouchID: Int] = [:]) {
         guard level > .off else { return }
         for sample in samples {
             let point = TrailPoint(location: stage.point(fromKeyArea: sample.location), time: sample.timestamp)
@@ -91,11 +119,17 @@ final class TrailRenderer {
             case .moved:
                 histories[sample.id]?.append(point)
             case .ended, .cancelled:
+                if spectacle, let history = histories[sample.id] {
+                    rememberPath(history, hue: trails[sample.id]?.hue)
+                }
                 recycleHistory(of: sample.id)
+            }
+            if spectacle, sample.phase == .began {
+                cancelEcho()
             }
         }
         for id in strokes where trails[id] == nil {
-            begin(id)
+            begin(id, thumb: thumbs[id])
         }
         // Copy first: end() removes the entry, and enumerating trails.keys while mutating traps.
         for id in Array(trails.keys) where !strokes.contains(id) {
@@ -120,11 +154,15 @@ final class TrailRenderer {
 
     // MARK: - Lifecycle of one trail
 
-    private func begin(_ id: TouchID) {
+    private func begin(_ id: TouchID, thumb: Int?) {
         guard let shape = stage.pool.shape() else { return }
         let startX = histories[id].flatMap { $0.count > 0 ? $0[0].location.x : nil } ?? stage.bounds.midX
-        // A thumb on the right half shifts hue, so two trails through one word stay distinct.
-        let hueOffset: CGFloat = startX < stage.bounds.midX ? 0 : 0.38
+        // The thumb tag is fixed at touch-down, so a finger that crosses the middle keeps its color.
+        let hueOffset: CGFloat = if let thumb {
+            thumb == 0 ? 0 : 0.38
+        } else {
+            startX < stage.bounds.midX ? 0 : 0.38
+        }
         let color = palette.shifted(by: hueOffset)
         shape.frame = stage.bounds
         shape.strokeColor = nil
@@ -167,7 +205,8 @@ final class TrailRenderer {
             break
         }
 
-        let trail = Trail(shape: shape, glow: glow, gradient: gradient, style: style)
+        var trail = Trail(shape: shape, glow: glow, gradient: gradient, style: style)
+        trail.hue = hueOffset
         let opacity = Float(min(0.6 + 0.35 * intensity, 1))
         trail.root.opacity = opacity
         trail.glow?.opacity = opacity
@@ -182,6 +221,7 @@ final class TrailRenderer {
 
     private func end(_ id: TouchID, animated: Bool) {
         guard let trail = trails.removeValue(forKey: id) else { return }
+        let collapseGlyphs = trails.isEmpty
         if trails.isEmpty { stopDisplayLink() }
 
         let root = trail.root
@@ -202,6 +242,7 @@ final class TrailRenderer {
             restorePrismFrame(trail)
         }
         guard animated, let bounds = trail.shape.path?.boundingBoxOfPath, !bounds.isNull else {
+            if collapseGlyphs { hideGlyphs() }
             finish()
             return
         }
@@ -237,6 +278,12 @@ final class TrailRenderer {
             duration: Self.collapseDuration,
             timing: EffectAnimation.easeIn
         ) { finish() }
+        if collapseGlyphs {
+            pourGlyphs(toward: target, scale: scale)
+        }
+        if spectacle, trails.isEmpty {
+            filament?.isHidden = true
+        }
     }
 
     // MARK: - Frames
@@ -263,7 +310,9 @@ final class TrailRenderer {
         let now = CACurrentMediaTime()
         let ringOnly = level < .full
         for id in Array(trails.keys) {
-            let life = trails[id]?.style == .comet ? Self.cometLifetime : Self.lifetime
+            let fast = tipPace(of: histories[id])
+            frameLifetime = spectacle ? Self.lifetime * (1 + 0.4 * fast) : Self.lifetime
+            let life = trails[id]?.style == .comet ? Self.cometLifetime : frameLifetime
             histories[id]?.dropOlder(than: now - life)
             guard var trail = trails[id], let points = histories[id], points.count > 0 else {
                 trails[id]?.shape.path = nil
@@ -319,8 +368,22 @@ final class TrailRenderer {
                 trail.shape.path = path
                 trail.glow?.path = cometGlow
             }
+            if spectacle {
+                let base = Float(min(0.6 + 0.35 * intensity, 1))
+                trail.root.opacity = min(1, base * Float(1 + 0.35 * fast))
+            }
             trails[id] = trail
         }
+        updateFilament()
+    }
+
+    private func tipPace(of points: TrailPoints?) -> CGFloat {
+        guard let points, points.count >= 2 else { return 0 }
+        let last = points[points.count - 1]
+        let earlier = points[points.count - 2]
+        let dt = max(last.time - earlier.time, 1.0 / 90)
+        let speed = hypot(last.location.x - earlier.location.x, last.location.y - earlier.location.y) / CGFloat(dt)
+        return min(max((speed - 160) / 1100, 0), 1)
     }
 
     private func velocity(of points: TrailPoints) -> CGVector {
@@ -600,7 +663,7 @@ final class TrailRenderer {
             dx /= length
             dy /= length
             let progress = CGFloat(source) / CGFloat(count - 1)
-            let freshness = CGFloat(max(0, 1 - (now - point.time) / Self.lifetime))
+            let freshness = CGFloat(max(0, 1 - (now - point.time) / frameLifetime))
             let half: CGFloat
             switch kind {
             case .taper:
@@ -635,6 +698,221 @@ final class TrailRenderer {
         }
         path.closeSubpath()
         return path
+    }
+
+    // MARK: - Spectacle
+
+    func setSpectacle(_ enabled: Bool) {
+        let next = enabled && level == .full
+        guard next != spectacle else { return }
+        spectacle = next
+        if spectacle {
+            prepareSpectacleLayers()
+        } else {
+            hideGlyphs()
+            filament?.isHidden = true
+            cancelEcho()
+        }
+    }
+
+    /// A letter the finger just collected. The layer comes from a pool built when Spectacle turns on.
+    func noteLetter(_ letter: String, at point: CGPoint) {
+        guard spectacle, level == .full, glyphCount < Self.glyphCap else { return }
+        prepareSpectacleLayers()
+        let layer = glyphs[glyphCount]
+        layer.removeAllAnimations()
+        layer.string = letter
+        layer.position = point
+        layer.opacity = 1
+        layer.transform = CATransform3DIdentity
+        layer.isHidden = false
+        glyphCount += 1
+    }
+
+    /// Drops glyphs whose letter the swipe did not keep.
+    func noteKept(_ letters: [String]) {
+        guard spectacle else { return }
+        var remaining = letters.map { $0.lowercased() }
+        if pouredLetters.isEmpty {
+            hideUnkeptGlyphs(count: glyphCount, remaining: &remaining)
+            return
+        }
+        for index in pouredLetters.indices {
+            let shown = pouredLetters[index].lowercased()
+            let current = (glyphs[index].string as? String)?.lowercased() ?? ""
+            guard current == shown else { continue }
+            if let found = remaining.firstIndex(of: shown) {
+                remaining.remove(at: found)
+            } else {
+                glyphs[index].removeAllAnimations()
+                glyphs[index].isHidden = true
+            }
+        }
+        pouredLetters.removeAll(keepingCapacity: true)
+    }
+
+    private func hideUnkeptGlyphs(count: Int, remaining: inout [String]) {
+        for index in 0..<count {
+            let shown = (glyphs[index].string as? String)?.lowercased() ?? ""
+            if let found = remaining.firstIndex(of: shown) {
+                remaining.remove(at: found)
+            } else {
+                glyphs[index].isHidden = true
+            }
+        }
+    }
+
+    func noteCommit(sure: Bool) {
+        guard spectacle, level == .full, sure, flow >= Self.prismFlow else { return }
+        playEcho()
+    }
+
+    private func prepareSpectacleLayers() {
+        if glyphs.isEmpty {
+            for _ in 0..<Self.glyphCap {
+                let layer = CATextLayer()
+                layer.bounds = CGRect(x: 0, y: 0, width: 28, height: 28)
+                layer.contentsScale = stage.layer.contentsScale
+                layer.alignmentMode = .center
+                layer.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
+                layer.fontSize = 17
+                layer.foregroundColor = palette.ink.cgColor
+                layer.isHidden = true
+                layer.actions = LayerPool.noActions
+                stage.present(layer)
+                glyphs.append(layer)
+            }
+        }
+        if filament == nil, let shape = stage.pool.shape() {
+            shape.frame = stage.bounds
+            shape.fillColor = nil
+            shape.lineWidth = 1.5
+            shape.lineCap = .round
+            shape.strokeColor = palette.ink.withAlphaComponent(0.35).cgColor
+            shape.isHidden = true
+            stage.present(shape)
+            filament = shape
+        }
+        if echoShape == nil, let shape = stage.pool.shape() {
+            shape.frame = stage.bounds
+            shape.fillColor = nil
+            shape.lineWidth = 2
+            shape.lineCap = .round
+            shape.lineJoin = .round
+            shape.isHidden = true
+            stage.present(shape)
+            echoShape = shape
+        }
+    }
+
+    private func rememberPath(_ history: TrailPoints, hue: CGFloat?) {
+        if !pathOpen {
+            lastPath.removeAll(keepingCapacity: true)
+            lastHues.removeAll(keepingCapacity: true)
+            pathOpen = true
+        }
+        for index in 0..<history.count {
+            guard lastPath.count < Self.pointCapacity else { break }
+            lastPath.append(history[index].location)
+        }
+        if let hue, lastHues.count < 2 {
+            lastHues.append(hue)
+        }
+    }
+
+    private func updateFilament() {
+        guard spectacle, level == .full, trails.count >= 2 else {
+            filament?.isHidden = true
+            return
+        }
+        var heads: [CGPoint] = []
+        heads.reserveCapacity(2)
+        for trail in trails.values {
+            guard let center = trail.center else { continue }
+            heads.append(center)
+            if heads.count == 2 { break }
+        }
+        guard heads.count == 2, let filament else { return }
+        let path = CGMutablePath()
+        path.move(to: heads[0])
+        path.addLine(to: heads[1])
+        filament.path = path
+        filament.isHidden = false
+    }
+
+    private func pourGlyphs(toward target: CGPoint, scale: CGFloat) {
+        guard glyphCount > 0 else { return }
+        pouredLetters.removeAll(keepingCapacity: true)
+        for index in 0..<glyphCount {
+            let layer = glyphs[index]
+            pouredLetters.append((layer.string as? String) ?? "")
+            guard !layer.isHidden else { continue }
+            let dx = target.x - layer.position.x
+            let dy = target.y - layer.position.y
+            let collapse = CATransform3DScale(CATransform3DMakeTranslation(dx, dy, 0), scale, scale, 1)
+            EffectAnimation.play(
+                [
+                    EffectAnimation.basic("transform", from: NSValue(caTransform3D: CATransform3DIdentity), to: NSValue(caTransform3D: collapse)),
+                    EffectAnimation.basic("opacity", from: layer.opacity, to: 0),
+                ],
+                on: layer,
+                duration: Self.collapseDuration,
+                timing: EffectAnimation.easeIn
+            )
+        }
+        glyphCount = 0
+    }
+
+    private func hideGlyphs() {
+        for layer in glyphs {
+            layer.removeAllAnimations()
+            layer.isHidden = true
+            layer.transform = CATransform3DIdentity
+        }
+        glyphCount = 0
+        pouredLetters.removeAll(keepingCapacity: true)
+    }
+
+    private func playEcho() {
+        guard lastPath.count >= 2 else { return }
+        prepareSpectacleLayers()
+        guard let echoShape else { return }
+        let path = CGMutablePath()
+        path.move(to: lastPath[0])
+        for point in lastPath.dropFirst() {
+            path.addLine(to: point)
+        }
+        echoShape.path = path
+        echoShape.strokeColor = echoColor().cgColor
+        echoShape.opacity = 0.45
+        echoShape.isHidden = false
+        pathOpen = false
+        EffectAnimation.play(
+            [EffectAnimation.basic("opacity", from: 0.45, to: 0)],
+            on: echoShape,
+            duration: Self.echoDuration,
+            timing: EffectAnimation.easeOut
+        ) { [weak echoShape] in
+            echoShape?.isHidden = true
+        }
+    }
+
+    private func echoColor() -> UIColor {
+        switch lastHues.count {
+        case 0:
+            return palette.ink.withAlphaComponent(0.45)
+        case 1:
+            return palette.shifted(by: lastHues[0]).withAlphaComponent(0.55)
+        default:
+            let blended = (lastHues[0] + lastHues[1]) / 2
+            return palette.shifted(by: blended).withAlphaComponent(0.55)
+        }
+    }
+
+    private func cancelEcho() {
+        pathOpen = false
+        echoShape?.removeAllAnimations()
+        echoShape?.isHidden = true
     }
 }
 

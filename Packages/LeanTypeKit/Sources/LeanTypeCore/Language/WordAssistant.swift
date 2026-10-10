@@ -51,6 +51,8 @@ final class WordAssistant {
     private var emojiRecents = EmojiWords.loadRecents()
     /// Letters the last swipe aimed at, so deleting that word can refuse it for a similar stroke.
     private var swipeTrace: String?
+    /// The same letters, for the strip and for the first backspace after a miss.
+    var aimedLiteral: String? { swipeTrace }
     /// Aimed letters from the swipe, kept on the strip when they are not the committed word.
     private var tracedLiteral: String?
     /// Set while a finger is still drawing; cleared when the swipe commits or is cancelled.
@@ -281,6 +283,50 @@ final class WordAssistant {
         language?.noteSwipeRefusal(word: word, trace: swipeTrace ?? word)
     }
 
+    /// The chips on the strip when the whole swiped word was deleted.
+    func shownSwipeChips() -> [String] {
+        guard let commit = editor.recentCommit, commit.kind == .swiped else { return [] }
+        return swipeStrip(word: commit.word, readings: swipeReadings, settled: settledWord, literal: tracedLiteral)
+            .candidates.map(\.text)
+    }
+
+    /// A whole-word delete. The next similar drawing leads with a reading that was not shown.
+    func noteWholeWordRejected(chips: [String], trace: String, word: String) {
+        language?.noteRedrawRejection(chips: chips, trace: trace, word: word)
+        cached = nil
+    }
+
+    /// Drops `word` from the chips that are showing.
+    func conceal(_ word: String) {
+        concealed.insert(word.lowercased())
+        swipeReadings.removeAll { $0.compare(word, options: .caseInsensitive) == .orderedSame }
+        cached = nil
+    }
+
+    /// Puts a banned spelling back on the strip.
+    func restoreConcealed(_ word: String) {
+        concealed.remove(word.lowercased())
+        if !swipeReadings.contains(where: { $0.compare(word, options: .caseInsensitive) == .orderedSame }) {
+            swipeReadings.insert(word, at: 0)
+        }
+        cached = nil
+    }
+
+    /// Moves `word` one place toward the front, or toward the back, of the saved readings.
+    func nudgeChip(_ word: String, forward: Bool) {
+        guard let index = swipeReadings.firstIndex(where: { $0.compare(word, options: .caseInsensitive) == .orderedSame }) else {
+            cached = nil
+            return
+        }
+        let next = forward ? index - 1 : index + 1
+        guard swipeReadings.indices.contains(next) else {
+            cached = nil
+            return
+        }
+        swipeReadings.swapAt(index, next)
+        cached = nil
+    }
+
     /// Backspace brought a deleted swipe back, so that guess is welcome again.
     func noteSwipedWordRestored(_ word: String) {
         language?.forgetSwipeRefusal(word: word)
@@ -299,6 +345,8 @@ final class WordAssistant {
     var suppressAhead = false
     /// Swipe readings kept on the strip for a few seconds after the word is deleted.
     private var rescuedReadings: (words: [String], until: TimeInterval)?
+    /// Spellings the strip menu just banned or forgot. They leave the chips immediately.
+    private var concealed: Set<String> = []
 
     /// The user undid an autocorrection; leave `word` alone when it ends.
     func keep(_ word: String) {
@@ -598,6 +646,9 @@ final class WordAssistant {
     func accept(_ index: Int, from state: CandidateState) -> Acceptance? {
         guard !state.isTentative, state.candidates.indices.contains(index) else { return nil }
         let candidate = state.candidates[index]
+        if let action = candidate.action, case .replaceSuffix = action {
+            return .command(action, text: candidate.text)
+        }
         switch candidate.role {
         case .typed:
             return .keep(candidate.text)
@@ -770,17 +821,17 @@ final class WordAssistant {
         return CandidateState(candidates, highlightedIndex: highlighted)
     }
 
-    /// One alternative, the word that just landed, one alternative. The landed word is the
-    /// highlighted center. The traced letters keep a side slot when they are not that word.
-    /// Confirming the center leaves a single settled word.
+    /// The aimed letters, then the word that landed, then a known suffix or another reading.
+    /// The landed word is the highlighted center. Confirming it leaves a single settled word.
     private func swipeStrip(word: String, readings: [String], settled: String?, literal: String?) -> CandidateState {
         if settled == word, readings.isEmpty || readings == [word] {
             let settledState = CandidateState([Candidate(word, role: .settled)])
             guard let language else { return settledState }
             return appendingFollow(to: settledState, language: language)
         }
-        let aimed = swipeTrace ?? ""
+        let aimed = swipeTrace ?? literal ?? ""
         var others = readings.filter { $0.compare(word, options: .caseInsensitive) != .orderedSame }
+        others.removeAll { isConcealed($0) }
         others.sort { left, right in
             let leftKind = AlternativeClassifier.kind(of: left, comparedWith: word, aimed: aimed)
             let rightKind = AlternativeClassifier.kind(of: right, comparedWith: word, aimed: aimed)
@@ -788,28 +839,64 @@ final class WordAssistant {
             let rightBias = language?.alternativeBias.multiplier(for: rightKind) ?? 1
             return leftBias > rightBias
         }
-        let literalSlot = literal.flatMap { literal in
-            others.first { $0.compare(literal, options: .caseInsensitive) == .orderedSame }
-        }
-        if let literalSlot {
-            others.removeAll { $0.compare(literalSlot, options: .caseInsensitive) == .orderedSame }
-        }
-        var slots: [Candidate] = []
-        if let left = others.first {
-            slots.append(Candidate(
-                left,
+        var extras: [Candidate] = []
+        if !aimed.isEmpty,
+           aimed.compare(word, options: .caseInsensitive) != .orderedSame,
+           !isConcealed(aimed) {
+            extras.append(Candidate(aimed, role: .alternative))
+            others.removeAll { $0.compare(aimed, options: .caseInsensitive) == .orderedSame }
+        } else if let other = others.first {
+            extras.append(Candidate(
+                other,
                 role: .alternative,
-                difference: AlternativeClassifier.kind(of: left, comparedWith: word, aimed: aimed)
+                difference: AlternativeClassifier.kind(of: other, comparedWith: word, aimed: aimed)
+            ))
+            others.removeFirst()
+        }
+        for chip in suffixChips(for: word) where extras.count < 2 && !isConcealed(chip.text) {
+            guard !extras.contains(where: { $0.text.compare(chip.text, options: .caseInsensitive) == .orderedSame }) else { continue }
+            extras.append(chip)
+        }
+        for other in others where extras.count < 2 {
+            extras.append(Candidate(
+                other,
+                role: .alternative,
+                difference: AlternativeClassifier.kind(of: other, comparedWith: word, aimed: aimed)
             ))
         }
-        let center = slots.count
-        slots.append(Candidate(word, role: .settled))
-        if let literalSlot {
-            slots.append(Candidate(literalSlot, role: .alternative))
-        } else if others.count > 1 {
-            slots.append(Candidate(others[1], role: .alternative))
+        var slots: [Candidate] = []
+        if let first = extras.first {
+            slots.append(first)
         }
-        return CandidateState(slots, highlightedIndex: center)
+        let center = slots.count
+        if !isConcealed(word) {
+            slots.append(Candidate(word, role: .settled))
+        }
+        if extras.count > 1 {
+            slots.append(extras[1])
+        }
+        let highlight = slots.isEmpty ? nil : (isConcealed(word) ? 0 : center)
+        return CandidateState(slots, highlightedIndex: highlight)
+    }
+
+    private func isConcealed(_ word: String) -> Bool {
+        concealed.contains(word.lowercased())
+    }
+
+    /// Known concatenations of the landed word and a closed suffix list. Tapping one rewrites that ending.
+    private func suffixChips(for word: String) -> [Candidate] {
+        guard let language else { return [] }
+        return InflectionJoiner.suffixes.compactMap { suffix in
+            let combined = word.lowercased() + suffix
+            guard language.isKnown(combined) else { return nil }
+            let shown = InflectionJoiner.matchingCase(combined, like: word)
+            guard shown.compare(word, options: .caseInsensitive) != .orderedSame else { return nil }
+            return Candidate(
+                shown,
+                role: .alternative,
+                action: .replaceSuffix(match: word + " ", with: shown + " ")
+            )
+        }
     }
 
     private func settle(_ word: String) {

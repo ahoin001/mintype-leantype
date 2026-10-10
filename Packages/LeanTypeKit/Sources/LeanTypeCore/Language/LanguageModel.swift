@@ -39,6 +39,7 @@ public final class LanguageModel {
     private let strokes: StrokeMemory
     private let retries = RetryMemory()
     private let aims = AimMemory()
+    private var redraw = RedrawMemory()
     let trust = TrustMeter()
     let alternativeBias = AlternativeBias()
     private var revertCounts: [String: Int] = [:]
@@ -231,8 +232,11 @@ public final class LanguageModel {
         if let refused = retried.refused {
             swipeRefusals.note(word: refused, trace: trace)
         }
-        return swipeRefusals.applying(
-            to: blocklist.applying(to: rejections.applying(to: retried.result)),
+        return redraw.applying(
+            to: swipeRefusals.applying(
+                to: blocklist.applying(to: rejections.applying(to: retried.result)),
+                trace: trace
+            ),
             trace: trace
         )
     }
@@ -271,6 +275,7 @@ public final class LanguageModel {
 
     /// The word that just landed, so the next swipe can prefer what usually follows it.
     func noteCommitted(_ word: String, display: String? = nil) {
+        redraw.noteLanded()
         context.noteCommitted(word)
         habits.note(word, display: display)
         if let display, personal.refreshDisplay(display) {
@@ -279,6 +284,17 @@ public final class LanguageModel {
         }
         habitBonuses = habits.bonuses()
         swipeRefusals.forget(word: word)
+    }
+
+    /// The whole swiped word was deleted. Those chips step behind the readings that were not shown.
+    func noteRedrawRejection(chips: [String], trace: String, word: String) {
+        redraw.noteRejection(chips: chips, trace: trace)
+        habits.diminish(word)
+        habitBonuses = habits.bonuses()
+    }
+
+    func applyingRedraw(to result: DecodeResult, trace: String) -> DecodeResult {
+        redraw.applying(to: result, trace: trace)
     }
 
     /// The capitalization to show for `word` under `shift`. Shift off keeps a stored name.

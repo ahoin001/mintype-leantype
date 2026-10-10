@@ -1,6 +1,78 @@
 import CoreGraphics
 import Foundation
 
+/// Mean touch error per thumb, as a fraction of a key, capped so a bad log cannot move the aim by a whole key.
+struct TouchBias: Equatable, Sendable {
+    var left = CGVector.zero
+    var right = CGVector.zero
+
+    static let fractionCap: CGFloat = 0.2
+
+    static func summarizing(_ samples: [TouchOffsetLog.Sample]) -> TouchBias {
+        var leftX = 0.0
+        var leftY = 0.0
+        var leftCount = 0
+        var rightX = 0.0
+        var rightY = 0.0
+        var rightCount = 0
+        for sample in samples {
+            if sample.side == "left" {
+                leftX += sample.dx
+                leftY += sample.dy
+                leftCount += 1
+            } else {
+                rightX += sample.dx
+                rightY += sample.dy
+                rightCount += 1
+            }
+        }
+        return TouchBias(
+            left: mean(leftX, leftY, count: leftCount),
+            right: mean(rightX, rightY, count: rightCount)
+        )
+    }
+
+    /// The recent log, or zero when there is nothing to read. Called off the touch-move path.
+    static func load(sampleLimit: Int = 256) -> TouchBias {
+        guard let url = LearningDirectory.fileURL(named: "touch-offsets.jsonl"),
+              let data = try? Data(contentsOf: url), !data.isEmpty
+        else { return TouchBias() }
+        let truncated = data.count > 65_536
+        let tail = truncated ? Data(data.suffix(65_536)) : data
+        let text = String(decoding: tail, as: UTF8.self)
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        if truncated, !lines.isEmpty { lines.removeFirst() }
+        var samples: [TouchOffsetLog.Sample] = []
+        samples.reserveCapacity(min(sampleLimit, 256))
+        for line in lines.reversed() {
+            guard let decoded = try? JSONDecoder().decode([TouchOffsetLog.Sample].self, from: Data(line.utf8)) else { continue }
+            for sample in decoded.reversed() {
+                samples.append(sample)
+                if samples.count >= sampleLimit { return summarizing(samples) }
+            }
+        }
+        return summarizing(samples)
+    }
+
+    /// The shift to subtract from a touch so it moves back toward the key the finger meant.
+    func offset(thumb: Int, keyWidth: CGFloat, keyHeight: CGFloat) -> CGVector {
+        let fraction = thumb == 0 ? left : right
+        return CGVector(dx: fraction.dx * keyWidth, dy: fraction.dy * keyHeight)
+    }
+
+    private static func mean(_ dx: Double, _ dy: Double, count: Int) -> CGVector {
+        guard count > 0 else { return .zero }
+        return CGVector(
+            dx: capped(dx / Double(count)),
+            dy: capped(dy / Double(count))
+        )
+    }
+
+    private static func capped(_ value: Double) -> CGFloat {
+        CGFloat(min(max(value, -Double(fractionCap)), Double(fractionCap)))
+    }
+}
+
 /// How far an accepted touch sat from the key it was meant for, per side of the keyboard.
 /// Appended after a committed word. The ranker does not read this file.
 enum TouchOffsetLog {

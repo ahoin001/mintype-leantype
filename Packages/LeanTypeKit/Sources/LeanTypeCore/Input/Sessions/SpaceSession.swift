@@ -116,8 +116,9 @@ final class SpaceSession: InteractionSession {
     func ended(_ track: TouchTrack) {
         switch phase {
         case .pressed:
-            context.composer.commit(ticket, [.space])
+            commitSpace()
         case let .punctuation(_, selected):
+            _ = context.commitTapOpenWord()
             context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
         case .pickUp:
             context.perform(.pickUpWord)
@@ -137,8 +138,9 @@ final class SpaceSession: InteractionSession {
     func otherTouchBegan(on _: KeyFrame) {
         switch phase {
         case .pressed:
-            context.composer.commit(ticket, [.space])
+            commitSpace()
         case let .punctuation(_, selected):
+            _ = context.commitTapOpenWord()
             context.composer.commit(ticket, [.insert(Self.punctuationMarks[selected])])
         case .pickUp:
             context.perform(.pickUpWord)
@@ -169,6 +171,12 @@ final class SpaceSession: InteractionSession {
     // MARK: - Private
 
     private var stepsByWord: Bool { !extraFingers.isEmpty }
+
+    /// A flick or a second finger jumps words, except while the caret is still inside one.
+    private func movesByWord(speed: CGFloat) -> Bool {
+        guard !context.caretIsInsideWord else { return false }
+        return stepsByWord || speed >= Self.flingSpeed
+    }
 
     private func enterPunctuation(at track: TouchTrack) {
         guard case .pressed = phase else { return }
@@ -215,7 +223,7 @@ final class SpaceSession: InteractionSession {
         defer { lastX = x }
         guard let lastX else { return }
 
-        let byWord = stepsByWord || abs(track.velocity.dx) >= Self.flingSpeed
+        let byWord = movesByWord(speed: abs(track.velocity.dx))
         let step = byWord ? Self.wordStep : Self.stepLength(forSpeed: abs(track.velocity.dx))
         residual += x - lastX
         while abs(residual) >= step {
@@ -251,13 +259,22 @@ final class SpaceSession: InteractionSession {
     }
 
     private func scheduleEdgeStep() {
-        let interval = stepsByWord ? Self.edgeRepeat.word : Self.edgeRepeat.character
+        let byWord = movesByWord(speed: 0)
+        let interval = byWord ? Self.edgeRepeat.word : Self.edgeRepeat.character
         edgeTimer = context.schedule(after: interval) { [weak self] in
             guard let self, case .trackpad = phase, edgeDirection != 0 else { return }
-            if step(edgeDirection, byWord: stepsByWord) {
+            if step(edgeDirection, byWord: byWord) {
                 scheduleEdgeStep()
             }
         }
+    }
+
+    /// Closes a tap-open word before this space is queued, so the word is not stuck behind it.
+    private func commitSpace() {
+        if context.commitTapOpenWord() {
+            context.suppressDelimiterSpace()
+        }
+        context.composer.commit(ticket, [.space])
     }
 
     private func finish() {

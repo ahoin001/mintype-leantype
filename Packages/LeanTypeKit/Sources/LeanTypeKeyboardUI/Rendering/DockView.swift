@@ -165,6 +165,11 @@ final class DockView: UIView {
         suggestions.apply(theme: theme)
     }
 
+    /// Spectacle motion on the suggestion bar. Off under Reduce Motion and when effects are quiet.
+    var spectacle = false {
+        didSet { suggestions.spectacle = spectacle }
+    }
+
     /// A commit or a correction, forwarded before the candidate bar updates so the pill can answer it.
     func note(_ event: KeyboardEvent) {
         suggestions.note(event)

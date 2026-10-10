@@ -22,6 +22,15 @@ final class KeyView: UIView {
     private var bubble: CAShapeLayer?
     private var highlight: CAShapeLayer?
     private var bubbleStep = 0
+    /// Letter keys draw a little lighter while Spectacle is on. The frame does not change.
+    var spectacleAir = false
+    private var spectaclePose = SpectaclePose.rest
+
+    private enum SpectaclePose {
+        case rest
+        case collected
+        case skipped
+    }
 
     init(style: KeyStyle) {
         self.style = style
@@ -80,9 +89,24 @@ final class KeyView: UIView {
         let tint = colors.label.uiColor.withAlphaComponent(isEnabled ? 1 : 0.4)
         label.textColor = tint
         icon.tintColor = tint
-        restingColor = colors.fill.uiColor
-        pressedColor = colors.pressedFill.uiColor
+        restingColor = spectacleAir ? softened(colors.fill.uiColor) : colors.fill.uiColor
+        pressedColor = spectacleAir ? softened(colors.pressedFill.uiColor) : colors.pressedFill.uiColor
         applyFill(pressed: pressed, suggested: suggested)
+        applySpectaclePose(animated: false)
+    }
+
+    /// The letter lifts into the stroke. Skipped letters fall back and stay dim until the next word.
+    func setSpectaclePose(collected: Bool) {
+        let next: SpectaclePose = collected ? .collected : .skipped
+        guard next != spectaclePose else { return }
+        spectaclePose = next
+        applySpectaclePose(animated: true)
+    }
+
+    func clearSpectaclePose() {
+        guard spectaclePose != .rest else { return }
+        spectaclePose = .rest
+        applySpectaclePose(animated: false)
     }
 
     /// The new layer's label settles in. The key body stays where layout put it.
@@ -287,6 +311,36 @@ final class KeyView: UIView {
         self.bubble = bubble
         highlight = shine
         return bubble
+    }
+
+    private func softened(_ color: UIColor) -> UIColor {
+        color.withAlphaComponent(0.82)
+    }
+
+    private func applySpectaclePose(animated: Bool) {
+        let reduced = UIAccessibility.isReduceMotionEnabled
+        let pose = spectaclePose
+        let apply = {
+            switch pose {
+            case .rest:
+                self.label.transform = .identity
+                self.label.alpha = 1
+            case .collected:
+                self.label.transform = reduced ? .identity : CGAffineTransform(translationX: 0, y: -6)
+                self.label.alpha = 0.35
+            case .skipped:
+                self.label.transform = .identity
+                self.label.alpha = 0.55
+            }
+        }
+        if animated, !reduced, pose == .skipped {
+            label.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+            UIView.animate(withDuration: 0.09, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut], animations: apply)
+        } else if animated, !reduced {
+            UIView.animate(withDuration: 0.09, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut], animations: apply)
+        } else {
+            apply()
+        }
     }
 
     /// A press scales evenly and at once. The keycap itself never stretches.

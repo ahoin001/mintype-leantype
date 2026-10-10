@@ -11,6 +11,8 @@ struct EffectContext {
     var intensity: CGFloat
     var flow: FlowLevel
     var trailStyle: EffectsSettings.TrailStyle
+    /// Letters ride the stroke. Off unless the Flair switch is on.
+    var spectacle: Bool
     var geometry: KeyboardGeometry?
 
     var pool: LayerPool { stage.pool }

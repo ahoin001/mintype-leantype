@@ -57,6 +57,14 @@ struct FlairView: View {
                         note(swipeLookDetail)
                     }
                     PebbleDivider()
+                    PebbleToggleRow(
+                        systemImage: "wand.and.stars",
+                        title: "Spectacle",
+                        detail: "Letters you collect lift into the stroke and land in the bar. A fast rhythm leaves a brighter trail. The keys do not move.",
+                        isOn: $model.settings.effects.spectacle
+                    )
+                    .disabled(!effectsOn)
+                    PebbleDivider()
                     effect(
                         "sun.max",
                         title: "Rhythm glow",

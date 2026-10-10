@@ -115,7 +115,11 @@ final class BackspaceSession: InteractionSession {
 
     func ended(_: TouchTrack) {
         if case .pressed = phase, !context.perform(.undoRecentCommit) {
-            context.perform(tapGear.intent)
+            if context.caretIsInsideMark {
+                context.perform(.deleteCharacter)
+            } else {
+                context.perform(tapGear.intent)
+            }
         }
         finish()
     }

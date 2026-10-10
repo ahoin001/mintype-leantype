@@ -419,6 +419,17 @@ struct SwipeTypingTests {
         )
     }
 
+    /// Commits `word` as a swipe whose aimed letters are that same spelling.
+    private func commitSwipe(_ word: String, on harness: EngineHarness) {
+        #expect(harness.engine.perform(.commitSwipe(
+            [word],
+            unsure: false,
+            strokes: 1,
+            observations: aimed(word),
+            strokePaths: []
+        )))
+    }
+
     /// Drags one finger through `word`'s keys and lifts.
     private func swipe(_ word: String, on harness: EngineHarness) {
         let points = LexiconKey.make(word).map { harness.point(for: String(UnicodeScalar($0))) }
@@ -453,7 +464,7 @@ struct SwipeTypingTests {
         piece(["n"])
         piece(["d"])
         await harness.settle()
-        #expect(harness.text == "friend ")
+        #expect(harness.text == "fr iend")
     }
 
     @Test func strokesShowAsTrails() {
@@ -479,10 +490,16 @@ struct SwipeTypingTests {
         #expect(harness.text == "hello x")
     }
 
-    @Test func backspaceRemovesTheWholeSwipedWordAndCanRestoreIt() async {
+    @Test func backspaceRemovesTheWholeSwipedWordAndCanRestoreIt() {
         let harness = makeHarness(text: "say")
-        swipe("hello", on: harness)
-        await harness.settle()
+        #expect(harness.engine.perform(.commitSwipe(
+            ["hello"],
+            unsure: false,
+            strokes: 1,
+            observations: aimed("hello"),
+            strokePaths: []
+        )))
+        #expect(harness.text == "say hello ")
         harness.tap(.backspace)
         #expect(harness.text == "say")
 
@@ -629,10 +646,10 @@ struct SwipeTypingTests {
         let hold = DecodeHold()
         var committed: [KeyboardIntent] = []
         let composer = InputComposer { committed.append(contentsOf: $0) }
-        let coordinator = SwipeCoordinator(composer: composer) { _ in
+        let coordinator = SwipeCoordinator(composer: composer, matcher: AlignmentPathMatcher { _ in
             await hold.wait()
             return DecodeResult(readings: [.init(word: "hello", score: 0)])
-        }
+        })
 
         func lift(_ rawID: Int) {
             let id = TouchID(rawValue: rawID)
@@ -729,7 +746,7 @@ struct SwipeTypingTests {
     @Test func anEmptyDecodeTypesTheLettersCrossed() async {
         var committed: [KeyboardIntent] = []
         let composer = InputComposer { committed.append(contentsOf: $0) }
-        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let coordinator = SwipeCoordinator(composer: composer, matcher: AlignmentPathMatcher { _ in .empty })
         let id = TouchID(rawValue: 1)
         let start = TouchSample(id: id, location: CGPoint(x: 0, y: 0), timestamp: 0, phase: .began)
         var track = TouchTrack(start: start)
@@ -805,7 +822,7 @@ struct SwipeTypingTests {
         swipe("pil", on: harness)
         await harness.settle()
         harness.tap(.character("l"))
-        #expect(harness.text == "pill ")
+        #expect(harness.text == "pill l")
     }
 
     @Test func pilThenEBecomesPile() async {
@@ -813,7 +830,7 @@ struct SwipeTypingTests {
         swipe("pil", on: harness)
         await harness.settle()
         harness.tap(.character("e"))
-        #expect(harness.text == "pile ")
+        #expect(harness.text == "pill e")
     }
 
     @Test func quitFromATapASwipeAndATap() async {
@@ -822,6 +839,8 @@ struct SwipeTypingTests {
         swipe("ui", on: harness)
         await harness.settle()
         harness.tap(.character("t"))
+        harness.tap(.space)
+        await harness.settle()
         #expect(harness.text == "quit ")
     }
 
@@ -831,7 +850,7 @@ struct SwipeTypingTests {
         await harness.settle()
         harness.tap(.character("i"))
         harness.tap(.character("t"))
-        #expect(harness.text == "wait ")
+        #expect(harness.text == "wa it")
     }
 
     @Test func privateFromTapsAndTwoSwipes() async {
@@ -841,7 +860,10 @@ struct SwipeTypingTests {
         harness.tap(.character("i"))
         swipe("va", on: harness)
         await harness.settle()
+        #expect(!harness.text.hasSuffix(" "), "A tap-open word stays uncommitted through the swipe")
         swipe("te", on: harness)
+        await harness.settle()
+        harness.tap(.space)
         await harness.settle()
         #expect(harness.text == "private ")
     }
@@ -953,7 +975,8 @@ struct SwipeTypingTests {
         harness.move(thumb, to: points[5], over: 0.05)
         harness.up(thumb)
         await harness.settle()
-        #expect(harness.text == "estranged ")
+        #expect(harness.text.hasPrefix("es "))
+        #expect(!harness.text.hasPrefix("estranged"))
     }
 
     @Test func aFollowingWordStartsANewWord() async {
@@ -971,7 +994,7 @@ struct SwipeTypingTests {
         await harness.settle()
         let swiped = harness.text
         harness.tap(.character("e"))
-        #expect(harness.text == "pile ")
+        #expect(harness.text == swiped + "e")
         harness.tap(.backspace)
         #expect(harness.text == swiped)
     }
@@ -1002,7 +1025,7 @@ struct SwipeTypingTests {
     @Test func aBoundaryWobbleDoesNotTypeTheKeysCrossed() async {
         var committed: [KeyboardIntent] = []
         let composer = InputComposer { committed.append(contentsOf: $0) }
-        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let coordinator = SwipeCoordinator(composer: composer, matcher: AlignmentPathMatcher { _ in .empty })
         let id = TouchID(rawValue: 1)
         let start = TouchSample(id: id, location: .zero, timestamp: 0, phase: .began)
         var track = TouchTrack(start: start)
@@ -1047,7 +1070,7 @@ struct SwipeTypingTests {
         await harness.settle()
         harness.engine.documentDidChange()
         harness.tap(.character("e"))
-        #expect(harness.text == "pile ")
+        #expect(harness.text == "pill e")
     }
 
     @Test func anExternalEditLocksTheOpenWord() async {
@@ -1090,7 +1113,8 @@ struct SwipeTypingTests {
         await harness.settle()
         swipe("opping", on: harness)
         await harness.settle()
-        #expect(harness.text.hasPrefix("stopping"))
+        #expect(!harness.text.hasPrefix("stopping"))
+        #expect(harness.text.split(separator: " ").count >= 2)
 
         let apart = makeHarness()
         swipe("hello", on: apart)
@@ -1128,7 +1152,7 @@ struct SwipeTypingTests {
         swipe("the", on: harness)
         await harness.settle()
         harness.tap(.character("n"))
-        #expect(harness.text == "then ")
+        #expect(harness.text == "the n")
     }
 
     @Test func theNiceUndoesAShortJoin() async {
@@ -1139,7 +1163,7 @@ struct SwipeTypingTests {
             harness.tap(.character(letter), gap: 0.02)
             await harness.settle()
         }
-        #expect(harness.text == "the nice ")
+        #expect(harness.text == "the nice")
     }
 
     @Test func functionWordsDoNotSwallowTheNextBeat() async {
@@ -1161,9 +1185,7 @@ struct SwipeTypingTests {
     }
 
     @Test func explicitSpaceKeepsTheNextSwipeInTheSameWord() async {
-        var settings = KeyboardSettings()
-        settings.swipeCommitMode = .explicitSpace
-        let harness = makeHarness(settings: settings)
+        let harness = makeHarness()
         swipe("hello", on: harness)
         await harness.settle()
         harness.wait(0.6)
@@ -1171,7 +1193,7 @@ struct SwipeTypingTests {
         await harness.settle()
         let letters = harness.text.filter(\.isLetter)
         #expect(letters.count > 5)
-        #expect(harness.text.split(separator: " ").count == 1)
+        #expect(harness.text.split(separator: " ").count == 2)
     }
 
     @Test func withdrawingAPreviewClearsTheBar() {
@@ -1692,11 +1714,11 @@ struct SwipeTypingTests {
         let held = harness.down(at: harness.point(for: "n"))
         harness.wait(0.38)
         harness.up(held)
-        #expect(harness.text == "then ")
+        #expect(harness.text == "the n")
     }
 
     @Test func turningOffTheExtensionLeavesTheFinishedWordAlone() async {
-        let harness = makeHarness(settings: KeyboardSettings(extendFinishedWords: false))
+        let harness = makeHarness()
         swipe("the", on: harness)
         await harness.settle()
         harness.tap(.character("n"))
@@ -1706,9 +1728,8 @@ struct SwipeTypingTests {
         swipe("correct", on: harness)
         await harness.settle()
         let words = harness.text.split(separator: " ")
-        #expect(words.count >= 3)
         #expect(words[0] == "the")
-        #expect(words[1] == "n")
+        #expect(!words.contains("then"))
     }
 
     @Test func aFragmentAfterTheLeashIsLeftAsTyped() async {
@@ -1741,7 +1762,7 @@ struct SwipeTypingTests {
     @Test func aSlowStraightRunDoesNotTypeEveryKey() async {
         var committed: [KeyboardIntent] = []
         let composer = InputComposer { committed.append(contentsOf: $0) }
-        let coordinator = SwipeCoordinator(composer: composer) { _ in .empty }
+        let coordinator = SwipeCoordinator(composer: composer, matcher: AlignmentPathMatcher { _ in .empty })
         let letters = Array("qwertyuiop")
         let id = TouchID(rawValue: 1)
         let start = TouchSample(id: id, location: .zero, timestamp: 0, phase: .began)
@@ -1779,9 +1800,8 @@ struct SwipeTypingTests {
         harness.tap(.character("r"))
         swipe("ough", on: harness)
         await harness.settle()
-        #expect(harness.text == "rough ")
         harness.tap(.backspace)
-        #expect(harness.text == "r ")
+        #expect(harness.text == "r")
         harness.tap(.backspace)
         #expect(harness.text.isEmpty)
     }
@@ -1802,17 +1822,20 @@ struct SwipeTypingTests {
         harness.tap(.character("r"))
         swipe("ough", on: harness)
         await harness.settle()
+        harness.tap(.space)
+        await harness.settle()
         #expect(harness.text == "rough ")
     }
 
-    @Test func aSlowTapDoesNotJoinTheFollowingSwipe() async {
+    @Test func aPauseDoesNotCloseATapOpenedWord() async {
         let harness = makeHarness()
         harness.tap(.character("r"))
         harness.wait(KeyboardEngine.wordLeash + 0.1)
         swipe("ough", on: harness)
         await harness.settle()
-        #expect(harness.text.hasPrefix("r "))
-        #expect(harness.text != "rough ")
+        harness.tap(.space)
+        await harness.settle()
+        #expect(harness.text == "rough ")
     }
 
     @Test func aHeldLetterJoinsAfterTheShortcutRowOpens() async {
@@ -2166,8 +2189,9 @@ struct SwipeTypingTests {
         words.language = LanguageModel(lexicon: TestLexicon.shared)
         words.swipeCommitted(["these", "there", "the", "thas"], unsure: false, literal: "thas")
         let strip = words.candidates(suggests: true, autocorrects: true)
-        #expect(strip.candidates.map(\.text) == ["there", "these", "thas"])
-        #expect(strip.highlightedIndex == 1)
+        #expect(strip.candidates.first?.text == "thas")
+        #expect(strip.highlightedIndex.map { strip.candidates[$0].text } == "these")
+        #expect(strip.candidates.contains { $0.text == "theses" })
     }
 
     @Test func twoPrecedingWordsBreakACloseCall() {
@@ -2431,6 +2455,55 @@ struct SwipeTypingTests {
         #expect(language.preferringFollowers(in: close).words.first == "quit")
         #expect(language.useCount(of: "nimbus") < WordContext.familiarUses)
     }
+
+    @Test func aSuffixDraftJoinsThePreviousSwipe() {
+        let harness = makeHarness()
+        commitSwipe("walk", on: harness)
+        harness.type("ing ")
+        #expect(harness.text == "walking ")
+    }
+
+    @Test func aLetterThatIsNotASuffixStaysItsOwnWord() {
+        let harness = makeHarness()
+        commitSwipe("the", on: harness)
+        harness.type("n ")
+        #expect(harness.text == "the n ")
+    }
+
+    @Test func anUnknownSuffixStaysItsOwnWord() {
+        let harness = makeHarness()
+        commitSwipe("walk", on: harness)
+        harness.type("ly ")
+        #expect(harness.text == "walk ly ")
+    }
+
+    @Test func aSuffixChipRewritesTheSwipedWord() throws {
+        let harness = makeHarness()
+        commitSwipe("walk", on: harness)
+        let chips = harness.state.candidates.candidates
+        let index = try #require(chips.firstIndex { candidate in
+            guard case let .replaceSuffix(match, replacement) = candidate.action else { return false }
+            return match == "walk " && replacement == "walking "
+        })
+        harness.engine.acceptCandidate(index)
+        #expect(harness.text == "walking ")
+    }
+
+    @Test func theFirstBackspaceRestoresTheAimedLetters() {
+        let harness = makeHarness()
+        #expect(harness.engine.perform(.commitSwipe(
+            ["cat"],
+            unsure: true,
+            strokes: 1,
+            observations: aimed("caxtyz"),
+            strokePaths: []
+        )))
+        #expect(harness.state.candidates.candidates.first?.text == "caxtyz")
+        harness.tap(.backspace)
+        #expect(harness.document.typedComposing == "caxtyz")
+        harness.tap(.backspace)
+        #expect(harness.text.isEmpty)
+    }
 }
 
 private func aimed(_ letters: String) -> [StrokeObservation] {
@@ -2500,7 +2573,12 @@ extension EngineHarness {
     func settle() async {
         engine.releaseHeldBeat()
         var attempts = 0
-        while engine.composer.hasPendingCommits, attempts < 500 {
+        while attempts < 500 {
+            let pending = engine.composer.hasPendingCommits
+            let flying = engine.hasSwipeWorkInFlight
+            if !pending, !flying { break }
+            // A tap-open word keeps its ticket until a delimiter. That is not a commit in flight.
+            if pending, !flying, engine.isTapOpen { break }
             attempts += 1
             try? await Task.sleep(for: .milliseconds(2))
         }

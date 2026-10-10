@@ -24,8 +24,10 @@ public protocol TextDocument: AnyObject {
     func setTypedComposing(_ text: String, caret: Int)
     func setPreviewComposing(_ text: String, caret: Int)
     func setMarkCaret(_ index: Int)
-    /// Moves the held letters into the document.
+    /// Moves the held letters into the document, leaving the caret where it sat in the mark.
     func flushTypedComposing()
+    /// Writes the visible mark into the document at the caret and clears it. Does not insert a second copy.
+    func commitActiveMark()
 }
 
 public extension TextDocument {
@@ -89,7 +91,6 @@ public final class InMemoryTextDocument: TextDocument {
     }
 
     public func adjustCursor(byUTF16Offset offset: Int) {
-        flushTypedComposing()
         var remaining = abs(offset)
         while remaining > 0 {
             if offset < 0 {
@@ -132,9 +133,25 @@ public final class InMemoryTextDocument: TextDocument {
     public func flushTypedComposing() {
         let text = typedComposing
         guard !text.isEmpty else { return }
+        let caret = min(markCaret, text.count)
         typedComposing = ""
+        before += String(text.prefix(caret))
+        after = String(text.dropFirst(caret)) + after
         markCaret = previewComposing.count
-        before += text
+        onChange?(self)
+    }
+
+    public func commitActiveMark() {
+        let mark = activeMark
+        guard !mark.isEmpty else { return }
+        let caret = min(markCaret, mark.count)
+        let prefix = String(mark.prefix(caret))
+        let suffix = String(mark.dropFirst(caret))
+        typedComposing = ""
+        previewComposing = ""
+        markCaret = 0
+        before += prefix
+        after = suffix + after
         onChange?(self)
     }
 

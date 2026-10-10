@@ -26,6 +26,8 @@ struct MixedInputTests {
         harness.move(held, to: harness.point(for: "d"), over: 0.08)
         harness.up(held)
         await harness.settle()
+        harness.tap(.space)
+        await harness.settle()
         #expect(harness.text == "friend ")
     }
 

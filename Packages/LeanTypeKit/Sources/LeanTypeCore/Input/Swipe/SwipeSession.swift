@@ -47,6 +47,8 @@ final class SwipeSession: InteractionSession {
     /// does not alternate.
     private var aimedLetter: String?
     private var aimedCenter: CGPoint?
+    /// Fixed when this finger becomes a stroke, so the trail keeps that thumb's color.
+    private var drawingThumb: Int?
 
     init(key: KeyFrame, track: TouchTrack, coordinator: SwipeCoordinator, context: any SessionContext) {
         self.context = context
@@ -60,6 +62,7 @@ final class SwipeSession: InteractionSession {
             if self.context.isInsideComposingWord { return false }
             return !self.coordinator.blocksAccent(for: self)
         }
+        coordinator.fingerDown()
         if Self.canStroke(on: key, context: context) {
             coordinator.registerUndecided(self)
             if coordinator.hasLetterFingerDown(besides: self), let character = key.key.kind.character {
@@ -86,7 +89,7 @@ final class SwipeSession: InteractionSession {
         case .holding:
             SessionPresentation(pressedKey: origin.id, isStroke: false)
         case .stroking:
-            SessionPresentation(pressedKey: hoveredKey, isStroke: true)
+            SessionPresentation(pressedKey: hoveredKey, isStroke: true, strokeThumb: drawingThumb)
         case .finished:
             .none
         }
@@ -109,6 +112,7 @@ final class SwipeSession: InteractionSession {
                     keyWidth: origin.visualFrame.width,
                     thumb: thumb
                 )
+                drawingThumb = thumb
                 phase = .stroking
                 noteArrival(track, includeStart: true)
             }
@@ -139,6 +143,7 @@ final class SwipeSession: InteractionSession {
         switch phase {
         case let .tapping(tap):
             coordinator.unregisterUndecided(self)
+            coordinator.noteFingerCancelled()
             tap.cancelled()
             if !coordinator.hasLetterFingerDown(besides: self) {
                 coordinator.releaseParkedTaps()
@@ -196,18 +201,20 @@ final class SwipeSession: InteractionSession {
     }
 
     private func hasBecomeStroke(_ track: TouchTrack) -> Bool {
-        let move = track.translation
-        if abs(move.dx) >= TapTravel.threshold { return true }
-        if CharacterTapSession.holdsOffSwipe(
+        let holdsFlick = CharacterTapSession.holdsOffSwipe(
             track,
             on: origin,
             enabled: context.settings.flickForSecondaryEnabled
-        ) {
-            return false
-        }
-        let room = origin.hitFrame.insetBy(dx: -Self.frameSlop, dy: -Self.frameSlop)
-        if !room.contains(track.current.location) { return true }
-        return hypot(move.dx, move.dy) >= Self.strokeDistance
+        )
+        return GestureSegmenter.isStroke(
+            GestureSegmenter.Probe(
+                translation: track.translation,
+                location: track.current.location,
+                hitFrame: origin.hitFrame,
+                holdsUpwardFlick: holdsFlick
+            ),
+            sidewaysThreshold: TapTravel.threshold
+        )
     }
 
     /// Keeps this finger's letter in the open beat without adding a point to the polyline.
@@ -233,7 +240,9 @@ final class SwipeSession: InteractionSession {
             endTap(tap, track: track)
             return
         }
-        if coordinator.isIdleHold {
+        // A tap-open word stays open so this stroke joins it. Anything else waiting
+        // on the old idle hold commits before the new stroke starts.
+        if coordinator.isIdleHold, coordinator.session.phase != .tapOpen {
             coordinator.finishNow()
         }
         if coordinator.isCollecting {
@@ -244,6 +253,7 @@ final class SwipeSession: InteractionSession {
             coordinator.begin(track, ticket: tap.relinquish(), keyWidth: origin.visualFrame.width, thumb: thumb)
             coordinator.enlistUndecidedPartners()
         }
+        drawingThumb = thumb
         phase = .stroking
         noteArrival(track, includeStart: true)
     }
@@ -254,8 +264,20 @@ final class SwipeSession: InteractionSession {
         return location.x < midline ? 0 : 1
     }
 
+    /// Space, return, and these marks close a tap-open word instead of joining it.
+    private static func isWordDelimiter(_ character: String) -> Bool {
+        guard character.count == 1, let mark = character.first else { return false }
+        return TextBoundary.hoppingPunctuation.contains(mark) || mark == "'"
+    }
+
     private func endTap(_ tap: CharacterTapSession, track: TouchTrack) {
         coordinator.unregisterUndecided(self)
+        if let character = origin.key.kind.character, Self.isWordDelimiter(character) {
+            coordinator.noteDelimiterLift()
+            _ = context.commitTapOpenWord()
+            tap.ended(track)
+            return
+        }
         if tap.canRelinquish, let character = origin.key.kind.character,
            coordinator.isCollecting || coordinator.hasLetterFingerDown(besides: self) {
             let ticket = tap.relinquish()
@@ -277,6 +299,11 @@ final class SwipeSession: InteractionSession {
         } else {
             TapTravel.note(travel: hypot(track.translation.dx, track.translation.dy))
             coordinator.releaseParkedTaps()
+            if let character = origin.key.kind.character {
+                coordinator.noteSoloTap(letter: character.lowercased(), time: track.start.timestamp)
+            } else {
+                coordinator.noteFingerCancelled()
+            }
             tap.ended(track)
         }
     }

@@ -110,4 +110,23 @@ struct GeometryTests {
         #expect(layout.optionIndex(atX: first.midX) == 0)
         #expect(layout.optionIndex(atX: -500) == layout.optionFrames.count - 1)
     }
+
+    @Test func splitLeavesAGapAndFloatingMovesTheThumbsInward() throws {
+        let docked = geometry()
+        let split = docked.applying(.split)
+        let mid = CGPoint(x: size.width / 2, y: size.height / 2)
+        #expect(split.key(at: mid) == nil)
+        let q = try #require(split.keys.first { $0.key.kind == .character("q") })
+        let p = try #require(split.keys.first { $0.key.kind == .character("p") })
+        #expect(q.visualFrame.midX < size.width / 2)
+        #expect(p.visualFrame.midX > size.width / 2)
+        #expect(split.key(at: CGPoint(x: q.visualFrame.midX, y: q.visualFrame.midY))?.id == q.id)
+
+        let floating = docked.applying(.floating)
+        let dockedQ = try #require(docked.keys.first { $0.key.kind == .character("q") })
+        let floatingQ = try #require(floating.keys.first { $0.key.kind == .character("q") })
+        #expect(floatingQ.visualFrame.midX > dockedQ.visualFrame.midX)
+        let margin = CGPoint(x: 2, y: floatingQ.visualFrame.midY)
+        #expect(floating.key(at: margin) == nil)
+    }
 }

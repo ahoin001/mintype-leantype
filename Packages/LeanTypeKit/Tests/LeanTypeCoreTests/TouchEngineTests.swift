@@ -151,7 +151,7 @@ struct SpaceTrackpadTests {
         #expect(harness.document.text.filter { $0 == "h" }.count == 1)
     }
 
-    @Test func leavingAPreviewClearsItWithoutInserting() {
+    @Test func leavingAPreviewWritesItOnce() {
         let harness = EngineHarness(text: "say ")
         harness.document.setPreviewComposing("hello")
         let id = harness.down(at: harness.point(for: .space))
@@ -160,8 +160,8 @@ struct SpaceTrackpadTests {
         harness.up(id)
 
         #expect(harness.document.previewComposing.isEmpty)
-        #expect(!harness.document.before.contains("hello"))
-        #expect(!harness.document.text.contains("hellohello"))
+        #expect(harness.document.text.contains("hello"))
+        #expect(harness.document.text.components(separatedBy: "hello").count == 2)
     }
 
     @Test func leavingHeldLettersFlushesThemOnce() {
@@ -174,6 +174,79 @@ struct SpaceTrackpadTests {
 
         #expect(harness.document.typedComposing.isEmpty)
         #expect(harness.document.text.components(separatedBy: "ec").count == 2)
+    }
+
+    @Test func editingAGhostDoesNotUndoThePreviousWord() {
+        let harness = EngineHarness(
+            text: "say hello ",
+            traits: InputTraits(autocapitalization: .none)
+        )
+        harness.document.setPreviewComposing("world")
+        harness.document.setMarkCaret(4)
+        harness.tap(.backspace)
+        #expect(harness.document.before == "say hello ")
+        #expect(harness.document.previewComposing == "word")
+
+        harness.engine.perform(.insert("p"))
+        #expect(harness.document.before == "say hello ")
+        #expect(harness.document.previewComposing == "worpd")
+        #expect(harness.document.text.components(separatedBy: "worpd").count == 2)
+    }
+
+    @Test func aLetterTypedInsideAWordKeepsTheTail() {
+        let harness = EngineHarness(
+            text: "hello",
+            traits: InputTraits(autocapitalization: .none)
+        )
+        harness.engine.perform(.moveCursor(-1))
+        harness.engine.perform(.moveCursor(-1))
+        harness.engine.perform(.insert("p"))
+        #expect(harness.text == "helplo")
+        harness.tap(.space)
+        #expect(harness.text == "help lo")
+    }
+
+    @Test func aFastFlickInsideAWordStepsByCharacters() {
+        let harness = EngineHarness(text: "abcdefghijklmnopqrstuvwxyz")
+        for _ in 0..<20 {
+            harness.engine.perform(.moveCursor(-1))
+        }
+        let start = harness.document.before.count
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: SpaceSession.activationDistance, dy: 0), over: 0.05)
+        harness.move(id, by: CGVector(dx: SpaceSession.wordStep, dy: 0), over: 0.01)
+        harness.up(id)
+        let moved = harness.document.before.count - start
+        #expect(moved > 0)
+        #expect(moved < 20)
+    }
+
+    @Test func aFastFlickFromABoundaryJumpsAWord() {
+        let harness = EngineHarness(text: "hello world again")
+        let id = harness.down(at: harness.point(for: .space))
+        harness.move(id, by: CGVector(dx: -SpaceSession.activationDistance, dy: 0), over: 0.05)
+        harness.move(id, by: CGVector(dx: -SpaceSession.wordStep, dy: 0), over: 0.01)
+        harness.up(id)
+        #expect(harness.document.before == "hello world ")
+    }
+
+    @Test func aManualLeashOfEightTenthsStaysThere() {
+        var settings = KeyboardSettings()
+        settings.leashDuration = 0.8
+        let harness = EngineHarness(settings: settings)
+        #expect(harness.engine.activeLeash == 0.8)
+
+        settings.leashDuration = 2
+        harness.engine.update(settings: settings)
+        #expect(harness.engine.activeLeash == 0.8)
+
+        settings.leashDuration = 0.05
+        harness.engine.update(settings: settings)
+        #expect(harness.engine.activeLeash == 0.2)
+
+        settings.leashDuration = nil
+        harness.engine.update(settings: settings)
+        #expect(harness.engine.activeLeash == TypingRhythm.coldLeash)
     }
 }
 

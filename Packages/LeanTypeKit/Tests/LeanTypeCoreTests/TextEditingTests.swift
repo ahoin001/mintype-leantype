@@ -92,6 +92,38 @@ struct TextEditorTests {
         #expect(editor.restoreLastDeletion() == " jello ")
     }
 
+    @Test func contextSplitsAtTheCaretInsideAMark() {
+        let document = InMemoryTextDocument(text: "say ")
+        document.setPreviewComposing("hello")
+        document.setMarkCaret(2)
+        let editor = TextEditor(document: document)
+        #expect(editor.contextBefore == "say he")
+        #expect(editor.contextAfter == "llo")
+    }
+
+    @Test func aCaretInsideTheFollowingMarkDoesNotUndoTheCommit() {
+        let document = InMemoryTextDocument(text: "")
+        let editor = TextEditor(document: document)
+        editor.commitWord("hello")
+        document.setPreviewComposing("world")
+        document.setMarkCaret(2)
+        #expect(editor.recentCommit == nil)
+        #expect(editor.deleteCharacter() == "o")
+        #expect(document.before == "hello ")
+        #expect(document.previewComposing == "wrld")
+    }
+
+    @Test func leavingAMarkWritesItOnce() {
+        let document = InMemoryTextDocument(text: "say ")
+        document.setPreviewComposing("hello")
+        document.setMarkCaret(0)
+        let editor = TextEditor(document: document)
+        #expect(editor.moveCursor(by: -1))
+        #expect(document.previewComposing.isEmpty)
+        #expect(document.text == "say hello")
+        #expect(document.text.components(separatedBy: "hello").count == 2)
+    }
+
     @Test func correctionRevertsToTypedWord() {
         let document = InMemoryTextDocument(text: "see teh")
         let editor = TextEditor(document: document)
@@ -231,6 +263,18 @@ struct SettingsTests {
         #expect(settings.effects.intensity == .party)
         #expect(settings.effects.trailStyle == .lantern)
         #expect(settings.effects.celebrateMilestones)
+        #expect(!settings.effects.spectacle)
+    }
+
+    @Test func spectacleRoundTripsAndDefaultsOff() throws {
+        let missing = #"{"effects":{"intensity":"subtle"}}"#
+        let decoded = try JSONDecoder().decode(KeyboardSettings.self, from: Data(missing.utf8))
+        #expect(!decoded.effects.spectacle)
+
+        var settings = KeyboardSettings()
+        settings.effects.spectacle = true
+        let data = try JSONEncoder().encode(settings)
+        #expect(try JSONDecoder().decode(KeyboardSettings.self, from: data).effects.spectacle)
     }
 
     @Test func savedTrailNamesLoadAsTheNewLooks() throws {

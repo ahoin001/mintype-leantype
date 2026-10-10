@@ -31,6 +31,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
             intensity: CGFloat(settings.intensity.scale),
             flow: .zero,
             trailStyle: settings.trailStyle,
+            spectacle: settings.spectacle,
             geometry: nil
         )
         trails = TrailRenderer(stage: stage, palette: context.palette)
@@ -47,6 +48,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
     func handle(_ event: KeyboardEvent) {
         if case let .flowChanged(flow) = event {
             context.flow = flow
+            trails.flow = flow.value
             onFlowChange?(context.level > .off ? flow : .zero)
         }
         guard context.level > .off else { return }
@@ -68,6 +70,7 @@ final class EffectsCoordinator: KeyboardEventObserver {
     func apply(settings: EffectsSettings) {
         context.intensity = CGFloat(settings.intensity.scale)
         context.trailStyle = settings.trailStyle
+        context.spectacle = settings.spectacle
         governor.setIntensity(settings.intensity)
         contextDidChange()
     }
@@ -116,6 +119,8 @@ final class EffectsCoordinator: KeyboardEventObserver {
         trails.palette = context.palette
         trails.style = context.trailStyle
         trails.intensity = context.intensity
+        trails.flow = context.flow.value
+        trails.setSpectacle(context.spectacle && context.level == .full)
         jewel.level = context.level
         jewel.palette = context.palette
         jewel.intensity = context.intensity
