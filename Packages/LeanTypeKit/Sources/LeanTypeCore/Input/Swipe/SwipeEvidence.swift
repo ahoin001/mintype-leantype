@@ -8,6 +8,12 @@ enum EvidenceRole: Hashable, Sendable {
     case crossing
     /// A thumb that tapped and never drew.
     case tap
+    /// A hold the first pass cannot skip. Neighbors stay inside a third of a key.
+    case pin
+    /// A long rest beside a stroke. The dictionary may leave it out.
+    case rest
+    /// The same key twice inside 60 ms. A double letter can keep it.
+    case slip
 }
 
 /// One letter a thumb reached or crossed, with the measurements a later tuning pass can use.
@@ -30,10 +36,15 @@ struct SwipeEvent: Hashable, Sendable {
     var directionX: CGFloat
     var directionY: CGFloat
 
-    var isTap: Bool { role == .tap }
+    var isTap: Bool {
+        switch role {
+        case .tap, .pin, .rest, .slip: true
+        case .anchor, .crossing: false
+        }
+    }
 
-    /// An aimed letter: an anchor or a tap. Crossings are evidence, not aim.
-    var isAimed: Bool { role == .anchor || role == .tap }
+    /// An aimed letter: an anchor or a finger that never drew. Crossings are evidence, not aim.
+    var isAimed: Bool { role != .crossing }
 
     init(
         time: Double,
@@ -61,13 +72,22 @@ struct SwipeEvent: Hashable, Sendable {
         self.directionY = directionY
     }
 
+    static func role(of observation: StrokeObservation) -> EvidenceRole {
+        switch observation.mark {
+        case .pin: .pin
+        case .rest: .rest
+        case .slip: .slip
+        case .tap: observation.isTap ? .tap : .anchor
+        }
+    }
+
     /// A tap or an already-aimed stroke letter, for joins that no longer have the polyline.
     static func fromObservation(_ observation: StrokeObservation, tapFinger: Int = 0) -> SwipeEvent {
         SwipeEvent(
             time: observation.time,
             point: observation.point,
             letter: observation.letter,
-            role: observation.isTap ? .tap : .anchor,
+            role: Self.role(of: observation),
             strokeIndex: observation.strokeIndex >= 0
                 ? observation.strokeIndex
                 : (observation.isTap ? -2 - tapFinger : observation.strokeIndex),

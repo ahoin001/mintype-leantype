@@ -411,6 +411,12 @@ final class SuggestionStrip: UIView, UIContextMenuInteractionDelegate {
     @objc private func doubleTapGap(_ gesture: UITapGestureRecognizer) {
         let point = scroller.convert(gesture.location(in: self), from: self)
         let visible = slots.enumerated().filter { !$0.element.isHidden && $0.offset < state.candidates.count }
+        if visible.count == 1,
+           state.candidates[visible[0].offset].role == .settled,
+           visible[0].element.frame.contains(point) {
+            onMenuAction?(.toggleBoundary)
+            return
+        }
         guard visible.count >= 2 else { return }
         for pair in zip(visible, visible.dropFirst()) {
             let gap = pair.1.element.frame.minX - pair.0.element.frame.maxX

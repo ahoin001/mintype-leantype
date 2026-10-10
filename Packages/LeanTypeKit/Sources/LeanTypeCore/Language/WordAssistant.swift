@@ -256,12 +256,12 @@ final class WordAssistant {
         }) {
             let appended = winner.score - DecodeResult.confidenceMargin - 1
             let synthetic = !language.isKnown(word) && abs(typed.score - appended) < 0.05
-            if !synthetic, winner.score > typed.score + ReadingPolicy.exactLead {
+            if !synthetic, winner.score > typed.score + language.trust.replacementLead {
                 return winner.word
             }
         }
         let rival = result.readings.dropFirst().first?.score ?? -.infinity
-        if sameLetters(winner.word, word), winner.score > rival + ReadingPolicy.exactLead {
+        if sameLetters(winner.word, word), winner.score > rival + language.trust.replacementLead {
             return winner.word
         }
         return fallback
@@ -275,6 +275,9 @@ final class WordAssistant {
 
     /// The user deleted a swipe the moment it landed. The next similar stroke tries another word.
     func noteSwipedWordRefused(_ word: String) {
+        if swipeReadings.count > 1 {
+            rescuedReadings = (swipeReadings, Date().timeIntervalSinceReferenceDate + 3)
+        }
         language?.noteSwipeRefusal(word: word, trace: swipeTrace ?? word)
     }
 
@@ -291,6 +294,11 @@ final class WordAssistant {
         }
         _ = language?.remember(preferred)
     }
+
+    /// After a peel, completion-ahead stays off until the next committed word.
+    var suppressAhead = false
+    /// Swipe readings kept on the strip for a few seconds after the word is deleted.
+    private var rescuedReadings: (words: [String], until: TimeInterval)?
 
     /// The user undid an autocorrection; leave `word` alone when it ends.
     func keep(_ word: String) {
@@ -581,6 +589,12 @@ final class WordAssistant {
         language?.noteRejection(preferred: preferred, rejected: rejected)
     }
 
+    /// First revert stays in the session. The second is written down.
+    func noteAutocorrectRevert(preferred: String, rejected: String) {
+        language?.noteAutocorrectRevert(preferred: preferred, rejected: rejected)
+        keep(preferred)
+    }
+
     func accept(_ index: Int, from state: CandidateState) -> Acceptance? {
         guard !state.isTentative, state.candidates.indices.contains(index) else { return nil }
         let candidate = state.candidates[index]
@@ -710,7 +724,7 @@ final class WordAssistant {
         case let .capitalize(entry, upper):
             capitalize(entry, upper: upper)
             return nil
-        case .insertText, .replaceSuffix, .clipboard:
+        case .insertText, .replaceSuffix, .clipboard, .toggleBoundary:
             return nil
         }
     }
@@ -736,6 +750,10 @@ final class WordAssistant {
         }
 
         let word = String(key.word)
+        if word.isEmpty, let rescued = rescuedReadings, Date().timeIntervalSinceReferenceDate <= rescued.until {
+            let chips = rescued.words.prefix(3).map { Candidate($0, role: .alternative) }
+            if !chips.isEmpty { return CandidateState(Array(chips)) }
+        }
         guard !word.isEmpty, word.count <= 24 else {
             return appendingFollow(to: settledCandidate(), language: language)
         }
@@ -746,7 +764,9 @@ final class WordAssistant {
             candidates.append(Candidate(correction, role: .correction))
             if key.autocorrects { highlighted = 1 }
         }
-        candidates += analysis.completions.map { Candidate($0, role: .completion) }
+        if !suppressAhead {
+            candidates += analysis.completions.map { Candidate($0, role: .completion) }
+        }
         return CandidateState(candidates, highlightedIndex: highlighted)
     }
 
@@ -759,7 +779,15 @@ final class WordAssistant {
             guard let language else { return settledState }
             return appendingFollow(to: settledState, language: language)
         }
+        let aimed = swipeTrace ?? ""
         var others = readings.filter { $0.compare(word, options: .caseInsensitive) != .orderedSame }
+        others.sort { left, right in
+            let leftKind = AlternativeClassifier.kind(of: left, comparedWith: word, aimed: aimed)
+            let rightKind = AlternativeClassifier.kind(of: right, comparedWith: word, aimed: aimed)
+            let leftBias = language?.alternativeBias.multiplier(for: leftKind) ?? 1
+            let rightBias = language?.alternativeBias.multiplier(for: rightKind) ?? 1
+            return leftBias > rightBias
+        }
         let literalSlot = literal.flatMap { literal in
             others.first { $0.compare(literal, options: .caseInsensitive) == .orderedSame }
         }
@@ -768,7 +796,11 @@ final class WordAssistant {
         }
         var slots: [Candidate] = []
         if let left = others.first {
-            slots.append(Candidate(left, role: .alternative))
+            slots.append(Candidate(
+                left,
+                role: .alternative,
+                difference: AlternativeClassifier.kind(of: left, comparedWith: word, aimed: aimed)
+            ))
         }
         let center = slots.count
         slots.append(Candidate(word, role: .settled))

@@ -6,6 +6,10 @@ struct AlignmentCosts: Sendable {
     var sigmaX: CGFloat = 0.55
     var sigmaY: CGFloat = 0.40
     var anchorSkip: Double = 3.2
+    /// A long rest beside another stroke. It does not spend the anchor-skip budget.
+    var restSkip: Double = 0.8
+    /// A second hit on the same key inside 60 ms.
+    var slipSkip: Double = 0.05
     var maxAnchorSkips: Int = 2
     var crossingSkipBase: Double = 0.05
     var crossingSkipCentral: Double = 1.15
@@ -14,17 +18,19 @@ struct AlignmentCosts: Sendable {
     var frequencyWeight: Double = 0.22
     var bigramWeight: Double = 0.30
     var motionWeight: Double = 0.45
-    var swapWindow: Double = 0.07
-    var swapPenalty: Double = 1.1
     var lengthWeight: Double = 1.4
     var seamBias: Double = 0.35
     var beamWidth: Int = 28
     var neighborRadius: CGFloat = 1.5
+    /// A pinned hold only considers keys this close, in key widths.
+    var pinNeighborRadius: CGFloat = 0.3
     var neighborLimit: Int = 6
     var resultLimit: Int = 4
     /// Cost per second of reading a later chain before an earlier one. It saturates.
     var inversionRate: Double = 2.4
     var inversionCap: Double = 1.6
+    /// An inversion costs this much of the full gap when the other thumb was down across it.
+    var heldOrderDiscount: Double = 0.5
     /// One letter the finger never touched. Above `ReadingPolicy.exactLead`.
     var omissionCost: Double = 1.15
     /// Two adjacent letters inside one chain, swapped. Above `ReadingPolicy.exactLead`.
@@ -51,12 +57,6 @@ struct AlignmentCosts: Sendable {
         return costs
     }
 
-    /// Adjacent events from different fingers inside this window may be read in either order.
-    /// The penalty shrinks as the gap shrinks.
-    func transpositionPenalty(gap: Double) -> Double {
-        guard swapWindow > 0 else { return swapPenalty }
-        return swapPenalty * min(1, max(0, gap / swapWindow))
-    }
 }
 
 /// Wall clock for one decode. The search reads it every few expansions and returns
@@ -145,7 +145,7 @@ enum AlignmentSearch {
                 clock: budget
             )
         } else {
-            let ranked = linearBeam(
+            let ranked = ladder(
                 steps,
                 layout: layout,
                 lexicon: lexicon,
@@ -154,7 +154,8 @@ enum AlignmentSearch {
                 costs: costs,
                 habits: habits,
                 crossingScale: crossingScale,
-                clock: budget
+                clock: budget,
+                gesture: gesture
             )
             readings = ranked
             if thumbsOverlap(steps), !budget.isPastDeadline {
@@ -170,7 +171,7 @@ enum AlignmentSearch {
                     crossingScale: crossingScale,
                     clock: budget
                 )
-                readings = mergeWithoutOutranking(readings, with: chained)
+                readings = merge(readings, chained)
             }
         }
         trace?.trace.beamWords = readings.map(\.word)
@@ -206,8 +207,7 @@ enum AlignmentSearch {
         trace?.trace.readings = result.readings.map(\.word)
         guard !costs.allowsEdits, isWeak(result, aimed: aimed), !budget.isPastDeadline else { return result }
         trace?.trace.recovered = true
-        var wide = AlignmentCosts.recovery
-        wide.swapWindow = costs.swapWindow
+        let wide = AlignmentCosts.recovery
         let recovered = decode(
             gesture,
             layout: layout,
@@ -329,18 +329,47 @@ enum AlignmentSearch {
         return true
     }
 
-    /// A block reading can join the list. It cannot pass a time-order word that already used every anchor.
-    private static func mergeWithoutOutranking(
-        _ primary: [DecodeResult.Reading],
-        with extra: [DecodeResult.Reading]
+    /// Width 4, then 12, then the full beam. A stage that dies keeps the last reading that consumed every anchor.
+    private static func ladder(
+        _ steps: [StrokeChannel.Step],
+        layout: LetterLayout,
+        lexicon: MappedLexicon,
+        personal: [PersonalLexicon.Entry],
+        bigram: LetterBigram,
+        costs: AlignmentCosts,
+        habits: [String: Double],
+        crossingScale: Double,
+        clock: SearchClock,
+        gesture: SwipeGesture
     ) -> [DecodeResult.Reading] {
-        guard let leader = primary.first else { return extra }
-        let capped = extra.map { reading in
-            let same = reading.word.compare(leader.word, options: .caseInsensitive) == .orderedSame
-            guard !same, reading.score >= leader.score else { return reading }
-            return DecodeResult.Reading(word: reading.word, score: leader.score - 0.01)
+        let widths = [4, 12, costs.beamWidth]
+        var best: [DecodeResult.Reading] = []
+        for width in widths {
+            if clock.isPastDeadline {
+                ClockExpiryLog.note(gesture)
+                break
+            }
+            var stage = costs
+            stage.beamWidth = min(width, costs.beamWidth)
+            let ranked = linearBeam(
+                steps,
+                layout: layout,
+                lexicon: lexicon,
+                personal: personal,
+                bigram: bigram,
+                costs: stage,
+                habits: habits,
+                crossingScale: crossingScale,
+                clock: clock
+            )
+            if !ranked.isEmpty { best = ranked }
+            if clock.isPastDeadline {
+                if ranked.isEmpty { ClockExpiryLog.note(gesture) }
+                break
+            }
+            if width == costs.beamWidth { break }
         }
-        return merge(primary, capped)
+        return best
     }
 
     /// One order, walked from first step to last. Skips stay in the beam because nothing else is competing for it.
@@ -525,7 +554,12 @@ enum AlignmentSearch {
                     }
                     var advanced = hypothesis
                     advanced.cursors[index] &+= 1
-                    let inversion = inversionCost(of: step.time, after: earliest, costs: costs)
+                    let inversion = inversionCost(
+                        of: step.time,
+                        after: earliest,
+                        costs: costs,
+                        held: otherThumbCovers(step.time, besides: index, chains: chains)
+                    )
                     let onTime = step.time <= earliest + 0.000_1
                     keep(expansions(
                         of: advanced,
@@ -557,7 +591,12 @@ enum AlignmentSearch {
                             bigram: bigram,
                             costs: costs,
                             crossingScale: crossingScale,
-                            inversion: inversionCost(of: taken.time, after: earliest, costs: costs)
+                            inversion: inversionCost(
+                                of: taken.time,
+                                after: earliest,
+                                costs: costs,
+                                held: otherThumbCovers(taken.time, besides: index, chains: chains)
+                            )
                         ), onTime: false)
                     }
                 }
@@ -600,7 +639,8 @@ enum AlignmentSearch {
     }
 
     private static func candidates(for event: SwipeEvent, layout: LetterLayout, costs: AlignmentCosts) -> [UInt8] {
-        var letters = layout.letters(near: event.point, within: costs.neighborRadius, limit: costs.neighborLimit)
+        let radius = event.role == .pin ? costs.pinNeighborRadius : costs.neighborRadius
+        var letters = layout.letters(near: event.point, within: radius, limit: costs.neighborLimit)
         if let traced = event.letter.lowercased().utf8.first,
            (UInt8(ascii: "a")...UInt8(ascii: "z")).contains(traced),
            !letters.contains(traced) {
@@ -818,10 +858,28 @@ enum AlignmentSearch {
         return earliest == .greatestFiniteMagnitude ? 0 : earliest
     }
 
-    private static func inversionCost(of time: Double, after earliest: Double, costs: AlignmentCosts) -> Double {
+    private static func inversionCost(
+        of time: Double,
+        after earliest: Double,
+        costs: AlignmentCosts,
+        held: Bool
+    ) -> Double {
         let gap = time - earliest
         guard gap > 0.000_1 else { return 0 }
-        return min(costs.inversionCap, costs.inversionRate * gap)
+        let cost = min(costs.inversionCap, costs.inversionRate * gap)
+        return held ? cost * costs.heldOrderDiscount : cost
+    }
+
+    /// The other thumb's events bracket `time`, so that finger was down while this one landed.
+    private static func otherThumbCovers(_ time: Double, besides index: Int, chains: ThumbChains) -> Bool {
+        for other in chains.chains.indices where other != index {
+            let times = chains.chains[other].map(\.time)
+            guard let first = times.min(), let last = times.max() else { continue }
+            if first <= time + 0.000_1, last >= time - 0.000_1, last - first > 0.000_1 {
+                return true
+            }
+        }
+        return false
     }
 
     private static func accepts(fit: Double, costs: AlignmentCosts) -> Bool {
@@ -838,11 +896,22 @@ enum AlignmentSearch {
         crossingScale: Double
     ) -> Hypothesis? {
         switch event.role {
-        case .anchor, .tap:
+        case .anchor, .tap, .pin:
+            if event.role == .pin, !costs.allowsEdits { return nil }
             guard hypothesis.placed, hypothesis.skips.allows(event.strokeIndex, limit: costs.maxAnchorSkips) else { return nil }
             var skipped = hypothesis
             skipped.skips = hypothesis.skips.adding(event.strokeIndex)
             skipped.score -= costs.anchorSkip
+            skipped.justSkipped = true
+            return skipped
+        case .rest:
+            var skipped = hypothesis
+            skipped.score -= costs.restSkip
+            skipped.justSkipped = true
+            return skipped
+        case .slip:
+            var skipped = hypothesis
+            skipped.score -= costs.slipSkip
             skipped.justSkipped = true
             return skipped
         case .crossing:
@@ -1189,7 +1258,7 @@ enum AlignmentSearch {
             extra = singleStrokeNominations(paths, layout: layout, lexicon: lexicon, personal: personal, pathScore: &pathScore)
         }
         guard !extra.isEmpty else { return readings }
-        let tapped = gesture.evidence.events.contains { $0.role == .tap }
+        let tapped = gesture.evidence.events.contains(where: \.isTap)
         let cap = readings.map(\.score).max().map { $0 - DecodeResult.confidenceMargin - 0.01 }
         let leaderLocation: CGFloat? = {
             guard paths.count == 1, !tapped, let path = paths.first,

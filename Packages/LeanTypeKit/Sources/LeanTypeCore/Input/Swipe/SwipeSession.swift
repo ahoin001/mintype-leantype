@@ -53,9 +53,22 @@ final class SwipeSession: InteractionSession {
         self.coordinator = coordinator
         origin = key
         latest = track
-        phase = .tapping(CharacterTapSession(key: key, track: track, context: context))
+        let tap = CharacterTapSession(key: key, track: track, context: context)
+        phase = .tapping(tap)
+        tap.accentGate = { [weak self] in
+            guard let self else { return true }
+            if self.context.isInsideComposingWord { return false }
+            return !self.coordinator.blocksAccent(for: self)
+        }
         if Self.canStroke(on: key, context: context) {
             coordinator.registerUndecided(self)
+            if coordinator.hasLetterFingerDown(besides: self), let character = key.key.kind.character {
+                let midline = LetterLayout(geometry: context.geometry)?.handMidline ?? (context.geometry.size.width / 2)
+                ThumbTerritory.observe(character, onLeft: track.start.location.x < midline)
+            }
+            if coordinator.blocksAccent(for: self) {
+                tap.disarmAccent()
+            }
         }
     }
 
@@ -127,6 +140,9 @@ final class SwipeSession: InteractionSession {
         case let .tapping(tap):
             coordinator.unregisterUndecided(self)
             tap.cancelled()
+            if !coordinator.hasLetterFingerDown(besides: self) {
+                coordinator.releaseParkedTaps()
+            }
         case .holding:
             coordinator.dropHold(latest.id)
         case .stroking:
@@ -144,9 +160,11 @@ final class SwipeSession: InteractionSession {
         if tap.canRelinquish,
            Self.canStroke(on: origin, context: context),
            Self.canStroke(on: key, context: context) {
+            tap.disarmAccent()
             return
         }
         coordinator.unregisterUndecided(self)
+        coordinator.releaseParkedTaps()
         tap.otherTouchBegan(on: key)
         phase = .finished
     }
@@ -179,7 +197,7 @@ final class SwipeSession: InteractionSession {
 
     private func hasBecomeStroke(_ track: TouchTrack) -> Bool {
         let move = track.translation
-        if abs(move.dx) >= Self.sidewaysDistance { return true }
+        if abs(move.dx) >= TapTravel.threshold { return true }
         if CharacterTapSession.holdsOffSwipe(
             track,
             on: origin,
@@ -215,6 +233,9 @@ final class SwipeSession: InteractionSession {
             endTap(tap, track: track)
             return
         }
+        if coordinator.isIdleHold {
+            coordinator.finishNow()
+        }
         if coordinator.isCollecting {
             let ticket = tap.relinquish()
             context.composer.cancel(ticket)
@@ -235,19 +256,27 @@ final class SwipeSession: InteractionSession {
 
     private func endTap(_ tap: CharacterTapSession, track: TouchTrack) {
         coordinator.unregisterUndecided(self)
-        if coordinator.isCollecting, tap.canRelinquish, let character = origin.key.kind.character {
+        if tap.canRelinquish, let character = origin.key.kind.character,
+           coordinator.isCollecting || coordinator.hasLetterFingerDown(besides: self) {
             let ticket = tap.relinquish()
-            context.composer.cancel(ticket)
             let center = CGPoint(x: origin.visualFrame.midX, y: origin.visualFrame.midY)
-            coordinator.noteTap(StrokeObservation(
+            let observation = StrokeObservation(
                 time: track.start.timestamp,
                 point: center,
                 directionX: 0,
                 directionY: 0,
                 letter: character.lowercased(),
                 isTap: true
-            ))
+            )
+            if coordinator.isCollecting {
+                context.composer.cancel(ticket)
+                coordinator.noteTap(observation)
+            } else {
+                coordinator.parkTap(observation, character: character, ticket: ticket)
+            }
         } else {
+            TapTravel.note(travel: hypot(track.translation.dx, track.translation.dy))
+            coordinator.releaseParkedTaps()
             tap.ended(track)
         }
     }

@@ -145,6 +145,11 @@ final class EngineHarness {
         send(id, location, .ended)
     }
 
+    func cancel(_ id: TouchID) {
+        guard let location = positions.removeValue(forKey: id) else { return }
+        send(id, location, .cancelled)
+    }
+
     func tap(_ kind: KeyKind, gap: TimeInterval = 0.12) {
         let id = down(at: point(for: kind))
         scheduler.advance(by: 0.05)

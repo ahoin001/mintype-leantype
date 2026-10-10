@@ -51,6 +51,28 @@ enum TouchOffsetLog {
     }
 }
 
+/// How often a decode ran out of time, by the shape of the gesture. Local only. Nothing is uploaded.
+enum ClockExpiryLog {
+    static func note(_ gesture: SwipeGesture) {
+        let kind = switch gesture.strokeCount {
+        case 0: "tap-only"
+        case 1: "one-stroke"
+        default: "two-thumb"
+        }
+        guard let url = LearningDirectory.fileURL(named: "clock-expirations.jsonl") else { return }
+        var line = Data(kind.utf8)
+        line.append(UInt8(ascii: "\n"))
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: line)
+        } else {
+            try? line.write(to: url)
+        }
+    }
+}
+
 /// A full decode trace. Written only when gesture traces are turned on. Nothing is uploaded.
 enum GestureTraceLog {
     struct Record: Codable {

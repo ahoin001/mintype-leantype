@@ -179,6 +179,7 @@ enum GestureComposer {
                 ))
             }
         }
+        Self.markSlips(&taps)
         let chains: [[StrokeBuffer]] = chainThumbs.map { thumb in
             (byThumb[thumb] ?? []).sorted { $0.start.time < $1.start.time }
         }
@@ -391,13 +392,28 @@ enum GestureComposer {
         return directed
     }
 
+    /// A second hit on the same key inside 60 ms can be the double letter, or a slip.
+    private static func markSlips(_ taps: inout [StrokeObservation]) {
+        let order = taps.indices.sorted { taps[$0].time < taps[$1].time }
+        for index in order {
+            guard taps[index].mark == .tap else { continue }
+            let tap = taps[index]
+            let repeats = taps.contains { other in
+                other.time < tap.time
+                    && tap.time - other.time < TapThumbs.differentThumbGap
+                    && other.letter == tap.letter
+            }
+            if repeats { taps[index].mark = .slip }
+        }
+    }
+
     private static func event(from tap: StrokeObservation, finger: Int) -> SwipeEvent {
         SwipeEvent(
             time: tap.time,
             point: tap.point,
             letter: tap.letter,
-            role: .tap,
-            strokeIndex: -2 - finger
+            role: SwipeEvent.role(of: tap),
+            strokeIndex: tap.strokeIndex >= 0 ? tap.strokeIndex : -2 - finger
         )
     }
 

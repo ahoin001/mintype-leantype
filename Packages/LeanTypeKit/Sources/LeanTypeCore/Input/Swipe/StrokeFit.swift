@@ -84,7 +84,7 @@ enum StrokeFit {
 
     private static func tapLetters(in gesture: SwipeGesture) -> [UInt8] {
         gesture.evidence.events.compactMap { event in
-            guard event.role == .tap else { return nil }
+            guard event.isTap else { return nil }
             return event.letter.lowercased().utf8.first
         }
     }

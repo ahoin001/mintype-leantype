@@ -46,6 +46,8 @@ public final class FeedbackCoordinator: KeyboardEventObserver {
             impact(modeImpact, intensity: 0.7)
         case .alternatesPresented:
             impact(keyImpact, intensity: 0.8)
+        case .holdArmed:
+            impact(keyImpact, intensity: 0.5)
         case .wordDeleted, .deletionRestored:
             impact(softImpact, intensity: 0.6)
         case .correctionReverted:
@@ -58,7 +60,7 @@ public final class FeedbackCoordinator: KeyboardEventObserver {
             impact(softImpact, intensity: sure ? 0.65 : 0.3)
         case .chipChosen:
             impact(keyImpact, intensity: 0.35)
-        case .sentenceEnded, .trackpadEnded, .wordCommitted, .swipeGestureCommitted, .correctionApplied, .flowChanged, .holdArmed, .holdEnded, .returnSent:
+        case .sentenceEnded, .trackpadEnded, .wordCommitted, .swipeGestureCommitted, .correctionApplied, .flowChanged, .holdEnded, .returnSent:
             break
         }
     }

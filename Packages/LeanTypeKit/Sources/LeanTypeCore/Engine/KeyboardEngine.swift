@@ -74,6 +74,8 @@ public final class KeyboardEngine {
     private var spaceTouches: Set<TouchID> = []
     /// Exact text lifted by an upward flick on space, so delete or another flick can put it back.
     private var pickedUpText: String?
+    /// The joined spelling, while the field is showing the split, and the reverse.
+    private var boundaryAlternate: String?
     /// Holds freshly typed letters until the word is finished or a swipe takes them.
     private var composingTimer: (any Cancellable)?
     /// The unfinished swipe beat, waiting out the leash after the last finger lifted.
@@ -177,6 +179,10 @@ public final class KeyboardEngine {
     /// Sets the key area size (excluding the dock) and spacing; recomputes frames if changed.
     public func updateLayout(size: CGSize, metrics: KeyboardMetrics) {
         guard size != geometry.size || metrics != geometry.metrics else { return }
+        if geometry.size != .zero, swipe.hasLetterFingerDown || swipe.isCollecting {
+            cancelAllTouches()
+            flushTypedComposing()
+        }
         rebuildGeometry(size: size, metrics: metrics)
     }
 
@@ -468,6 +474,10 @@ public final class KeyboardEngine {
             closeOpenWord()
             changed = deleteRun(editor.deleteSentence())
         case .deleteCharacter:
+            if swipe.dropLatestObservation() {
+                changed = true
+                break
+            }
             closeOpenWord()
             if let text = editor.deleteCharacter() {
                 performedText = text
@@ -620,7 +630,12 @@ public final class KeyboardEngine {
     private func scheduleComposingFlush() {
         composingTimer?.cancel()
         composingTimer = scheduler.schedule(after: Self.wordLeash) { [weak self] in
-            self?.flushTypedComposing()
+            guard let self else { return }
+            if self.swipe.hasLetterFingerDown {
+                self.scheduleComposingFlush()
+                return
+            }
+            self.flushTypedComposing()
         }
     }
 
@@ -1040,7 +1055,9 @@ public final class KeyboardEngine {
         if let edited, edited.isEmpty { return false }
         let cased = edited.map { [$0] } ?? result.words.map(applyShift(to:))
         let score = result.readings.first?.score ?? 0
-        let tentative = unsure ?? (result.isUnsure || score <= WordJoiner.provisionalScore)
+        let margin = words.language?.trust.unsureMargin ?? DecodeResult.confidenceMargin
+        let close = result.readings.count >= 2 && result.readings[0].score - result.readings[1].score < margin
+        let tentative = unsure ?? (close || score <= WordJoiner.provisionalScore)
         editor.commitWord(cased[0])
         if let layout = words.letterLayout {
             let accepted = priorChunks.flatMap(\.events) + events
@@ -1056,6 +1073,9 @@ public final class KeyboardEngine {
             display: displayToRemember(cased[0]),
             scores: result.readings.map(\.score)
         )
+        words.language?.noteGesture(aimed: literal, path: recentStrokePath, chosen: cased[0])
+        words.language?.trust.note(overridden: false, at: scheduler.now)
+        words.suppressAhead = false
         emit(.commitFelt(sure: !tentative))
         if let layout = words.letterLayout, recentStrokePath.count >= 2 {
             words.language?.rememberFrequentStroke(cased[0], path: recentStrokePath, layout: layout)
@@ -1076,7 +1096,9 @@ public final class KeyboardEngine {
         let cased = result.words.map(applyShift(to:))
         guard editor.replaceRecentCommitWord(with: cased[0]) else { return false }
         let score = result.readings[0].score
-        let tentative = result.isUnsure || score <= WordJoiner.provisionalScore
+        let margin = words.language?.trust.unsureMargin ?? DecodeResult.confidenceMargin
+        let close = result.readings.count >= 2 && result.readings[0].score - result.readings[1].score < margin
+        let tentative = close || score <= WordJoiner.provisionalScore
         var open = open
         open.chunks.append(OpenBeat(events: batch, paths: paths, readings: cased, score: score))
         let literal = BeatChooser.collapse(open.chunks.flatMap(\.events).map(\.letter).joined())
@@ -1277,6 +1299,12 @@ public final class KeyboardEngine {
             return (true, true)
         case let .swap(word):
             words.noteSwap(preferred: word, rejected: editor.recentCommit?.word)
+            words.language?.trust.note(overridden: true, at: scheduler.now)
+            if let kind = words.language.flatMap({ _ in
+                AlternativeClassifier.kind(of: word, comparedWith: editor.recentCommit?.word ?? "", aimed: "")
+            }) {
+                words.language?.alternativeBias.note(kind)
+            }
             if let layout = words.letterLayout, recentStrokePath.count >= 2 {
                 words.rememberStroke(word, path: recentStrokePath, layout: layout)
             }
@@ -1284,8 +1312,7 @@ public final class KeyboardEngine {
         case .revert:
             guard let commit = editor.undoRecentCommit() else { return (false, true) }
             emit(.correctionReverted)
-            words.rememberRejection(preferred: commit.original, rejected: commit.word)
-            words.keep(commit.original)
+            words.noteAutocorrectRevert(preferred: commit.original, rejected: commit.word)
             return (insertSpace(), true)
         case .settle:
             return (true, false)
@@ -1309,6 +1336,10 @@ public final class KeyboardEngine {
             _ = HistoryEditLog.record(elapsed: max(0, scheduler.now - started))
             emit(.chipChosen)
             return (changed, true)
+        case .toggleBoundary:
+            let changedBoundary = toggleLastBoundary()
+            emit(.chipChosen)
+            return (changedBoundary, changedBoundary)
         case let .clipboard(command):
             onClipboard?(command)
             emit(.chipChosen)
@@ -1361,8 +1392,7 @@ public final class KeyboardEngine {
         switch commit.kind {
         case .corrected:
             emit(.correctionReverted)
-            words.rememberRejection(preferred: commit.original, rejected: commit.word)
-            words.keep(commit.original)
+            words.noteAutocorrectRevert(preferred: commit.original, rejected: commit.word)
         case .completed:
             words.keep(commit.original)
         case .swiped:
@@ -1399,14 +1429,40 @@ public final class KeyboardEngine {
         words.clearPickedUp()
     }
 
+    /// Splits a joined word into the chunk before the last one, or joins that split back.
+    private func toggleLastBoundary() -> Bool {
+        guard let commit = editor.recentCommit, commit.kind == .swiped else { return false }
+        if let alternate = boundaryAlternate {
+            guard editor.replaceRecentCommitWord(with: alternate) else { return false }
+            boundaryAlternate = commit.word
+            return true
+        }
+        guard var open = openWord, open.chunks.count > 1 else { return false }
+        let tail = open.chunks.removeLast()
+        let headEvents = open.chunks.flatMap(\.events)
+        let outcome = sequenceOutcome(headEvents, strokePaths: open.paths)
+        let head = outcome.result.readings.first?.word ?? open.chunks.last?.readings.first ?? ""
+        let tailWord = tail.readings.first ?? BeatChooser.collapse(tail.events.map(\.letter).joined())
+        guard !head.isEmpty, !tailWord.isEmpty else { return false }
+        guard editor.replaceRecentCommitWord(with: head + " " + tailWord) else { return false }
+        boundaryAlternate = commit.word
+        openWord = open
+        return true
+    }
+
     /// Drops the last tap or swipe of an open word and restores the reading from before it.
     private func peelOpenWord() -> Bool {
         guard var open = openWord, open.chunks.count > 1, editor.recentCommit?.kind == .swiped else { return false }
         open.chunks.removeLast()
         guard let chunk = open.chunks.last, let word = chunk.readings.first else { return false }
-        guard editor.replaceRecentCommitWord(with: word) else { return false }
-        let literal = BeatChooser.collapse(open.chunks.flatMap(\.events).map(\.letter).joined())
-        words.swipeCommitted(chunk.readings, unsure: chunk.score <= WordJoiner.provisionalScore, literal: literal)
+        let remaining = open.chunks.flatMap(\.events)
+        let outcome = sequenceOutcome(remaining, strokePaths: open.paths)
+        let decoded = outcome.result.readings.first?.word ?? word
+        guard editor.replaceRecentCommitWord(with: decoded) else { return false }
+        words.suppressAhead = true
+        let literal = BeatChooser.collapse(remaining.map(\.letter).joined())
+        let readings = outcome.result.readings.map(\.word)
+        words.swipeCommitted(readings.isEmpty ? chunk.readings : readings, unsure: true, literal: literal)
         openWord = open
         flow.noteDeletion()
         return true
@@ -1638,6 +1694,8 @@ extension KeyboardEngine: SessionContext {
         let dock = geometry.metrics.dockHeight
         return CGRect(x: 0, y: -dock, width: geometry.size.width, height: geometry.size.height + dock)
     }
+
+    var isInsideComposingWord: Bool { composingTimer != nil }
 
     func displayText(for character: String) -> String {
         guard character.count == 1, shift.state != .off else { return character }

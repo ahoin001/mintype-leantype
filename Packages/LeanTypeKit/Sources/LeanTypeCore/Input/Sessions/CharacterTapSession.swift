@@ -34,7 +34,10 @@ final class CharacterTapSession: InteractionSession {
     private var phase = Phase.tracking
     private var latest: TouchTrack
     private var longPress: (any Cancellable)?
+    private var pinArm: (any Cancellable)?
     private var holdIsArmed = false
+    /// When this returns false the accent row stays closed. A partner finger or an open beat sets it.
+    var accentGate: (() -> Bool)?
 
     init(key: KeyFrame, track: TouchTrack, context: any SessionContext, ticket: InputComposer.Ticket? = nil) {
         self.context = context
@@ -87,6 +90,15 @@ final class CharacterTapSession: InteractionSession {
         case .alternates: true
         case .tracking, .finished: false
         }
+    }
+
+    /// Drops the accent timer. The row, if it is already up, stays until the finger lifts.
+    func disarmAccent() {
+        longPress?.cancel()
+        longPress = nil
+        pinArm?.cancel()
+        pinArm = nil
+        endHold()
     }
 
     /// Ends this session without committing and hands its composer slot to the caller, which
@@ -206,11 +218,18 @@ final class CharacterTapSession: InteractionSession {
             endHold()
             return
         }
-        context.emit(.holdArmed(target.visualFrame))
-        holdIsArmed = true
+        pinArm = context.schedule(after: GestureComposer.dwellDuration) { [weak self] in
+            self?.armPin()
+        }
         longPress = context.schedule(after: Self.longPressDelay) { [weak self] in
             self?.presentAlternates()
         }
+    }
+
+    private func armPin() {
+        guard case .tracking = phase, let target else { return }
+        context.emit(.holdArmed(target.visualFrame))
+        holdIsArmed = true
     }
 
     private func endHold() {
@@ -220,6 +239,7 @@ final class CharacterTapSession: InteractionSession {
     }
 
     private func presentAlternates() {
+        guard accentGate?() ?? true else { return }
         guard case .tracking = phase, let target else { return }
         let options = alternateRow(for: target)
         guard !options.isEmpty else { return }
@@ -256,6 +276,8 @@ final class CharacterTapSession: InteractionSession {
     private func finish() {
         longPress?.cancel()
         longPress = nil
+        pinArm?.cancel()
+        pinArm = nil
         endHold()
         phase = .finished
     }

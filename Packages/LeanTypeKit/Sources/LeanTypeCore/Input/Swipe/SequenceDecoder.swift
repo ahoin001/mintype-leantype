@@ -1,5 +1,17 @@
 ﻿import CoreGraphics
 
+/// How a finger that never drew still offered its letter.
+public enum ObservationMark: Hashable, Sendable {
+    /// A tap. The beam may skip it at the anchor cost.
+    case tap
+    /// A hold. The first pass must take it, and only the nearest keys are candidates.
+    case pin
+    /// A long rest beside another stroke. Cheap to skip, and it does not spend the anchor budget.
+    case rest
+    /// A second thumb landed on the same key within 60 ms. Cheap to drop when the word has no double.
+    case slip
+}
+
 /// One letter a thumb reached: where, when, which key, and which way the finger was moving.
 public struct StrokeObservation: Hashable, Sendable {
     public var time: Double
@@ -11,6 +23,8 @@ public struct StrokeObservation: Hashable, Sendable {
     public var isTap: Bool
     /// Which moving stroke aimed at this letter. Taps use `-1`.
     public var strokeIndex: Int
+    /// A tap, a pin, a rest, or a same-key slip. Strokes leave this as `.tap`.
+    public var mark: ObservationMark
 
     public init(
         time: Double,
@@ -19,7 +33,8 @@ public struct StrokeObservation: Hashable, Sendable {
         directionY: CGFloat,
         letter: String,
         isTap: Bool = false,
-        strokeIndex: Int = -1
+        strokeIndex: Int = -1,
+        mark: ObservationMark = .tap
     ) {
         self.time = time
         self.point = point
@@ -28,6 +43,7 @@ public struct StrokeObservation: Hashable, Sendable {
         self.letter = letter
         self.isTap = isTap
         self.strokeIndex = strokeIndex
+        self.mark = mark
     }
 
     var directionLength: CGFloat {

@@ -33,6 +33,9 @@ final class SwipeCoordinator {
     private var accentHolds: Set<TouchID> = []
     /// Taps that lifted while the beat was open, in touch-down order.
     private var liftedTaps: [StrokeObservation] = []
+    /// A letter that lifted while a partner was still down, before any stroke existed.
+    /// Its composer ticket stays pending so nothing types until the partner travels or lifts.
+    private var parked: [ParkedTap] = []
     private var ticket: InputComposer.Ticket?
     private var decodeTask: Task<Void, Never>?
     private var previewTask: Task<Void, Never>?
@@ -47,11 +50,19 @@ final class SwipeCoordinator {
     private var undecided: [ObjectIdentifier: WeakSession] = [:]
     /// The fingers are up and the beat is waiting out the leash before it decodes.
     private var holdingBeat = false
+    /// The preview decode for an observation set that has not changed since.
+    private var previewCache: (identity: Int, result: DecodeResult)?
     /// Space, return, or punctuation that should follow the word once it commits.
     private var trailing: [KeyboardIntent] = []
 
     private struct WeakSession {
         weak var session: SwipeSession?
+    }
+
+    private struct ParkedTap {
+        var observation: StrokeObservation
+        var character: String
+        var ticket: InputComposer.Ticket
     }
 
     init(composer: InputComposer, decode: @escaping Decoder) {
@@ -62,8 +73,38 @@ final class SwipeCoordinator {
     /// A stroke, a held letter, or a beat waiting out the leash. The word waits for the last of these.
     var isCollecting: Bool { !active.isEmpty || !held.isEmpty || holdingBeat }
 
+    /// A letter finger is on the glass, whether or not it has started to draw.
+    var hasLetterFingerDown: Bool {
+        !active.isEmpty || !held.isEmpty || liveUndecidedCount > 0
+    }
+
+    /// Another letter finger besides `session`, or none when `session` is nil and any finger is down.
+    func hasLetterFingerDown(besides session: SwipeSession?) -> Bool {
+        if !active.isEmpty || !held.isEmpty { return true }
+        for entry in undecided.values {
+            guard let other = entry.session else { continue }
+            if let session, other === session { continue }
+            return true
+        }
+        return false
+    }
+
     /// Moving strokes already in this beat, including ones that have lifted.
     var strokeChainCount: Int { active.count + finished.count }
+
+    /// The beat is only waiting out the leash. A new stroke should decode it instead of raw-merging.
+    var isIdleHold: Bool { holdingBeat && active.isEmpty && held.isEmpty }
+
+    /// Drops the latest tap in an open beat and refreshes the preview. Committed text stays.
+    func dropLatestObservation() -> Bool {
+        guard isCollecting || holdingBeat else { return false }
+        guard let index = liftedTaps.indices.max(by: { liftedTaps[$0].time < liftedTaps[$1].time }) else {
+            return !active.isEmpty || !finished.isEmpty || !held.isEmpty
+        }
+        liftedTaps.remove(at: index)
+        schedulePreview()
+        return true
+    }
 
     /// A new travel may open a chain. The thumb that already lifted can start again.
     /// A second finger down at once takes the other chain. A third finger stays a tap.
@@ -91,16 +132,17 @@ final class SwipeCoordinator {
     }
 
     /// The held finger lifted without leaving its key. The letter joins the beat at its touch-down time.
-    /// A long rest beside another stroke is left out.
+    /// A long rest beside another stroke stays, and the dictionary may skip it.
     func liftHold(_ id: TouchID, at time: Double) {
         let keepsRest = accentHolds.remove(id) != nil
-        if let observation = held.removeValue(forKey: id) {
-            let rested = !keepsRest
-                && time - observation.time >= SwipeSession.restDuration
-                && strokeChainCount > 0
-            if !rested {
-                liftedTaps.append(observation)
+        if var observation = held.removeValue(forKey: id) {
+            let elapsed = time - observation.time
+            if !keepsRest, elapsed >= SwipeSession.restDuration, strokeChainCount > 0 {
+                observation.mark = .rest
+            } else if elapsed >= GestureComposer.dwellDuration {
+                observation.mark = .pin
             }
+            liftedTaps.append(observation)
         }
         finishIfIdle()
     }
@@ -117,6 +159,35 @@ final class SwipeCoordinator {
         held.removeValue(forKey: id)
         accentHolds.remove(id)
         join(track, keyWidth: keyWidth, thumb: thumb)
+    }
+
+    /// The accent row stays closed while a partner is down or a beat is already open.
+    func blocksAccent(for session: SwipeSession) -> Bool {
+        isCollecting || hasLetterFingerDown(besides: session)
+    }
+
+    /// Keeps a lifted letter out of the document while a partner finger is still down.
+    func parkTap(_ observation: StrokeObservation, character: String, ticket: InputComposer.Ticket) {
+        parked.append(ParkedTap(observation: observation, character: character, ticket: ticket))
+    }
+
+    /// The partner never traveled. The parked letters type in touch-down order.
+    func releaseParkedTaps() {
+        let taps = parked.sorted { $0.observation.time < $1.observation.time }
+        parked.removeAll()
+        for tap in taps {
+            composer.commit(tap.ticket, [.tapCharacter(tap.character, at: tap.observation.point, time: tap.observation.time)])
+        }
+    }
+
+    /// A stroke started. The parked letters join it, and their tickets do not also type.
+    func absorbParkedTaps() {
+        let taps = parked
+        parked.removeAll()
+        for tap in taps {
+            composer.cancel(tap.ticket)
+            liftedTaps.append(tap.observation)
+        }
     }
 
     /// A tap that landed and lifted while this beat was open.
@@ -145,6 +216,7 @@ final class SwipeCoordinator {
         liftedTaps.removeAll()
         held.removeAll()
         accentHolds.removeAll()
+        absorbParkedTaps()
         self.ticket = ticket
         add(track, keyWidth: keyWidth, thumb: thumb)
     }
@@ -187,6 +259,10 @@ final class SwipeCoordinator {
         held.removeAll()
         accentHolds.removeAll()
         liftedTaps.removeAll()
+        for tap in parked {
+            composer.cancel(tap.ticket)
+        }
+        parked.removeAll()
         holdingBeat = false
         trailing.removeAll()
         if let ticket {
@@ -229,6 +305,7 @@ final class SwipeCoordinator {
     func finishNow(then intents: [KeyboardIntent] = []) -> Bool {
         let pending = ticket != nil && (holdingBeat || !active.isEmpty || !finished.isEmpty || !held.isEmpty || !liftedTaps.isEmpty)
         guard pending else { return false }
+        absorbParkedTaps()
         trailing.append(contentsOf: intents)
         noteContinued()
         for stroke in active.values {
@@ -250,6 +327,10 @@ final class SwipeCoordinator {
         onBeatContinued?()
     }
 
+    private var liveUndecidedCount: Int {
+        undecided.values.compactMap(\.session).count
+    }
+
     private func pendingTaps() -> [StrokeObservation] {
         liftedTaps + Array(held.values)
     }
@@ -265,6 +346,7 @@ final class SwipeCoordinator {
         guard let ticket else { return }
         self.ticket = nil
 
+        let cached = previewCache
         invalidatePreview()
         guard let gesture = GestureComposer.compose(strokes, taps: taps, tuning: evidenceTuning),
               gesture.path.count >= 2 || !gesture.tracedLetters.isEmpty else {
@@ -274,6 +356,12 @@ final class SwipeCoordinator {
                 composer.commit(ticket, extra)
             }
             onPreview?(nil)
+            return
+        }
+        if let cached, cached.identity == Self.identity(of: gesture) {
+            commit(cached.result, gesture: gesture, ticket: ticket, then: extra)
+            onPreview?(nil)
+            onFinish?()
             return
         }
         generation += 1
@@ -349,6 +437,7 @@ final class SwipeCoordinator {
             }
             guard !result.isEmpty else { return }
             previewPointCount = grown
+            previewCache = (Self.identity(of: gesture), result)
             onPreview?(result)
         }
     }
@@ -359,6 +448,19 @@ final class SwipeCoordinator {
         previewPointCount = 0
         previewTask?.cancel()
         previewTask = nil
+        previewCache = nil
+    }
+
+    private static func identity(of gesture: SwipeGesture) -> Int {
+        var hasher = Hasher()
+        hasher.combine(gesture.tracedLetters)
+        hasher.combine(gesture.path.count)
+        for observation in gesture.observations {
+            hasher.combine(observation.time)
+            hasher.combine(observation.letter)
+            hasher.combine(observation.mark)
+        }
+        return hasher.finalize()
     }
 
     private static func point(_ sample: TouchSample) -> StrokePoint {

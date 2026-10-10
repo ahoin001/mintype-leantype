@@ -37,6 +37,11 @@ public final class LanguageModel {
     private let context: WordContext
     private let habits: HabitMemory
     private let strokes: StrokeMemory
+    private let retries = RetryMemory()
+    private let aims = AimMemory()
+    let trust = TrustMeter()
+    let alternativeBias = AlternativeBias()
+    private var revertCounts: [String: Int] = [:]
     private var habitBonuses: [String: Double]
     private var personal: PersonalLexicon
     private var personalEntries: [PersonalLexicon.Entry]
@@ -134,7 +139,12 @@ public final class LanguageModel {
             clock: SearchClock.responseClock()
         )
         let path = gesture.strokePaths.first ?? gesture.path
-        return finish(strokes.applying(to: result, path: path, layout: layout), trace: Self.strokeTrace(of: gesture))
+        return finish(
+            strokes.applying(to: result, path: path, layout: layout),
+            trace: Self.strokeTrace(of: gesture),
+            path: path,
+            keyWidth: layout.keyWidth
+        )
     }
 
     /// Words for a sequence of taps and swipe arrivals, best first. Used when a later beat
@@ -175,7 +185,7 @@ public final class LanguageModel {
         if let sink { GestureTraceLog.append(sink.trace) }
         let adjusted = strokes.applying(to: result, path: gesture.path, layout: layout)
         return SequenceOutcome(
-            result: finish(adjusted, trace: evidence.aimedLetters),
+            result: finish(adjusted, trace: evidence.aimedLetters, path: gesture.path, keyWidth: layout.keyWidth),
             traced: evidence.aimedLetters
         )
     }
@@ -185,7 +195,7 @@ public final class LanguageModel {
     func tapReading(word: String, touches: [CGPoint], times: [Double], layout: LetterLayout) -> DecodeResult? {
         let letters = word.lowercased().filter(\.isLetter).map { String($0) }
         guard letters.count >= 2, letters.count == touches.count, letters.count == times.count else { return nil }
-        let thumbs = TapThumbs.assign(times: times, points: touches, midline: layout.handMidline)
+        let thumbs = TapThumbs.assign(times: times, points: touches, midline: layout.handMidline, letters: letters)
         guard thumbs.count == letters.count else { return nil }
         let observations = letters.indices.map { index in
             StrokeObservation(
@@ -204,11 +214,41 @@ public final class LanguageModel {
 
     /// Saved corrections first, then a swipe the user just deleted. The deletion only changes
     /// the order when that same word would have led a similar stroke.
-    private func finish(_ result: DecodeResult, trace: String) -> DecodeResult {
-        swipeRefusals.applying(
-            to: blocklist.applying(to: rejections.applying(to: ranking(result))),
+    private func finish(
+        _ result: DecodeResult,
+        trace: String,
+        path: [CGPoint] = [],
+        keyWidth: CGFloat = 36
+    ) -> DecodeResult {
+        let aimed = aims.applying(to: ranking(result), aimed: trace)
+        let retried = retries.applying(
+            to: aimed,
+            aimed: trace,
+            path: path,
+            keyWidth: keyWidth,
+            at: Date().timeIntervalSinceReferenceDate
+        )
+        if let refused = retried.refused {
+            swipeRefusals.note(word: refused, trace: trace)
+        }
+        return swipeRefusals.applying(
+            to: blocklist.applying(to: rejections.applying(to: retried.result)),
             trace: trace
         )
+    }
+
+    func noteGesture(aimed: String, path: [CGPoint], chosen: String) {
+        retries.note(aimed: aimed, path: path, chosen: chosen, at: Date().timeIntervalSinceReferenceDate)
+        aims.note(aimed: aimed, word: chosen)
+    }
+
+    /// The first revert only suppresses the correction for this session. The second persists it.
+    func noteAutocorrectRevert(preferred: String, rejected: String) {
+        let key = preferred.lowercased() + "\t" + rejected.lowercased()
+        revertCounts[key, default: 0] += 1
+        if revertCounts[key, default: 0] >= 2 {
+            rejections.note(preferred: preferred, rejected: rejected)
+        }
     }
 
     /// A familiar word can still lead. The follower bonus is applied in the search,

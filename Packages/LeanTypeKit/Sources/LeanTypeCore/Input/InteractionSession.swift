@@ -14,6 +14,9 @@ protocol SessionContext: AnyObject {
     /// How a character will appear if committed now (shift applied).
     func displayText(for character: String) -> String
 
+    /// Letters are still waiting out the leash, so a hold must not open the accent row.
+    var isInsideComposingWord: Bool { get }
+
     /// Text removed or put back by the last successful delete or restore. Empty otherwise.
     var performedText: String { get }
 

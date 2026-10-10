@@ -51,6 +51,7 @@ struct QualityOfLifeTests {
     @Test func holdingArmsTheRowAndReleasingEndsIt() {
         let harness = EngineHarness(traits: Self.plain)
         let id = harness.down(at: harness.point(for: "."))
+        harness.wait(GestureComposer.dwellDuration)
         #expect(harness.recorder.events.contains { if case .holdArmed = $0 { true } else { false } })
         harness.wait(CharacterTapSession.longPressDelay + 0.05)
         #expect(harness.recorder.events.contains(.alternatesPresented))

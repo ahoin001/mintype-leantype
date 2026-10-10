@@ -38,6 +38,7 @@ public struct Candidate: Hashable, Sendable {
         case insertText
         case replaceSuffix(match: String, with: String)
         case clipboard(ClipboardCommand)
+        case toggleBoundary
     }
 
     public let text: String
@@ -45,12 +46,21 @@ public struct Candidate: Hashable, Sendable {
     public let action: StripAction?
     /// The top two readings were close. The chip draws a dotted underline.
     public let unsure: Bool
+    /// Why this chip differs from the word that landed. Nil for the word itself.
+    public let difference: AlternativeKind?
 
-    public init(_ text: String, role: Role, action: StripAction? = nil, unsure: Bool = false) {
+    public init(
+        _ text: String,
+        role: Role,
+        action: StripAction? = nil,
+        unsure: Bool = false,
+        difference: AlternativeKind? = nil
+    ) {
         self.text = text
         self.role = role
         self.action = action
         self.unsure = unsure
+        self.difference = difference
     }
 }
 
